@@ -86,10 +86,11 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
 
     first_ready_time = min(readiness).strftime("%H:%M:%S") if readiness else None
     last_ready_time = max(readiness).strftime("%H:%M:%S") if readiness else None
-    opening_ready_seen = any(
-        "09:15:00" <= ready.strftime("%H:%M:%S") < "09:30:00"
-        for ready in readiness
-    )
+    opening_ready_seen = False
+    for ready in readiness:
+        if ready.hour == 9 and 15 <= ready.minute < 30:
+            opening_ready_seen = True
+            break
 
     return {
         "schema_version": 1,
