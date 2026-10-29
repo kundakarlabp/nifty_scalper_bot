@@ -800,7 +800,9 @@ def apply_patches() -> None:
             metadata = dict(getattr(signal, "metadata", {}) or {})
         candidate_symbol = normalize_symbol(getattr(signal, "symbol", ""))
         decision_epoch = time.time()
-        freshness_block = _approved_smc_freshness_block(signal, now_epoch=decision_epoch)
+        freshness_block = _approved_smc_freshness_block(
+            signal, now_epoch=decision_epoch
+        )
         if freshness_block is not None:
             _record(
                 self,
