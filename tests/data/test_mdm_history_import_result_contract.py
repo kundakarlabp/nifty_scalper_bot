@@ -382,3 +382,26 @@ def test_research_mode_history_import_keeps_afterhours_rows(
     assert result.success
     assert result.accepted_rows == 1
     assert mdm._candle_metrics["history_offsession_rows_quarantined_total"] == 0
+
+
+def test_candle_projection_labels_historical_size_reconciliation() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+    extra = dict(_bar(close=999.0))
+    extra["timestamp"] = extra["timestamp"] + timedelta(minutes=1)
+    mdm._ohlc[SYMBOL].append(extra)
+    mdm._refresh_candle_projection(SYMBOL, source="historical")
+
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
+    assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 1
+    assert len(mdm.get_ohlc_bars(SYMBOL)) == 1
+
+
+def test_same_length_corruption_is_not_expected_history_reconciliation() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+    mdm._ohlc[SYMBOL][0]["close"] = 999.0
+    mdm._refresh_candle_projection(SYMBOL, source="historical")
+
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
+    assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 0

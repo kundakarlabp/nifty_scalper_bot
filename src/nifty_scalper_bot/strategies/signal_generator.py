@@ -12,6 +12,7 @@ import dataclasses
 import datetime as dt
 import math
 import os
+import time as time_module
 from abc import ABC, abstractmethod
 from collections import deque
 from contextlib import suppress
@@ -1858,6 +1859,36 @@ class StrategyManager:
                             if futures_quote.get("average_price") is not None
                             else "average_traded_price"
                         )
+                    )
+                    # Evidence from the same quote the strategy consumed; no
+                    # second broker request or artificial index/FUT VWAP.
+                    quote_received = futures_quote.get("received_at")
+                    quote_age_s = None
+                    try:
+                        if quote_received is not None:
+                            quote_age_s = round(
+                                max(0.0, time_module.time() - float(quote_received)),
+                                2,
+                            )
+                    except (TypeError, ValueError, OverflowError):
+                        quote_age_s = None
+                    log_throttled(
+                        self._logger,
+                        f"future_vwap_provenance:{active_future}",
+                        "FUTURES_VWAP_PROVENANCE symbol=%s value=%.4f "
+                        "quote_field=%s quote_source=%s quote_age_s=%s "
+                        "ltp=%s instrument_token=%s",
+                        active_future,
+                        futures_vwap,
+                        indicators["futures_vwap_quote_field"],
+                        futures_quote.get("source"),
+                        quote_age_s,
+                        futures_ltp,
+                        (
+                            futures_quote.get("instrument_token")
+                            or futures_quote.get("token")
+                        ),
+                        interval_sec=300.0,
                     )
                 elif (
                     futures_ltp is not None
