@@ -151,6 +151,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
                 current_segment[role]["uncrossed_two_sided_depth_ticks"] += 1
         if full:
             c["five_level_depth_ticks"] += 1
+            if current_segment is not None:
+                current_segment[role]["five_level_depth_ticks"] += 1
         if type(tick.get("instrument_token")) is int and tick["instrument_token"] > 0:
             c["token_identified_ticks"] += 1
         prior = previous.get(role)
@@ -195,6 +197,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         for role in ("CE", "PE"):
             if segment[role]["uncrossed_two_sided_depth_ticks"] == 0:
                 segment_missing.append(f"{role}_no_two_sided_depth")
+            if segment[role]["five_level_depth_ticks"] == 0:
+                segment_missing.append(f"{role}_no_five_level_depth")
         if segment_missing:
             missing_requirements.update(segment_missing)
         else:
