@@ -1338,12 +1338,18 @@ def _emit_option_symbol_pipeline_status(
             )
             if token is not None:
                 broker_ws_token_requested = any(token in s for s in token_candidates)
-                broker_ws_token_active = any(
-                    token in s
-                    for s in (
-                        getattr(mdm, "_subscribed_tokens", set()),
-                        getattr(mdm, "_active_tokens", set()),
-                    )
+                # The broker's accepted current-generation WS tick is the
+                # authoritative proof. Internal _active_tokens/_subscribed_tokens
+                # are optional manager implementation details and were reporting
+                # False even while fresh, confirmed option ticks were flowing.
+                confirmed = getattr(mdm, "_confirmed_subscriptions", set())
+                desired = getattr(mdm, "_desired_tokens", set())
+                broker_ws_token_active = bool(
+                    token in confirmed
+                    and token in desired
+                    and live_tick_seen
+                    and last_tick_age_s is not None
+                    and last_tick_age_s <= 5.0
                 )
         except Exception:
             pass
