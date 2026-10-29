@@ -936,6 +936,21 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     assert all(event["sweep_ts"] <= option_ts for event in strategy._events.values())
 
 
+@pytest.mark.parametrize("invalid_anchor", ["not-a-timestamp", "2026-99-99"])
+def test_smc_invalid_option_bar_anchor_cannot_authorize_futures_structure(
+    monkeypatch, invalid_anchor
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    result = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=invalid_anchor), 102.0
+    )
+    assert result is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy._events == {}
+
+
 def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) -> None:
     """The confirmation bar must be completed before the option observation."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
