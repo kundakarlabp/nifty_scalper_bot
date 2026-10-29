@@ -13,6 +13,7 @@ from nifty_scalper_bot.backtesting.replay import (
 )
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
 class _DummyDataHub:
@@ -21,10 +22,10 @@ class _DummyDataHub:
         self.baskets: list[dict[str, object]] = []
 
     def get_quote(self, symbol: str, allow_pull: bool = False) -> dict[str, float]:
-        return self.quotes.setdefault(symbol, {"ltp": 100.0})
+        return self.quotes.setdefault(normalize_symbol(symbol), {"ltp": 100.0})
 
     def store_quote(self, symbol: str, quote: dict[str, float], *, source: str) -> None:
-        self.quotes[symbol] = dict(quote)
+        self.quotes[normalize_symbol(symbol)] = dict(quote)
 
     def set_active_contract_basket(self, basket: dict[str, object]) -> None:
         self.baskets.append(dict(basket))
@@ -356,8 +357,8 @@ def test_paper_fill_uses_measured_execution_calibration() -> None:
     hub = _DummyDataHub()
     hub.quotes["NSE:OPT"] = {"ltp": 100.0, "bid": 99.9, "ask": 100.1}
     paper = PaperFillEngine(hub, _DummyResolver())
-    now = 1_000.0
-    paper.set_clock(lambda: now)
+    now = [1_000.0]
+    paper.set_clock(lambda: now[0])
 
     calibration = paper.calibrate_from_completed_trades(
         [
@@ -386,9 +387,21 @@ def test_paper_fill_uses_measured_execution_calibration() -> None:
     assert calibration["exit_slippage_bps_p50"] == 12.0
     assert calibration["entry_fill_latency_seconds_p50"] == pytest.approx(0.4)
     assert calibration["exit_fill_latency_seconds_p50"] == pytest.approx(0.8)
-    assert order["average_price"] == pytest.approx(100.1)
-    assert order["fill_latency_seconds"] == pytest.approx(0.4)
-    assert order["first_fill_timestamp"] == pytest.approx(1_000.4)
+    assert order["status"] == "open"
+    assert order["filled_quantity"] == 0
+    assert order["average_price"] is None
+    now[0] = 1_000.39
+    paper.process_quote("OPT")
+    assert paper.get_orders()[0]["status"] == "open"
+
+    now[0] = 1_000.4
+    hub.quotes["NSE:OPT"] = {"ltp": 101.0, "bid": 100.9, "ask": 101.1}
+    paper.process_quote("OPT")
+    filled_entry = paper.get_orders()[0]
+    assert filled_entry["status"] == "complete"
+    assert filled_entry["average_price"] == pytest.approx(101.1)
+    assert filled_entry["fill_latency_seconds"] == pytest.approx(0.4)
+    assert filled_entry["first_fill_timestamp"] == pytest.approx(1_000.4)
 
     exit_order = paper.place_order(
         {
@@ -398,9 +411,53 @@ def test_paper_fill_uses_measured_execution_calibration() -> None:
             "order_type": "MARKET",
         }
     )
-    assert exit_order["average_price"] == pytest.approx(99.88)
-    assert exit_order["fill_latency_seconds"] == pytest.approx(0.8)
-    assert exit_order["first_fill_timestamp"] == pytest.approx(1_000.8)
+    assert exit_order["status"] == "open"
+    now[0] = 1_001.19
+    paper.process_quote("OPT")
+    assert paper.get_orders()[1]["status"] == "open"
+    now[0] = 1_001.2
+    hub.quotes["NSE:OPT"] = {"ltp": 100.0, "bid": 99.9, "ask": 100.1}
+    paper.process_quote("OPT")
+    filled_exit = paper.get_orders()[1]
+    assert filled_exit["average_price"] == pytest.approx(99.88)
+    assert filled_exit["fill_latency_seconds"] == pytest.approx(0.8)
+    assert filled_exit["first_fill_timestamp"] == pytest.approx(1_001.2)
+
+
+def test_replay_uses_first_post_latency_quote_without_explicit_clock() -> None:
+    hub = _DummyDataHub()
+    paper = PaperFillEngine(hub, _DummyResolver())
+    paper.calibrate_from_completed_trades(
+        [{"execution_quality": {"entry_submit_to_fill_seconds": 30.0}}]
+    )
+
+    class _PlacingRunner(_DummyRunner):
+        def on_tick_event(self, tick: dict[str, float]) -> None:
+            super().on_tick_event(tick)
+            if tick["symbol"] == "OPT" and not paper.get_orders():
+                order = paper.place_order(
+                    {
+                        "symbol": "OPT",
+                        "transaction_type": "BUY",
+                        "quantity": 10,
+                        "order_type": "MARKET",
+                    }
+                )
+                assert order["status"] == "open"
+
+    frame = _sample_frame().iloc[:2]
+    result = ReplayHarness(_PlacingRunner(), paper, option_symbol="OPT").run_dataframe(
+        frame
+    )
+
+    assert len(result.orders) == 1
+    order = result.orders[0]
+    assert order["status"] == "complete"
+    assert order["average_price"] == pytest.approx(101.7)
+    assert order["first_fill_timestamp"] == pytest.approx(
+        frame.index[1].to_pydatetime().timestamp()
+    )
+    assert order["fill_latency_seconds"] == pytest.approx(60.0)
 
 
 def test_replay_harness_applies_completed_outcome_fill_calibration() -> None:

@@ -1,4 +1,10 @@
-"""Minute-bar replay harness for exercising the live trading stack."""
+"""Minute-bar replay harness for exercising the live trading stack.
+
+Responsibilities: Feed causal, availability-aligned market observations and
+supply historical time to PaperFillEngine even without an injected clock.
+Boundaries: Reuses production tick ingress and paper execution; no broker IO.
+Safety: Never dispatch a completed bar before its availability timestamp.
+"""
 
 from __future__ import annotations
 
@@ -122,6 +128,7 @@ class ReplayHarness:
         self._option_symbol = option_symbol
         self._index_symbol = index_symbol
         self._clock = clock
+        self._replay_epoch = 0.0
         self._contract_catalog = contract_catalog
         self._active_basket_key: tuple[Any, ...] | None = None
         self._fill_calibration = None
@@ -130,8 +137,10 @@ class ReplayHarness:
             self._fill_calibration = calibrate(list(calibration_outcomes))
         clock_time = getattr(clock, "time", None)
         set_clock = getattr(paper_engine, "set_clock", None)
-        if callable(clock_time) and callable(set_clock):
-            set_clock(clock_time)
+        if callable(set_clock):
+            set_clock(
+                clock_time if callable(clock_time) else lambda: self._replay_epoch
+            )
 
     def run_dataframe(
         self, data: pd.DataFrame, *, bar_interval: timedelta | None = None
@@ -163,6 +172,7 @@ class ReplayHarness:
         bars = 0
         for timestamp, row in frame.iterrows():
             tick_time = timestamp.to_pydatetime()
+            self._replay_epoch = tick_time.timestamp()
             if self._clock is not None:
                 self._clock.advance_to(tick_time)
             option_symbol = self._option_symbol
