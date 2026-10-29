@@ -1276,6 +1276,13 @@ class SMCStrategy(EliteStrategy):
                         else "smc_range_corroboration_missing"
                     )
                     return None
+                # In TREND, price displacement by itself is not independent
+                # proof of a lasting reversal. Require the existing distinct
+                # traded-volume, causally dated BOS/CHOCH, or retest-and-reclaim
+                # evidence. No additional OrderFlow vote is manufactured here.
+                if regime != MarketRegime.RANGE and not quality_corroborated:
+                    self._no_vote("smc_trend_corroboration_missing")
+                    return None
                 # SMC owns the structural setup. StrategyManager already owns
                 # independent confirmation (fresh OrderFlow or another trigger);
                 # do not duplicate that gate with correlated option features here.
