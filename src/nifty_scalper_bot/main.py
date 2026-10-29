@@ -2,6 +2,7 @@
 
 Responsibilities: Initialize canonical settings, supervise the app background task,
 expose /livez, /readyz, /releasez and structured health/status diagnostics,
+and authenticate host-local administrative daily-risk requests,
 and provide explicit startup/shutdown management.
 Health also reports effective, read-only canonical risk settings.
 Health labels separate execution permission from observed signal pipeline activity.
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.defaults import (
@@ -358,6 +359,101 @@ def _latest_context():
         return get_latest_bot_context()
     except Exception:
         return None
+
+
+def _require_local_risk_command(request: Request, action: str) -> None:
+    """Require an unproxied loopback peer and a recent signed owner command."""
+    from nifty_scalper_bot.admin_owner_auth import verify_local_engine_command
+
+    peer = request.client.host if request.client else ""
+    if peer not in {"127.0.0.1", "::1"} or any(
+        key in request.headers for key in ("x-forwarded-for", "forwarded", "x-real-ip")
+    ):
+        raise HTTPException(status_code=403, detail="risk_control_loopback_only")
+    token = request.headers.get("x-nifty-internal-command", "")
+    if not verify_local_engine_command(token, action):
+        raise HTTPException(status_code=403, detail="risk_control_authorization_failed")
+
+
+def _risk_control_state(ctx: Any) -> dict[str, Any]:
+    """Report the actual engine risk-switch budget, not cash affordability."""
+    risk = getattr(ctx, "risk_manager", None)
+    if risk is None:
+        risk = getattr(getattr(ctx, "order_manager", None), "_risk_manager", None)
+    if risk is None:
+        raise HTTPException(status_code=503, detail="live_risk_manager_unavailable")
+    switches = getattr(risk, "_switches", None)
+    if switches is None:
+        raise HTTPException(status_code=503, detail="live_risk_switches_unavailable")
+    cap = float(switches.max_day_loss)
+    loss = float(switches.day_loss())
+    manager = getattr(risk, "position_manager", None)
+    date_reader = getattr(manager, "_trading_date_ist", None)
+    today = str(date_reader()) if callable(date_reader) else ""
+    return {
+        "trading_date": today,
+        "daily_loss_cap": round(cap, 2),
+        "day_loss_since_reset": round(loss, 2),
+        "remaining_daily_risk_budget": round(max(cap - loss, 0.0), 2),
+        "reset_applied_today": bool(
+            today and getattr(risk, "_operator_reset_trading_date", "") == today
+        ),
+        "consecutive_losses": int(switches.consecutive_losses()),
+        "cooldown_remaining_seconds": round(switches.cooldown_remaining(), 1),
+        "breaker_tripped": bool(getattr(risk, "_breaker_tripped", False)),
+        "breaker_reason": str(getattr(risk, "_breaker_reason", "") or "")[:120],
+    }
+
+
+@app.get("/internal/admin/risk/status")  # type: ignore[untyped-decorator]
+def local_risk_status(request: Request) -> dict[str, Any]:
+    _require_local_risk_command(request, "risk_status")
+    ctx = _latest_context()  # type: ignore[no-untyped-call]
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="live_engine_unavailable")
+    return _risk_control_state(ctx)
+
+
+@app.post("/internal/admin/risk/reset-day")  # type: ignore[untyped-decorator]
+def local_risk_reset(request: Request) -> dict[str, Any]:
+    """One verified host-local operator rebase; no restart or broker order."""
+    _require_local_risk_command(request, "risk_reset")
+    ctx = _latest_context()  # type: ignore[no-untyped-call]
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="live_engine_unavailable")
+    if (
+        not bool(getattr(ctx, "position_reconciliation_completed", False))
+        or bool(getattr(ctx, "position_reconciliation_failed", False))
+        or bool(getattr(ctx, "unprotected_broker_positions", None))
+    ):
+        raise HTTPException(status_code=409, detail="broker_reconciliation_unverified")
+    risk = getattr(ctx, "risk_manager", None)
+    if risk is None:
+        risk = getattr(getattr(ctx, "order_manager", None), "_risk_manager", None)
+    manager = getattr(risk, "position_manager", None)
+    if (
+        manager is None
+        or not callable(getattr(manager, "get_all_positions", None))
+        or not callable(getattr(manager, "get_pending_orders", None))
+    ):
+        raise HTTPException(status_code=503, detail="position_state_unavailable")
+    if manager.get_all_positions() or manager.get_pending_orders():
+        raise HTTPException(status_code=409, detail="broker_positions_or_orders_open")
+    resetter = getattr(risk, "operator_reset_daily_loss_budget", None)
+    if not callable(resetter):
+        raise HTTPException(status_code=503, detail="live_risk_manager_unavailable")
+    try:
+        result = resetter()
+    except ValueError as exc:
+        if str(exc) == "daily_risk_reset_already_applied":
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        raise HTTPException(
+            status_code=503, detail="daily_risk_state_unverified"
+        ) from None
+    except Exception:
+        LOG.exception("OPERATOR_DAILY_RISK_RESET_FAILED")
+        raise HTTPException(status_code=503, detail="daily_risk_reset_failed") from None
+    return {"state": "applied", "risk": _risk_control_state(ctx), "prior": result}
 
 
 def _context_blockers(ctx) -> list[str]:  # noqa: ANN001

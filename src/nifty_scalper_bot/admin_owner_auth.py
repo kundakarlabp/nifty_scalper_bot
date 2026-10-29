@@ -2,6 +2,7 @@
 
 Responsibilities:
 - Issue signed short-lived login challenges and owner browser sessions.
+- Sign and validate short-lived loopback-only admin-to-engine control messages.
 - Validate browser form origins using signed, cookie-bound owner challenges.
 - Persist a random signing key in the host's private configuration directory.
 - Never treat the Kite request token, public API key, or a guessed user ID as authority.
@@ -204,4 +205,37 @@ def valid_owner_session(request: Request, expected_user_id: str) -> bool:
         and isinstance(payload.get("uid"), str)
         and hmac.compare_digest(str(payload["uid"]), expected_user_id)
         and time.time() - issued_at <= SESSION_TTL_SECONDS
+    )
+
+
+def issue_local_engine_command(action: str) -> str:
+    """Sign one narrowly scoped host-local operator command, never a browser token."""
+    if action not in {"risk_status", "risk_reset"}:
+        raise ValueError("unsupported internal command")
+    return _pack(
+        {
+            "kind": "local_engine_command",
+            "action": action,
+            "iat": int(time.time()),
+            "nonce": secrets.token_urlsafe(24),
+        }
+    )
+
+
+def verify_local_engine_command(token: str, action: str) -> bool:
+    """Validate the signed command, exact action and a 20-second delivery window."""
+    if action not in {"risk_status", "risk_reset"}:
+        return False
+    payload = _unpack(token)
+    if not payload:
+        return False
+    issued = payload.get("iat")
+    nonce = payload.get("nonce")
+    return bool(
+        payload.get("kind") == "local_engine_command"
+        and payload.get("action") == action
+        and isinstance(nonce, str)
+        and len(nonce) >= 24
+        and isinstance(issued, int)
+        and 0 <= time.time() - issued <= 20
     )
