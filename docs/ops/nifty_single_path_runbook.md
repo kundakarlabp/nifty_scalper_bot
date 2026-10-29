@@ -85,6 +85,10 @@ per-position or continuous broker stop-coverage proof**. The fixed
 `restart_cause` value remains `unknown_without_process_and_deployment_events`
 until independent release and systemd process evidence establishes a cause.
 Do not infer a crash, successful stop, or safe redeployment from log counts.
+`first_live_ready_at_ist` records the earliest observed READY transition and
+`opening_window_ready_event_observed` records a READY marker in 09:15–09:29 IST.
+Neither establishes continuous availability or proves the engine was down
+when a marker was absent. The new fields are optional for old archive senders.
 
 A new live archive appears only during a normal weekday market session; on
 weekends the old finalized days correctly retain their prior schema. Check
