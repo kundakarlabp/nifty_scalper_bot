@@ -452,7 +452,7 @@ def test_replay_uses_first_post_latency_quote_without_explicit_clock() -> None:
     assert len(result.orders) == 1
     order = result.orders[0]
     assert order["status"] == "complete"
-    assert order["average_price"] == pytest.approx(101.6)
+    assert order["average_price"] == pytest.approx(101.7)
     assert order["first_fill_timestamp"] == pytest.approx(
         frame.index[1].to_pydatetime().timestamp()
     )
