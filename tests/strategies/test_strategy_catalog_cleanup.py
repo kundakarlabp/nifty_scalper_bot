@@ -95,6 +95,40 @@ def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> 
     assert evidence["execution_evidence_pass"] is False
 
 
+def test_execution_evidence_rejects_supplied_understated_spread(monkeypatch) -> None:
+    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
+    quote = {
+        "underlying_direction_bias": "CE",
+        "required_data_present": True,
+        "bid": 95.0,
+        "ask": 105.0,
+        "spread_pct": 0.1,  # stale/mis-scaled producer value
+    }
+    evidence = build_execution_evidence(quote, side="CE")
+
+    assert evidence["bid_ask_valid"] is True
+    assert evidence["spread_observed"] is True
+    assert evidence["spread_pct"] == 10.0
+    assert evidence["spread_ok"] is False
+    assert evidence["execution_evidence_pass"] is False
+
+
+def test_execution_evidence_keeps_more_conservative_supplied_spread(monkeypatch) -> None:
+    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
+    evidence = build_execution_evidence(
+        {
+            "bid": 99.9,
+            "ask": 100.1,
+            "spread_pct": 2.0,  # do not discard stricter producer evidence
+        },
+        side="CE",
+    )
+
+    assert evidence["spread_pct"] == 2.0
+    assert evidence["spread_ok"] is False
+    assert evidence["execution_evidence_pass"] is False
+
+
 def test_proven_quote_evidence_requires_finite_bid_ask_and_spread(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
     baseline = {
