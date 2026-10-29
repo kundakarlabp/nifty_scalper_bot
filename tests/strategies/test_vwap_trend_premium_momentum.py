@@ -869,3 +869,16 @@ def test_strict_continuation_is_default_off(monkeypatch):
     )
     assert signal is not None
     assert signal.metadata["vwap_strict_continuation_enabled"] is False
+
+
+def test_strict_continuation_does_not_restrict_vwap_reclaim(monkeypatch):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
+    _, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        is_complete=False,
+    )
+    assert signal is not None
+    assert signal.metadata["setup_type"] == "vwap_reclaim_momentum"
+    assert signal.metadata["vwap_finalized_bar_required"] is False
