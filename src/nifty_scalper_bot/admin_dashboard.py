@@ -405,9 +405,9 @@ def _daily_risk_panel(owner_verified: bool) -> str:
         return '<p class="muted">Verify the Zerodha owner session to view risk allowance.</p>'
     try:
         risk = _engine_risk_request("risk_status")
-        cap = float(risk["daily_loss_cap"])
-        loss = float(risk["day_loss_since_reset"])
-        remaining = float(risk["remaining_daily_risk_budget"])
+        cap = float(str(risk["daily_loss_cap"]))
+        loss = float(str(risk["day_loss_since_reset"]))
+        remaining = float(str(risk["remaining_daily_risk_budget"]))
         applied = bool(risk["reset_applied_today"])
     except (RuntimeError, ValueError, KeyError, TypeError):
         return '<p class="warning">Engine risk state unavailable; reset disabled.</p>'
