@@ -561,9 +561,7 @@ def test_adaptive_lock_rejects_noncausal_or_nonfinite_quote_clock(
             datetime.now(timezone.utc) + timedelta(seconds=120)
         ).isoformat()
 
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
     assert bracket.sl_trigger_price == 94.0
 
 
