@@ -1,7 +1,9 @@
-"""Paper execution simulator with queue, depth and observed-time fill calibration.
+"""Paper execution simulator with queue, depth and calibrated fill timing.
 
-Calibrated latency defers eligibility until a later quote; it never backdates
-execution or fills from a future observation. This is not a live broker path.
+Responsibilities: Model paper market/limit fills, partial depth, brokerage,
+calibrated slippage and delayed eligibility using the next observed quote.
+Boundaries: Consumes DataHub quotes; never places live broker orders.
+Safety: Never credit a fill before the calibrated latency has elapsed.
 """
 
 from __future__ import annotations
