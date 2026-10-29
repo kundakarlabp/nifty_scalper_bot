@@ -139,7 +139,6 @@ def verify_challenge(request: Request, submitted: str) -> bool:
     )
 
 
-
 def require_challenge_bound_form(request: Request, submitted: str) -> None:
     """Protect a mobile token POST even when referrer headers are suppressed.
 
