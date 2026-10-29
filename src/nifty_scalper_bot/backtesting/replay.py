@@ -1,7 +1,9 @@
 """Minute-bar replay harness for exercising the live trading stack.
 
-Feeds causal, availability-aligned market observations and supplies historical
-time to the paper execution simulator, including when no clock is injected.
+Responsibilities: Feed causal, availability-aligned market observations and
+supply historical time to PaperFillEngine even without an injected clock.
+Boundaries: Reuses production tick ingress and paper execution; no broker IO.
+Safety: Never dispatch a completed bar before its availability timestamp.
 """
 
 from __future__ import annotations
