@@ -12,6 +12,12 @@ from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrate
 from nifty_scalper_bot.strategies.signal_identity import deterministic_signal_id
 
 
+@pytest.fixture(autouse=True)
+def _prior_thesis_identity_profile(monkeypatch):
+    """These fixtures isolate thesis recovery from new entry-quality evidence."""
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
+
+
 class _HistoryEngine:
     def __init__(self, rows):
         self.rows = list(rows)

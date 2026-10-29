@@ -646,7 +646,8 @@ def _approved_vwap_continuation_freshness_block(
         return None
     if str(metadata.get("setup_type") or "") != "vwap_continuation":
         return None
-    if not _env_true("VWAP_STRICT_CONTINUATION_ENABLED"):
+    profile = os.getenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
+    if str(profile).strip().lower() not in TRUTHY:
         return None
 
     anchor = _coerce_epoch_seconds(metadata.get("setup_candle_timestamp"))

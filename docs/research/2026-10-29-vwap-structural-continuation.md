@@ -15,7 +15,7 @@ External references: [TradingView confirmed bars](https://www.tradingview.com/pi
 
 ## Implementation
 
-`VWAP_STRICT_CONTINUATION_ENABLED=false` is default-off and applies specifically
+`VWAP_STRICT_CONTINUATION_ENABLED=true` is default-on and applies specifically
 to `vwap_continuation` (other setup subtypes retain their original rules).
 The strategy uses completed observation-bar timestamps deterministically.
 The existing `strategy_live_safety` boundary separately checks the original
@@ -54,4 +54,27 @@ reports opt-in state and qualifying proof (when approved).
   always safer: it may worsen entry prices.
 - Keep the unmerged same-setup entry-chase PR #1917 separate until its
   formatting, broker reconciliation and CI gates pass.
-- Candidate is `RESEARCH_CANDIDATE`; no demonstrated alpha or live deployment.
+- The quality gate is default-on in source; rollout must retain the existing
+broker-flat release and monitoring safeguards. Candidate is
+`ENGINEERING_CORRECT` only once full CI passes; no demonstrated alpha.
+
+## 29 October default-on operational decision
+
+The operator explicitly selected default-on structural qualification. The same
+variable controls both VWAPPro's strategy-owned finalized-breakout rule and
+the canonical live-safety original-thesis timeout; they cannot drift by default.
+An explicit `false` value is the rollback. This does **not** enable the broker,
+change execution mode, or weaken risk, stops, or position reconciliation.
+
+All directional live triggers are mapped once in the canonical builder:
+VWAPPro uses completed premium breakout/retest or momentum continuation;
+SMC requires completed futures sweep/displacement and independent existing
+volume or timestamped BOS/CHOCH evidence (or paired retest and premium reclaim);
+ORBPro already requires completed futures range, volume/penetration, and
+momentum or a held retest. OrderFlow remains context-only; other analysis
+providers cannot authorize new entries. Expiry gamma is isolated by
+`STRATEGY_MODE=expiry_gamma` and `ALLOW_EXPIRY_GAMMA_STRATEGIES`.
+
+The separate PR #1917 remains unmerged because its broker-submit façade
+wrapper violates the single-runtime-owner architecture contract. This change
+does not adopt or rely on that implementation.

@@ -447,7 +447,7 @@ def test_volume_spike_config_is_consumed_as_structural_confirmation(
     assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
-def test_smc_setup_leaves_independent_confirmation_to_strategy_manager(
+def test_smc_naked_trend_sweep_cannot_be_rescued_by_manager_confirmation(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -508,11 +508,8 @@ def test_smc_setup_leaves_independent_confirmation_to_strategy_manager(
         103.0,
     )
 
-    assert signal is not None
-    assert signal.metadata["requires_independent_confirmation"] is True
-    assert signal.metadata["confirmation_owner"] == "StrategyManager"
-    assert signal.metadata["smc_local_support_present"] is False
-    assert signal.metadata["smc_local_support_sources"] == []
+    assert signal is None
+    assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
 
 
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
@@ -734,7 +731,7 @@ def test_smc_contract_switch_cannot_reset_prior_option_risk_reference(
         ("RANGE", False, False),
         ("CHOPPY", False, False),
         ("RANGE", True, False),
-        ("TREND", False, True),
+        ("TREND", False, False),
     ],
 )
 def test_regime_aware_smc_requires_corroboration_in_ranges(
@@ -765,14 +762,17 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
     if should_vote:
         assert signal is not None
         assert signal.metadata["smc_regime"] in {"RANGE", "TREND"}
-        assert signal.metadata["smc_quality_corroborated"] is structure
+        assert signal.metadata["smc_quality_corroborated"] is True
     else:
         assert signal is None
-        assert strategy.last_no_vote_reason == (
-            "smc_range_correlated_structure_only"
-            if structure
-            else "smc_range_corroboration_missing"
-        )
+        if regime == "TREND":
+            assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
+        else:
+            assert strategy.last_no_vote_reason == (
+                "smc_range_correlated_structure_only"
+                if structure
+                else "smc_range_corroboration_missing"
+            )
 
 
 @pytest.mark.parametrize(
@@ -804,8 +804,13 @@ def test_smc_manager_option_structure_must_follow_its_actual_sweep(
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
     signal = strategy.generate_signal(CE, indicators, 103.0)
-    assert signal is not None
-    assert signal.metadata["structure_confirmed"] is should_vote
+    if should_vote:
+        assert signal is not None
+        assert signal.metadata["structure_confirmed"] is True
+        assert signal.metadata["smc_quality_corroborated"] is True
+    else:
+        assert signal is None
+        assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
 
 
 def test_smc_manager_option_retest_and_reclaim_do_not_use_pre_sweep_bars(
@@ -1200,3 +1205,52 @@ def test_range_smc_accepts_timestamped_retest_reclaim(monkeypatch) -> None:
     signal = strategy.generate_signal(CE, ctx, 103.0)
     assert signal is not None
     assert signal.metadata["smc_quality_corroborated"] is True
+
+
+def test_trend_smc_accepts_timestamped_structure_without_volume(monkeypatch) -> None:
+    """An independently dated post-sweep BOS can validate trend displacement."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984))
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="TREND",
+        bos_confirmed=True,
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+        smc_enrichment_source="strategy_manager_pre_strategy",
+    )
+    assert strategy.generate_signal(CE, ctx, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997))
+    ctx.update(
+        latest_bar_ts=rows[-1]["timestamp"],
+        bos_ts_epoch=rows[-1]["timestamp"].timestamp(),
+    )
+    signal = strategy.generate_signal(CE, ctx, 103.0)
+    assert signal is not None
+    assert signal.metadata["smc_quality_corroborated"] is True
+    assert "structure" in signal.metadata["smc_local_support_sources"]
+
+
+def test_trend_smc_rejects_untimed_structure_without_volume(monkeypatch) -> None:
+    """A stale or unversioned structure label cannot compensate for thin flow."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984))
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="TREND",
+        bos_confirmed=True,
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+        smc_enrichment_source="strategy_manager_pre_strategy",
+    )
+    assert strategy.generate_signal(CE, ctx, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997))
+    ctx["latest_bar_ts"] = rows[-1]["timestamp"]
+    assert strategy.generate_signal(CE, ctx, 103.0) is None
+    assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"

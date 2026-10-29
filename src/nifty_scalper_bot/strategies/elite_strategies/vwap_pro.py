@@ -6,7 +6,7 @@
 Responsibilities: Calculate premium and underlying evidence, scope VWAP thesis
 to the originating option contract, and report effective context gate settings.
 Safety: Never bypass fresh bars, bid/ask quality, trend proof, risk geometry or
-live trade safeguards merely to increase candidate frequency. A default-off
+live trade safeguards merely to increase candidate frequency. The default-on
 continuation-quality profile checks completed-bar breakout/retest provenance.
 """
 from __future__ import annotations
@@ -195,10 +195,11 @@ class VWAPProStrategy(EliteStrategy):
             os.getenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
 
-        # Research-only continuation profile: preserve the ordinary LIVE rule
-        # until matched executable-quote replay supports promotion.
+        # Active by default for LIVE and SHADOW, with one explicit rollback.
+        # Only continuation candidates are affected; other VWAP subtypes retain
+        # their existing proof and completed-bar policies.
         self._strict_continuation_enabled = str(
-            os.getenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
+            os.getenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
         ).strip().lower() in {"1", "true", "yes", "on"}
 
         # get_session_vwap_slope() returns percentage change over finalized
@@ -867,8 +868,8 @@ class VWAPProStrategy(EliteStrategy):
             )
             if premium_momentum_required or self._require_finalized_signal_bar or strict_continuation_bar_required:
                 # Confirm exactly the completed premium candle used by this vote.
-                # One proof owner serves both research profiles without a second
-                # signal path or an unconditional LIVE admission change.
+                # One proof owner serves both entry profiles without a second
+                # signal path or any alternate order execution authority.
                 bar_getter = getattr(self._indicator_engine, "get_history", None)
                 try:
                     last_bars = (
@@ -1103,7 +1104,7 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("vwap_event_unconfirmed")
                 return None
 
-            # Research profile: a bullish candle above VWAP is insufficient by
+            # Default-on quality profile: a bullish candle above VWAP is insufficient by
             # itself. Require a recent structural thesis, finalized breakout
             # bar and either a genuine as-of-VWAP retest or strong momentum.
             # OFI remains a separate context vote and cannot waive this proof.

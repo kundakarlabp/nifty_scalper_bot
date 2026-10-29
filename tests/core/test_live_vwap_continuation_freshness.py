@@ -51,8 +51,8 @@ def test_missing_vwap_anchor_fails_closed(monkeypatch, anchor):
     assert block["reason"] == "live_vwap_thesis_timestamp_missing"
 
 
-def test_no_retroactive_live_change_when_disabled(monkeypatch):
-    monkeypatch.delenv("VWAP_STRICT_CONTINUATION_ENABLED", raising=False)
+def test_explicit_vwap_quality_rollback_only_when_disabled(monkeypatch):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
     assert (
         _approved_vwap_continuation_freshness_block(
             _signal(NOW - timedelta(minutes=10)), now_epoch=EPOCH
@@ -85,3 +85,12 @@ def test_future_and_nonfinite_decision_time_rejected(monkeypatch):
         _signal(NOW), now_epoch=float("nan")
     )
     assert missing_clock["reason"] == "live_vwap_clock_unavailable"
+
+
+def test_unset_vwap_quality_switch_enforces_real_entry_age(monkeypatch):
+    monkeypatch.delenv("VWAP_STRICT_CONTINUATION_ENABLED", raising=False)
+    block = _approved_vwap_continuation_freshness_block(
+        _signal(NOW - timedelta(seconds=231)), now_epoch=EPOCH
+    )
+    assert block is not None
+    assert block["reason"] == "live_vwap_thesis_expired"
