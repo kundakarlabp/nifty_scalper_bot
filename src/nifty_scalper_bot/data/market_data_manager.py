@@ -9524,7 +9524,12 @@ class MarketDataManager:
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(now_wall)
-            self._last_quote_ts_ms[symbol] = self._now_ms()
+            accepted_at_ms = self._now_ms()
+            self._last_quote_ts_ms[symbol] = accepted_at_ms
+            bid = _coerce_float(cached_tick.get("bid"))
+            ask = _coerce_float(cached_tick.get("ask"))
+            if bid is not None and ask is not None and 0 < bid <= ask:
+                self._last_mid[symbol] = ((bid + ask) / 2.0, accepted_at_ms)
         staleness_seconds = 0.0
         try:
             staleness_seconds = max(time.time() - float(wallclock), 0.0)
