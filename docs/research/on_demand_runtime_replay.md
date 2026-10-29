@@ -87,8 +87,11 @@ python scripts/run_runtime_replay.py \
 
 This command is strictly **on demand**. Each scenario runs two isolated,
 credential-sanitized no-network subprocesses of the production-composition
-replay: `ADAPTIVE_PROFIT_LOCK_ENABLED=false` (the current policy) versus
-`true` (the research candidate). Environment and entry/exit choices remain
+replay: `ADAPTIVE_PROFIT_LOCK_ENABLED=false` (the disabled *legacy research control*)
+versus `true` (the adaptive policy). Actual broker LIVE defaults to adaptive-on
+when no explicit operator override is present; the disabled control must **not**
+be described as the deployed baseline without effective runtime evidence.
+Environment and entry/exit choices remain
 under the same captured strategy, risk and session policy. Replaying the
 session does **not** activate adaptive trailing in the production engine.
 
