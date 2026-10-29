@@ -1008,10 +1008,13 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
             "/admin?riskreset=err&msg=" + urllib.parse.quote(reason),
             status_code=303,
         )
-    LOGGER.warning(
-        "ADMIN_RISK_RESET_ENGINE_ACK trading_date=%s",
-        result["risk"].get("trading_date", "unknown"),
+    risk_state = result.get("risk")
+    reset_date = (
+        str(risk_state.get("trading_date", "unknown"))
+        if isinstance(risk_state, dict)
+        else "unknown"
     )
+    LOGGER.warning("ADMIN_RISK_RESET_ENGINE_ACK trading_date=%s", reset_date)
     return RedirectResponse("/admin?riskreset=ok", status_code=303)
 
 
