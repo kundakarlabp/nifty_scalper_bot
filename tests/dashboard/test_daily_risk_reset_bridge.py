@@ -192,3 +192,40 @@ def test_owner_dashboard_shows_real_budget_only_after_auth(monkeypatch):
         },
     )
     assert reset_form not in admin_dashboard._daily_risk_panel(True)
+
+
+def test_risk_control_stays_visible_when_engine_in_auto_quiet(monkeypatch):
+    from nifty_scalper_bot import operating_control
+
+    def unavailable(_action):
+        raise RuntimeError("engine_risk_request_unavailable")
+
+    monkeypatch.setattr(admin_dashboard, "_engine_risk_request", unavailable)
+    monkeypatch.setattr(operating_control, "engine_should_run", lambda: False)
+    panel = admin_dashboard._daily_risk_panel(True)
+    assert "AUTO QUIET" in panel
+    assert "Reset daily risk" in panel
+    assert "disabled" in panel
+    assert 'action="/admin/risk/reset-day"' not in panel
+    assert "No reset was applied or queued" in panel
+
+
+def test_reset_rejects_forged_engine_ack_without_applied_marker(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(
+                {"state": "applied", "risk": {"reset_applied_today": False}}
+            ).encode("utf-8")
+
+    monkeypatch.setattr(admin_owner_auth, "_signing_key", lambda: b"K" * 32)
+    monkeypatch.setattr(
+        admin_dashboard.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+    with pytest.raises(RuntimeError, match="engine_risk_response_unverified"):
+        admin_dashboard._engine_risk_request("risk_reset")
