@@ -124,6 +124,75 @@ def test_forward_path_ignores_out_of_horizon_and_invalid_prices() -> None:
     assert label.terminal_r == 0.5
 
 
+def test_forward_path_rejects_cross_contract_quote_contamination() -> None:
+    contract = "NFO:NIFTY26N0322750CE"
+    different = "NFO:NIFTY26N0322800CE"
+    quotes = [
+        {"timestamp": 101.0, "symbol": contract, "bid": 100.0},
+        {"timestamp": 102.0, "symbol": different, "bid": 150.0},
+    ]
+
+    assert (
+        label_forward_option_buy_path(
+            quotes,
+            decision_ts=100.0,
+            entry_price=100.0,
+            risk_points=10.0,
+            horizon_seconds=5.0,
+        )
+        is None
+    )
+    assert (
+        label_forward_option_buy_path(
+            quotes,
+            decision_ts=100.0,
+            entry_price=100.0,
+            risk_points=10.0,
+            horizon_seconds=5.0,
+            expected_symbol=contract,
+        )
+        is None
+    )
+
+
+def test_forward_path_verifies_exact_contract_when_requested() -> None:
+    contract = "NFO:NIFTY26N0322750CE"
+    row = {"timestamp": 101.0, "symbol": contract, "bid": 112.0}
+    kwargs = {
+        "decision_ts": 100.0,
+        "entry_price": 100.0,
+        "risk_points": 10.0,
+        "horizon_seconds": 5.0,
+        "expected_symbol": contract,
+    }
+    matched = label_forward_option_buy_path([row], **kwargs)
+    assert matched is not None
+    assert matched.mfe_r == 1.2
+    assert (
+        label_forward_option_buy_path([{"timestamp": 101.0, "bid": 112.0}], **kwargs)
+        is None
+    )
+    assert (
+        label_forward_option_buy_path(
+            [
+                {"timestamp": 101.0, "symbol": contract, "bid": 112.0},
+                {"timestamp": 102.0, "bid": 120.0},
+            ],
+            **kwargs,
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="expected_symbol"):
+        label_forward_option_buy_path(
+            [row],
+            decision_ts=100.0,
+            entry_price=100.0,
+            risk_points=10.0,
+            horizon_seconds=5.0,
+            expected_symbol="",
+        )
+
+
 @pytest.mark.parametrize(
     ("prices", "target", "first_barrier", "elapsed"),
     [

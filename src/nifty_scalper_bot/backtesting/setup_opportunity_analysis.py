@@ -3,7 +3,8 @@
 Responsibilities: Deduplicate structural decisions and preserve the approved
 contract, decision context, and chronological forward-path provenance.
 Boundaries: Consumes persisted decisions and observed quotes; never places orders.
-Safety: Later blocked candidates cannot overwrite an approved setup identity.
+Safety: Later blocked candidates cannot overwrite an approved setup identity;
+mixed or unverifiable option-contract quote paths cannot imply trade outcomes.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +41,7 @@ class CanonicalSetupOpportunity:
 
 @dataclass(frozen=True, slots=True)
 class ForwardPathLabel:
-    """Executable-side counterfactual path label for one option-buy opportunity."""
+    """Observed-bid path diagnostic, not proof of executable broker fills."""
 
     observation_count: int
     horizon_seconds: float
@@ -233,8 +236,12 @@ def label_forward_option_buy_path(
     horizon_seconds: float,
     price_field: str = "bid",
     target_price: float | None = None,
+    expected_symbol: str | None = None,
 ) -> ForwardPathLabel | None:
-    """Label a hypothetical long-option path using executable-side observations."""
+    """Label one option-bid path; reject mixed or mismatched contract quotes.
+
+    This is a quote-level diagnostic, not broker fill or depth proof.
+    """
 
     start = float(decision_ts)
     entry = float(entry_price)
@@ -251,8 +258,12 @@ def label_forward_option_buy_path(
     target = float(target_price) if target_price is not None else None
     if target is not None and (not math.isfinite(target) or target <= entry):
         raise ValueError("target_price must be finite and above entry_price")
+    expected = normalize_symbol(expected_symbol) if expected_symbol is not None else ""
+    if expected_symbol is not None and not expected:
+        raise ValueError("expected_symbol must identify an option contract")
 
     path: list[tuple[float, float]] = []
+    observed_symbols: set[str] = set()
     for row in observations:
         try:
             ts = _timestamp(row.get("timestamp"), field="observation timestamp")
@@ -264,8 +275,11 @@ def label_forward_option_buy_path(
             continue
         if not math.isfinite(price) or price <= 0 or ts < start or ts > start + horizon:
             continue
+        observed_symbols.add(normalize_symbol(str(row.get("symbol") or "")))
         path.append((ts, price))
-    if not path:
+    if not path or len(observed_symbols) != 1:
+        return None
+    if expected_symbol is not None and observed_symbols != {expected}:
         return None
     path.sort(key=lambda item: item[0])
     favorable = [(price - entry, ts) for ts, price in path]
