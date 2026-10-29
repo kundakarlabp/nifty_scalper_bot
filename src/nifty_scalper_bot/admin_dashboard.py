@@ -409,7 +409,7 @@ def _daily_risk_panel(owner_verified: bool) -> str:
         loss = float(str(risk["day_loss_since_reset"]))
         remaining = float(str(risk["remaining_daily_risk_budget"]))
         applied = bool(risk["reset_applied_today"])
-    except (RuntimeError, ValueError, KeyError, TypeError):
+    except (RuntimeError, ValueError, KeyError, TypeError, HTTPException):
         return '<p class="warning">Engine risk state unavailable; reset disabled.</p>'
     label = "Already rebased today; another reset is not permitted." if applied else (
         "Risk budget can be rebased once today, with explicit owner confirmation."
