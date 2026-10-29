@@ -1830,7 +1830,7 @@ class StrategyManager:
                     futures_quote, ("last_price", "ltp", "close")
                 )
                 futures_vwap = self._extract_float(
-                    futures_quote, ("vwap", "average_price")
+                    futures_quote, ("vwap", "average_price", "average_traded_price")
                 )
                 if (
                     futures_ltp is not None
@@ -1853,7 +1853,11 @@ class StrategyManager:
                     ) or (
                         "vwap"
                         if futures_quote.get("vwap") is not None
-                        else "average_price"
+                        else (
+                            "average_price"
+                            if futures_quote.get("average_price") is not None
+                            else "average_traded_price"
+                        )
                     )
                 elif (
                     futures_ltp is not None
@@ -1863,8 +1867,12 @@ class StrategyManager:
                     log_throttled(
                         self._logger,
                         f"future_vwap_missing:{active_future}",
-                        "FUTURES_VWAP_UNAVAILABLE_LTP_NOT_SUBSTITUTED symbol=%s",
+                        "FUTURES_VWAP_UNAVAILABLE_LTP_NOT_SUBSTITUTED "
+                        "symbol=%s source=%s mode=%s raw_average_traded_price_present=%s",
                         active_future,
+                        futures_quote.get("source"),
+                        futures_quote.get("mode"),
+                        futures_quote.get("average_traded_price") is not None,
                         interval_sec=300.0,
                     )
             else:
