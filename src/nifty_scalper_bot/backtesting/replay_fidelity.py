@@ -1,8 +1,10 @@
-"""Read-only observation-quality audit for saved live market-data events.
+"""Purpose: Read-only observation-quality audit for recorded market-data events.
 
-Strictly validate archive writer counters, unbroken sequence and immutable
-runtime snapshot using the bot's existing validators. This does not
-retroactively recover order-book messages, exchange fills, or missing quotes.
+Responsibilities: Validate archive integrity with the existing replay validators
+and inspect selected CE/PE quote provenance, two-sided books and five-level depth
+within each basket segment. Ownership stays with the offline replay-audit layer.
+Safety: Missing or partial depth cannot certify quote context; this audit never
+recovers exchange messages, proves fills, or changes live trading decisions.
 """
 
 from __future__ import annotations
