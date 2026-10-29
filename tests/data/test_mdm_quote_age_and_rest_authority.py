@@ -76,9 +76,7 @@ def test_direct_rest_ltp_failure_does_not_corrupt_canonical_quote(
     original_stamp = mdm._last_quote_ts_ms[SYMBOL]
     mdm._last_tick_time[SYMBOL] = time.time() - 3600
     mdm._last_tick_wallclock[SYMBOL] = time.time() - 3600
-    mdm._broker = SimpleNamespace(
-        get_quote=lambda _symbol: {"last_price": 201.0}
-    )
+    mdm._broker = SimpleNamespace(get_quote=lambda _symbol: {"last_price": 201.0})
     mdm._md_policy = SimpleNamespace(
         should_suppress_rest_quote=lambda **_kwargs: False,
         to_broker_quote_symbol=lambda symbol: symbol,
@@ -88,6 +86,7 @@ def test_direct_rest_ltp_failure_does_not_corrupt_canonical_quote(
     assert mdm.get_ltp(SYMBOL, allow_rest_fallback=True) == 201.0
     assert mdm.get_latest_tick(SYMBOL) == original
     assert mdm._last_quote_ts_ms[SYMBOL] == original_stamp
+
 
 def test_accepted_ws_tick_updates_mid_without_a_quote_read() -> None:
     mdm = _manager()
