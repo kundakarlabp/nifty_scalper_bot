@@ -431,3 +431,35 @@ def test_invalid_raw_kiteticker_average_price_never_becomes_ltp_vwap() -> None:
     assert indicators["futures_ltp"] == 24120.0
     assert indicators.get("futures_vwap") is None
     assert indicators["nifty_index_vwap"] is None
+
+def test_futures_vwap_provenance_reports_actual_consumed_quote(monkeypatch) -> None:
+    import nifty_scalper_bot.strategies.signal_generator as module
+
+    messages: list[tuple] = []
+
+    def capture(_logger, _key, message, *args, **_kwargs):
+        messages.append((message, args))
+
+    monkeypatch.setattr(module, "log_throttled", capture)
+    hub = _PriceHub(
+        {"ltp": 24000.0},
+        {
+            "ltp": 24120.0,
+            "average_traded_price": 24102.25,
+            "source": "ws",
+            "received_at": __import__("time").time(),
+            "instrument_token": 15736578,
+        },
+    )
+    manager = _manager(hub=hub)
+    output: dict[str, Any] = {}
+    manager._augment_futures_metrics(output)
+
+    provenance = [values for text, values in messages if "FUTURES_VWAP_PROVENANCE" in text]
+    assert len(provenance) == 1
+    assert provenance[0][1] == 24102.25
+    assert provenance[0][2] == "average_traded_price"
+    assert provenance[0][3] == "ws"
+    assert provenance[0][4] is not None
+    assert output["futures_vwap"] == 24102.25
+    assert hub.calls.count("NFO:NIFTY26JUNFUT") == 1
