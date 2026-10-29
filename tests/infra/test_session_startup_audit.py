@@ -43,7 +43,9 @@ def test_four_realistic_live_restarts_are_counted_without_claiming_safety() -> N
     assert summary["restart_cause"] == "unknown_without_process_and_deployment_events"
     assert summary["first_startup_at_ist"] == "09:49:33"
     assert summary["last_startup_at_ist"] == "15:12:33"
+    assert summary["first_live_ready_at_ist"] == "09:50:04"
     assert summary["last_live_ready_at_ist"] == "15:13:04"
+    assert summary["opening_window_ready_event_observed"] is False
     assert summary["max_startup_to_ready_seconds"] == 31
     assert summary["protective_stop_verification"] == "not_established_from_log_markers"
 
@@ -58,6 +60,8 @@ def test_missing_recovery_evidence_remains_explicit() -> None:
     assert summary["startups_without_live_ready_count"] == 1
     assert summary["max_startup_to_ready_seconds"] is None
     assert summary["last_live_ready_at_ist"] is None
+    assert summary["first_live_ready_at_ist"] is None
+    assert summary["opening_window_ready_event_observed"] is False
 
 
 def test_unrelated_ready_and_invalid_loglines_do_not_fake_recovery() -> None:
@@ -112,3 +116,35 @@ def test_audit_stop_markers_do_not_prove_continuous_protection() -> None:
     assert summary["protective_stop_verification"] == "not_established_from_log_markers"
     assert summary["restart_cause"] == "unknown_without_process_and_deployment_events"
     assert "SECRET_MUST_NOT_LEAK" not in str(summary)
+
+
+def test_opening_window_ready_marker_is_observed_not_uptime_proof() -> None:
+    # An earlier READY event can be observed even when its startup marker
+    # was outside the 09:15 archive window. Do not invent an uptime interval.
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line("09:34:00", "STARTUP_PHASE phase=create_context"),
+                line("09:34:31", "STARTUP_MODE_TRANSITION to=LIVE_READY"),
+                line("09:16:40", "STARTUP_MODE_TRANSITION to=LIVE_READY"),
+            )
+        )
+    )
+    assert summary["first_live_ready_at_ist"] == "09:16:40"
+    assert summary["last_live_ready_at_ist"] == "09:34:31"
+    assert summary["opening_window_ready_event_observed"] is True
+    assert summary["startups_without_live_ready_count"] == 0
+
+
+def test_ready_after_opening_window_does_not_imply_morning_coverage() -> None:
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line("14:15:56", "STARTUP_PHASE phase=create_context"),
+                line("14:16:29", "STARTUP_MODE_TRANSITION to=LIVE_READY"),
+            )
+        )
+    )
+    assert summary["first_live_ready_at_ist"] == "14:16:29"
+    assert summary["opening_window_ready_event_observed"] is False
+    assert summary["max_startup_to_ready_seconds"] == 33
