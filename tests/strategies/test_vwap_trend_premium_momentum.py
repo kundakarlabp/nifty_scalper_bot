@@ -858,8 +858,22 @@ def test_strict_continuation_rejects_untraded_prior_retest(monkeypatch):
     assert strategy.last_no_vote_reason == "vwap_continuation_quality_unconfirmed"
 
 
-def test_strict_continuation_is_default_off(monkeypatch):
+def test_strict_continuation_is_default_on(monkeypatch):
     monkeypatch.delenv("VWAP_STRICT_CONTINUATION_ENABLED", raising=False)
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=105.0,
+    )
+    assert signal is None
+    assert strategy._strict_continuation_enabled is True
+    assert strategy.last_no_vote_reason == "vwap_continuation_quality_unconfirmed"
+
+
+def test_strict_continuation_explicit_rollback_retains_legacy_candidate(monkeypatch):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
     _, signal = _evaluate(
         monkeypatch,
         enabled=False,
