@@ -1,13 +1,14 @@
-"""Market-aware profit protection and winner extension for canonical brackets.
+"""Purpose: Market-aware profit protection and winner extension for brackets.
 
-The supervisor is deliberately subordinate to the canonical bracket lifecycle:
-- hard SL, TP1, time-stop, broker truth, and exit reconciliation stay authoritative;
-- market context may only tighten an existing stop or defer/extend FINAL_TP;
-- extension is allowed only after the trade already has a protected profit floor;
-- missing/stale/contradictory evidence fails closed to the existing FINAL_TP.
-
-No broker calls are introduced.  Evidence is read from the already-wired
-IndicatorEngine and market-data facade/cache.
+Responsibilities: Validate executable option quote timestamps, depth and spread,
+assess continuation evidence, and propose monotonic trailing and target changes.
+Ownership: The canonical BracketManager alone owns broker stop modification,
+hard SL, TP1, time-stop, position reconciliation and final exit execution.
+Safety: Stale, nonfinite, future-dated or contradictory quotes cannot authorize
+an adaptive stop ratchet. An extension requires an existing protected profit
+floor; uncertain context falls back to the existing FINAL_TP.
+No broker calls or second trailing authority are introduced. Evidence comes
+from the already-wired IndicatorEngine and market-data facade/cache.
 """
 
 from __future__ import annotations
@@ -286,25 +287,28 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
     try:
         if isinstance(raw, datetime):
             stamp = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-            return max(
-                0.0,
-                (
-                    datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
-                ).total_seconds(),
-            )
-        if isinstance(raw, (int, float)):
-            seconds = float(raw) / 1000.0 if float(raw) > 1e12 else float(raw)
-            return max(0.0, time.time() - seconds)
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        return max(
-            0.0,
-            (
+            age = (
                 datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
-            ).total_seconds(),
-        )
-    except (TypeError, ValueError, OSError):
+            ).total_seconds()
+        elif isinstance(raw, (int, float)):
+            timestamp = float(raw)
+            if not math.isfinite(timestamp):
+                return None
+            seconds = timestamp / 1000.0 if timestamp > 1e12 else timestamp
+            age = time.time() - seconds
+        else:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (
+                datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
+            ).total_seconds()
+        # Never classify a nonfinite or future-dated quote as fresh.
+        # Tolerate up to one second of exchange/host clock skew.
+        if not math.isfinite(age) or age < -1.0:
+            return None
+        return max(0.0, age)
+    except (TypeError, ValueError, OSError, OverflowError):
         return None
 
 
