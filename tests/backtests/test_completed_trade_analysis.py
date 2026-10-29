@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (
@@ -233,6 +235,49 @@ def test_walk_forward_stability_reports_oos_consistency_without_verdict() -> Non
     assert stability.positive_oos_fraction == 0.5
     assert stability.aggregate_oos.trade_count == 4
     assert stability.aggregate_oos.net_pnl == 0.0
+
+
+def test_oos_path_aggregates_cross_fold_drawdown_and_realized_statistics() -> None:
+    values = [1.0, 1.0, 1.0, 1.0, 5.0, -2.0, -5.0, 1.0]
+    trades = canonicalize_completed_trades(
+        [
+            _trade(
+                f"t{index}",
+                float(index),
+                gross_pnl=net + 20.0,
+                net_pnl=net,
+            )
+            for index, net in enumerate(values, start=1)
+        ]
+    )
+    folds = chronological_walk_forward(trades, min_train_trades=4, test_trades=2)
+
+    stability = walk_forward_stability(folds)
+
+    assert stability.ready is True
+    assert [fold.test_summary.max_drawdown for fold in folds] == [2.0, 5.0]
+    assert stability.aggregate_oos.max_drawdown == 7.0
+    assert stability.aggregate_oos.trade_count == 4
+    assert stability.aggregate_oos.average_win == 3.0
+    assert stability.aggregate_oos.average_loss == -3.5
+    assert stability.aggregate_oos.profit_factor == pytest.approx(0.8571)
+
+
+def test_oos_path_incompleteness_is_reported_not_promoted() -> None:
+    trades = canonicalize_completed_trades(
+        [
+            _trade(f"t{index}", float(index))
+            for index in range(1, 9)
+        ]
+    )
+    folds = chronological_walk_forward(trades, min_train_trades=4, test_trades=2)
+    incomplete = replace(folds[0], test_trades=())
+
+    stability = walk_forward_stability((incomplete, folds[1]))
+
+    assert stability.ready is False
+    assert "incomplete_oos_trade_path:2<4" in stability.blockers
+    assert stability.aggregate_oos.trade_count == 2
 
 
 def test_walk_forward_stability_rejects_invalid_minimum_folds() -> None:
