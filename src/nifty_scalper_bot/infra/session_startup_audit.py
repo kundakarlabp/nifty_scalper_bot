@@ -84,6 +84,13 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
             used.add(index)
             lags.append(max(0, int((ready - starts[index]).total_seconds())))
 
+    first_ready_time = min(readiness).strftime("%H:%M:%S") if readiness else None
+    last_ready_time = max(readiness).strftime("%H:%M:%S") if readiness else None
+    opening_ready_seen = any(
+        "09:15:00" <= ready.strftime("%H:%M:%S") < "09:30:00"
+        for ready in readiness
+    )
+
     return {
         "schema_version": 1,
         "observed_startup_count": len(starts),
@@ -102,17 +109,10 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
         **stop_counts,
         "first_startup_at_ist": starts[0].strftime("%H:%M:%S") if starts else None,
         "last_startup_at_ist": starts[-1].strftime("%H:%M:%S") if starts else None,
-        "first_live_ready_at_ist": (
-            min(readiness).strftime("%H:%M:%S") if readiness else None
-        ),
-        "last_live_ready_at_ist": (
-            max(readiness).strftime("%H:%M:%S") if readiness else None
-        ),
+        "first_live_ready_at_ist": first_ready_time,
+        "last_live_ready_at_ist": last_ready_time,
         # Observed READY transition, not evidence of continuous availability.
-        "opening_window_ready_event_observed": any(
-            "09:15:00" <= ready.strftime("%H:%M:%S") < "09:30:00"
-            for ready in readiness
-        ),
+        "opening_window_ready_event_observed": opening_ready_seen,
         "max_startup_to_ready_seconds": max(lags) if lags else None,
         "protective_stop_verification": "not_established_from_log_markers",
         "restart_cause": "unknown_without_process_and_deployment_events",
