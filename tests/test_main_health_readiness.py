@@ -100,6 +100,47 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
+@pytest.mark.parametrize(
+    ("is_broker_live", "override", "expected_enabled"),
+    [
+        (True, None, True),
+        (True, "false", False),
+        (True, "true", True),
+        (False, None, False),
+    ],
+)
+def test_health_trading_reports_effective_adaptive_profit_lock_from_bracket_owner(
+    monkeypatch, is_broker_live, override, expected_enabled
+):
+    if override is None:
+        monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", override)
+    manager = SimpleNamespace(_is_live_execution=lambda: is_broker_live)
+    main.app.state.bot = SimpleNamespace(_ctx=_ctx(bracket_manager=manager))
+
+    response = main.health_trading()
+    policy = _json(response)["adaptive_profit_lock"]
+
+    assert policy["enabled"] is expected_enabled
+    assert policy["broker_live"] is is_broker_live
+    assert policy["operator_override_present"] is (override is not None)
+    assert policy["diagnostic_only"] is True
+
+
+def test_health_trading_does_not_claim_adaptive_live_policy_without_owner(
+    monkeypatch,
+):
+    monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
+    main.app.state.bot = SimpleNamespace(_ctx=_ctx())
+
+    policy = _json(main.health_trading())["adaptive_profit_lock"]
+
+    assert policy["enabled"] is None
+    assert policy["broker_live"] is None
+    assert policy["reason"] == "bracket_manager_unavailable"
+
+
 def test_candle_identity_supports_datetimes_strings_and_bar_objects():
     from datetime import datetime, timezone
 
