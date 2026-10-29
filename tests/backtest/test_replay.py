@@ -13,6 +13,7 @@ from nifty_scalper_bot.backtesting.replay import (
 )
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
+from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 
 class _DummyDataHub:
@@ -21,10 +22,10 @@ class _DummyDataHub:
         self.baskets: list[dict[str, object]] = []
 
     def get_quote(self, symbol: str, allow_pull: bool = False) -> dict[str, float]:
-        return self.quotes.setdefault(symbol, {"ltp": 100.0})
+        return self.quotes.setdefault(normalize_symbol(symbol), {"ltp": 100.0})
 
     def store_quote(self, symbol: str, quote: dict[str, float], *, source: str) -> None:
-        self.quotes[symbol] = dict(quote)
+        self.quotes[normalize_symbol(symbol)] = dict(quote)
 
     def set_active_contract_basket(self, basket: dict[str, object]) -> None:
         self.baskets.append(dict(basket))
