@@ -433,7 +433,9 @@ def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
 
 
 @pytest.mark.parametrize("pending_side", ["BUY", "SELL"])
-@pytest.mark.parametrize("pending_status", ["open", "trigger pending", "partially filled"])
+@pytest.mark.parametrize(
+    "pending_status", ["open", "trigger pending", "partially filled"]
+)
 def test_paired_runtime_rejects_unresolved_order_even_when_positions_are_flat(
     pending_side, pending_status
 ):
