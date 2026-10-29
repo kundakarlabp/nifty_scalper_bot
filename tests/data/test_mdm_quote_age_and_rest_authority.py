@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
@@ -65,3 +66,25 @@ def test_invalid_rest_quote_never_replaces_current_full_websocket_quote(
     assert mdm.get_quote(SYMBOL) == initial_quote
     assert mdm._last_quote_ts_ms[SYMBOL] == initial_stamp
     assert mdm.quote_age_ms(SYMBOL) >= 29_000
+
+
+def test_direct_rest_ltp_failure_does_not_corrupt_canonical_quote(
+    monkeypatch,
+) -> None:
+    mdm = _manager()
+    original = mdm.get_latest_tick(SYMBOL)
+    original_stamp = mdm._last_quote_ts_ms[SYMBOL]
+    mdm._last_tick_time[SYMBOL] = time.time() - 3600
+    mdm._last_tick_wallclock[SYMBOL] = time.time() - 3600
+    mdm._broker = SimpleNamespace(
+        get_quote=lambda _symbol: {"last_price": 201.0}
+    )
+    mdm._md_policy = SimpleNamespace(
+        should_suppress_rest_quote=lambda **_kwargs: False,
+        to_broker_quote_symbol=lambda symbol: symbol,
+    )
+    monkeypatch.setattr(mdm, "_normalize_tick", lambda *_args: None)
+
+    assert mdm.get_ltp(SYMBOL, allow_rest_fallback=True) == 201.0
+    assert mdm.get_latest_tick(SYMBOL) == original
+    assert mdm._last_quote_ts_ms[SYMBOL] == original_stamp
