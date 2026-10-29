@@ -405,3 +405,25 @@ def test_same_length_corruption_is_not_expected_history_reconciliation() -> None
 
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
     assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 0
+
+def test_history_overlap_is_labeled_reconciliation_even_when_count_is_same() -> None:
+    """REST can revise a completed WS candle without adding any rows."""
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+    before = mdm._candle_metrics["candle_projection_divergence_total"]
+
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar(close=1.5)]) == 0
+
+    assert mdm.get_ohlc_bars(SYMBOL)[-1]["close"] == 1.5
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == before + 1
+    assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 1
+
+
+def test_unattributed_equal_size_mismatch_stays_live_divergence() -> None:
+    mdm = _mdm()
+    assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
+    mdm._ohlc[SYMBOL][0]["close"] = 900.0
+    mdm._refresh_candle_projection(SYMBOL)
+
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
+    assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 0
