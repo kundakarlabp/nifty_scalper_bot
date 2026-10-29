@@ -7,6 +7,7 @@ Responsibilities:
 - Signed Zerodha owner session replaces the redundant admin Basic password.
 - Serve sanitized runtime overview, protected logs and research-status endpoints.
 - Route GitHub-update/restart requests through service-control owners.
+- Keep risk controls visible while the engine is unloaded during AUTO QUIET.
 - Forward signed risk-reset requests to the running engine; display acknowledged status.
 
 Boundaries: The release runner and engine retain execution authority.
@@ -23,6 +24,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import subprocess
@@ -64,6 +66,7 @@ from nifty_scalper_bot.superlite_admin_core import (
 from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 
 ENV_PATH = CANONICAL_ENV_PATH
 LOG_PATH = Path(os.getenv("BOT_LOG_FILE", str(Path(os.getenv("LOG_DIR", "logs")).expanduser() / "bot.log")))
@@ -392,46 +395,80 @@ def _engine_risk_request(action: str) -> dict[str, object]:
         raise RuntimeError(detail if detail in allowed else "engine_risk_request_rejected") from None
     except (OSError, TimeoutError, ValueError) as exc:
         raise RuntimeError("engine_risk_request_unavailable") from exc
-    if not isinstance(body, dict) or (
-        action == "risk_reset" and body.get("state") != "applied"
+    if not isinstance(body, dict):
+        raise RuntimeError("engine_risk_response_unverified")
+    if action == "risk_reset" and (
+        body.get("state") != "applied"
+        or not isinstance(body.get("risk"), dict)
+        or body["risk"].get("reset_applied_today") is not True
     ):
         raise RuntimeError("engine_risk_response_unverified")
     return body
 
 
 def _daily_risk_panel(owner_verified: bool) -> str:
-    """Display the engine's current loss allowance only to a verified owner."""
+    """Keep owner risk controls visible; act only on verified engine readiness."""
+    disabled_button = (
+        '<button type="button" class="amb full" disabled>'
+        "Reset daily risk — unavailable</button>"
+    )
     if not owner_verified:
-        return '<p class="muted">Verify the Zerodha owner session to view risk allowance.</p>'
+        return (
+            '<p class="muted">Verify the owner session to manage risk.</p>'
+            + disabled_button
+        )
     try:
         risk = _engine_risk_request("risk_status")
         cap = float(str(risk["daily_loss_cap"]))
         loss = float(str(risk["day_loss_since_reset"]))
         remaining = float(str(risk["remaining_daily_risk_budget"]))
-        applied = bool(risk["reset_applied_today"])
-    except (RuntimeError, ValueError, KeyError, TypeError, HTTPException):
-        return '<p class="warning">Engine risk state unavailable; reset disabled.</p>'
-    label = "Already rebased today; another reset is not permitted." if applied else (
-        "Risk budget can be rebased once today, with explicit owner confirmation."
-    )
-    action = (
-        ""
-        if applied
-        else (
+        applied = risk["reset_applied_today"] is True
+    except (RuntimeError, ValueError, KeyError, TypeError, HTTPException) as exc:
+        from nifty_scalper_bot.operating_control import engine_should_run
+
+        reason = str(exc)
+        if (
+            reason in {"engine_risk_request_unavailable", "live_engine_unavailable"}
+            and not engine_should_run()
+        ):
+            explanation = (
+                "AUTO QUIET: the live trading engine is unloaded. "
+                "Risk reset is available when the engine is active and reconciled."
+            )
+        else:
+            explanation = (
+                "Engine risk status unavailable (" + html.escape(reason[:80]) + ")."
+            )
+        return (
+            f'<p class="warning">{explanation}</p>'
+            + disabled_button
+            + '<p class="muted">No reset was applied or queued. Refresh this '
+            "page when the engine is running. A reset does not restart the bot.</p>"
+        )
+    if applied:
+        action = (
+            '<button type="button" class="amb full" disabled>'
+            "Already reset today — once-per-day limit</button>"
+        )
+        label = "Today's risk allowance was already rebased."
+    else:
+        action = (
             '<form method="post" action="/admin/risk/reset-day">'
             '<input type="hidden" name="confirm" value="RESET">'
             '<button type="submit" class="amb full" '
             "onclick=\"return confirm('Grant one more daily loss allowance? "
             "This increases permitted loss today. Realised P&L is unchanged.')\">"
-            "Rebase today's risk allowance (once per day)</button></form>"
+            "Reset daily risk allowance (once per day)</button></form>"
         )
-    )
+        label = (
+            "The engine will verify broker reconciliation and open exposure "
+            "again before granting the reset."
+        )
     return (
         f"<p><b>Remaining risk: ₹{remaining:,.2f}</b> "
         f"/ daily limit ₹{cap:,.2f}; loss since reset ₹{loss:,.2f}.</p>"
         f"<p>{html.escape(label)}</p>{action}"
     )
-
 
 def _flash(request: Request) -> str:
     q = request.query_params
@@ -487,8 +524,17 @@ def _flash(request: Request) -> str:
             "Trade ledger and realised P&amp;L were preserved.</div>"
         )
     if q.get("riskreset") == "err":
-        msg = html.escape(q.get("msg", ""))
-        return f'<div class="flash err">Risk reset failed: {msg}</div>'
+        explanations = {
+            "engine_risk_request_unavailable": "Engine not reachable; no reset was applied.",
+            "live_engine_unavailable": "Engine risk manager unavailable (possibly AUTO QUIET).",
+            "broker_reconciliation_unverified": "Broker reconciliation incomplete.",
+            "broker_positions_or_orders_open": "Broker positions or orders still open.",
+            "daily_risk_reset_already_applied": "Already reset once today.",
+            "engine_risk_response_unverified": "Engine did not confirm the reset.",
+        }
+        reason = q.get("msg", "")
+        msg = html.escape(explanations.get(reason, reason[:80]))
+        return f'<div class="flash err">Risk reset not applied: {msg}</div>'
     if q.get("upd") in {"queued", "ok"}:
         return (
             '<div class="flash ok">GitHub update check requested. '
@@ -676,17 +722,19 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
           <div class="hint">Review release status for CI, validation or service failures.
           Requests are not confirmation that code deployed or the engine restarted.</div>
         </section>
+        <section class="card" id="risk-allowance"><h2>Daily risk allowance</h2>
+          <p>Owner-controlled once per IST trading day. Realised loss, loss
+          streak, cooldown and broker history are retained. No automatic restart
+          or order is triggered.</p>
+          {risk_panel}
+        </section>
         <section class="card"><h2>Advanced settings</h2>
           <p>Occasional changes. Hidden by default to keep daily operation simple.</p>
           <details><summary>Trading mode &amp; risk controls</summary><div class="detail-body">
             <div class="subheading">Configured mode</div>
             <p>{'LIVE requested — real orders possible when engine permits.' if live_on
                 else 'SHADOW requested — simulation only.'}</p>{toggle}
-            <div class="subheading">Daily risk allowance</div>
-            <p>Explicitly grants one additional daily loss allowance. The original
-            loss, actual P&amp;L, loss streak, cooldown, and broker history remain intact.
-            Does not force a trade or bypass entry eligibility.</p>
-            {risk_panel}
+
           </div></details>
           <details><summary>Credentials &amp; integration settings</summary><div class="detail-body">
             <p>Existing secrets remain unchanged when their placeholders are left as-is.
@@ -952,13 +1000,18 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
             "/admin?riskreset=err&msg=confirmation+required", status_code=303
         )
     try:
-        _engine_risk_request("risk_reset")
+        result = _engine_risk_request("risk_reset")
     except Exception as exc:  # noqa: BLE001 - never pretend an engine failure succeeded
         reason = str(exc)[:100]
+        LOGGER.warning("ADMIN_RISK_RESET_REJECTED reason=%s", reason)
         return RedirectResponse(
             "/admin?riskreset=err&msg=" + urllib.parse.quote(reason),
             status_code=303,
         )
+    LOGGER.warning(
+        "ADMIN_RISK_RESET_ENGINE_ACK trading_date=%s",
+        result["risk"].get("trading_date", "unknown"),
+    )
     return RedirectResponse("/admin?riskreset=ok", status_code=303)
 
 
