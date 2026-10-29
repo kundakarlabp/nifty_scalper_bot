@@ -418,7 +418,7 @@ def local_risk_status(request: Request) -> dict[str, Any]:
 def local_risk_reset(request: Request) -> dict[str, Any]:
     """One verified host-local operator rebase; no restart or broker order."""
     _require_local_risk_command(request, "risk_reset")
-    ctx = _latest_context()
+    ctx = _latest_context()  # type: ignore[no-untyped-call]
     if ctx is None:
         raise HTTPException(status_code=503, detail="live_engine_unavailable")
     if (
