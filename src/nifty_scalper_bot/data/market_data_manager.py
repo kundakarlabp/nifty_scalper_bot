@@ -1473,7 +1473,10 @@ class MarketDataManager:
             # without changing its count. The import caller explicitly owns
             # this provenance, so equal-length reconciliations are expected
             # too. Unattributed live mismatches remain warnings.
-            historical_refresh = source == "historical_import" and lag_after_bars == 0.0
+            historical_refresh = lag_after_bars == 0.0 and (
+                source == "historical_import"
+                or (source == "historical" and len(previous) != len(projected))
+            )
             classification = (
                 "history_reconciliation" if historical_refresh else "live_mismatch"
             )
