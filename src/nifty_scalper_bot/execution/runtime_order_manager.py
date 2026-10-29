@@ -702,7 +702,8 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
                     warn = getattr(logger, "warning", None)
                     if callable(warn):
                         warn(
-                            "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s drift_pct=%.2f",
+                            ("ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s "
+                             "drift_pct=%.2f"),
                             symbol, drift,
                             extra={
                                 "event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
