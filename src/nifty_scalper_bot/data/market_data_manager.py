@@ -1484,8 +1484,8 @@ class MarketDataManager:
             if historical_refresh:
                 with self._lock:
                     self._candle_metrics["candle_projection_history_reconciled_total"] += 1
-            self._logger.log(
-                logging.INFO if historical_refresh else logging.WARNING,
+            log_fn = self._logger.info if historical_refresh else self._logger.warning
+            log_fn(
                 "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s classification=%s lag_after_bars=%s",
                 normalized,
                 len(previous),
