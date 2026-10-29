@@ -1,5 +1,7 @@
 """Regression for the October 29 same-setup price chase."""
+
 from types import SimpleNamespace
+
 from nifty_scalper_bot.execution import order_manager as mod
 
 
@@ -13,6 +15,7 @@ def plan(price, signal="same", intent="ENTRY"):
 def test_broker_attempted_timeout_blocks_later_chasing(monkeypatch):
     manager = SimpleNamespace(is_live_mode=lambda: True)
     calls = []
+
     def submit(_, order):
         calls.append(order.entry_price)
         return SimpleNamespace(accepted=False, broker_attempted=True)
@@ -31,7 +34,11 @@ def test_fresh_setup_and_exit_are_unaffected(monkeypatch):
         calls.append(order.entry_price)
         return SimpleNamespace(accepted=True, broker_attempted=True)
     monkeypatch.setattr(mod, "_original_submit_trade_plan_result", submit)
-    for order in (plan(100.0), plan(106.0, signal="new"), plan(110.0, intent="EXIT")):
+    for order in (
+        plan(100.0),
+        plan(106.0, signal="new"),
+        plan(110.0, intent="EXIT"),
+    ):
         assert mod._submit_trade_plan_with_setup_price_guard(manager, order).accepted
     assert calls == [100.0, 106.0, 110.0]
 
