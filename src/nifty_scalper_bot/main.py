@@ -405,16 +405,16 @@ def _risk_control_state(ctx: Any) -> dict[str, Any]:
     }
 
 
-@app.get("/internal/admin/risk/status")
+@app.get("/internal/admin/risk/status")  # type: ignore[untyped-decorator]
 def local_risk_status(request: Request) -> dict[str, Any]:
     _require_local_risk_command(request, "risk_status")
-    ctx = _latest_context()
+    ctx = _latest_context()  # type: ignore[no-untyped-call]
     if ctx is None:
         raise HTTPException(status_code=503, detail="live_engine_unavailable")
     return _risk_control_state(ctx)
 
 
-@app.post("/internal/admin/risk/reset-day")
+@app.post("/internal/admin/risk/reset-day")  # type: ignore[untyped-decorator]
 def local_risk_reset(request: Request) -> dict[str, Any]:
     """One verified host-local operator rebase; no restart or broker order."""
     _require_local_risk_command(request, "risk_reset")
@@ -431,7 +431,7 @@ def local_risk_reset(request: Request) -> dict[str, Any]:
     if risk is None:
         risk = getattr(getattr(ctx, "order_manager", None), "_risk_manager", None)
     manager = getattr(risk, "position_manager", None)
-    if not callable(getattr(manager, "get_all_positions", None)) or not callable(
+    if manager is None or not callable(getattr(manager, "get_all_positions", None)) or not callable(
         getattr(manager, "get_pending_orders", None)
     ):
         raise HTTPException(status_code=503, detail="position_state_unavailable")
