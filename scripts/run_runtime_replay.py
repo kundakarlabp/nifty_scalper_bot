@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Fixed no-network production replay worker; never load broker credentials."""
+"""Purpose: Run isolated no-network production-composition replay research.
+
+Responsibilities: Preflight recorded quote/depth integrity and compare matched
+adaptive-versus-disabled-legacy exit policies with realistic modeled fills.
+Ownership: One existing offline worker; never a second live strategy or exit owner.
+Safety: Reject unresolved orders, incomplete evidence and divergent entries;
+never load broker credentials or claim modeled improvement is live profitability.
+"""
 
 from __future__ import annotations
 
@@ -52,12 +59,18 @@ def _entry_signature(report: dict[str, object]) -> tuple[tuple[object, ...], ...
     for order in orders:
         if not isinstance(order, dict):
             raise ValueError("paired_replay_order_invalid")
-        if str(order.get("transaction_type") or "").upper() != "BUY":
-            continue
+        side = str(order.get("transaction_type") or "").upper()
         filled = int(order.get("filled_quantity") or 0)
-        if not filled:
+        status = str(order.get("status") or "").strip().lower()
+        # Flat positions alone do not prove a pending broker-model order is
+        # terminal. An unfilled pending BUY or SELL can still change exposure.
+        if status not in {"complete", "filled", "cancelled", "canceled", "rejected"}:
+            if side == "BUY" and filled > 0:
+                raise ValueError("paired_replay_partial_entry")
+            raise ValueError("paired_replay_unresolved_order")
+        if side != "BUY" or not filled:
             continue
-        if str(order.get("status") or "").lower() not in {"complete", "filled"}:
+        if status not in {"complete", "filled"}:
             raise ValueError("paired_replay_partial_entry")
         price = float(order.get("average_price") or 0)
         stamp = float(order.get("timestamp") or 0)
@@ -87,6 +100,9 @@ def compare_paired_reports(
         "state": "UNRESOLVED",
         "evidence": "RESEARCH_CANDIDATE_MODELED_BROKER_NOT_EXCHANGE_FILLED",
         "slippage_bps_per_side": slippage_bps,
+        "baseline_policy": "adaptive_disabled_research_control",
+        "adaptive_policy": "adaptive_enabled",
+        "net_delta_semantics": "adaptive_minus_legacy_control",
         "baseline_net": None,
         "adaptive_net": None,
         "net_delta": None,
