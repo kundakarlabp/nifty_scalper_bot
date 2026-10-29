@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
+from typing import Any
 
 from nifty_scalper_bot.execution import order_manager_core as _core
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
@@ -244,7 +245,7 @@ _original_submit_trade_plan_result = RuntimeOrderManager.submit_trade_plan_resul
 
 
 def _submit_trade_plan_with_setup_price_guard(
-    self: RuntimeOrderManager, plan: _core.TradePlan
+    self: Any, plan: _core.TradePlan
 ) -> _core.TradePlanSubmitResult:
     try:
         live = bool(self.is_live_mode())
