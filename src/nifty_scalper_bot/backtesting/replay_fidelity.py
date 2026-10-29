@@ -1,8 +1,10 @@
-"""Read-only observation-quality audit for saved live market-data events.
+"""Purpose: Read-only observation-quality audit for recorded market-data events.
 
-Strictly validate archive writer counters, unbroken sequence and immutable
-runtime snapshot using the bot's existing validators. This does not
-retroactively recover order-book messages, exchange fills, or missing quotes.
+Responsibilities: Validate archive integrity with the existing replay validators
+and inspect selected CE/PE quote provenance, two-sided books and five-level depth
+within each basket segment. Ownership stays with the offline replay-audit layer.
+Safety: Missing or partial depth cannot certify quote context; this audit never
+recovers exchange messages, proves fills, or changes live trading decisions.
 """
 
 from __future__ import annotations
@@ -151,6 +153,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
                 current_segment[role]["uncrossed_two_sided_depth_ticks"] += 1
         if full:
             c["five_level_depth_ticks"] += 1
+            if current_segment is not None:
+                current_segment[role]["five_level_depth_ticks"] += 1
         if type(tick.get("instrument_token")) is int and tick["instrument_token"] > 0:
             c["token_identified_ticks"] += 1
         prior = previous.get(role)
@@ -195,6 +199,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         for role in ("CE", "PE"):
             if segment[role]["uncrossed_two_sided_depth_ticks"] == 0:
                 segment_missing.append(f"{role}_no_two_sided_depth")
+            if segment[role]["five_level_depth_ticks"] == 0:
+                segment_missing.append(f"{role}_no_five_level_depth")
         if segment_missing:
             missing_requirements.update(segment_missing)
         else:
