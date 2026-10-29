@@ -17,6 +17,9 @@ External references: [TradingView confirmed bars](https://www.tradingview.com/pi
 
 `VWAP_STRICT_CONTINUATION_ENABLED=false` is default-off and applies specifically
 to `vwap_continuation` (other setup subtypes retain their original rules).
+The 180-second thesis-age clock uses decision wall time in LIVE execution;
+historical SHADOW/replay uses the completed observation-bar time. A fresh
+signal-bar timestamp cannot revive an old live setup.
 When enabled, the existing completed option bar proof is required. Continuation
 must have a same-session thesis no older than 180 seconds **at the completed
 signal bar**, contiguous finalized previous option candle with trades, confirmed
