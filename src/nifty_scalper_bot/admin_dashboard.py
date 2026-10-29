@@ -44,6 +44,7 @@ from nifty_scalper_bot.admin_owner_auth import (
     create_challenge,
     grant_owner_session,
     owner_user_id,
+    require_challenge_bound_form,
     require_https,
     valid_owner_session,
     verify_challenge,
@@ -667,7 +668,7 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             '</p><div class="intro">', 1,
         )
         response = HTMLResponse(
-            "", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+            "", headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"}
         )
         challenge = create_challenge(response)
         body = body.replace(
@@ -743,12 +744,9 @@ def owner_login_complete(
     owner_state: str = Form(...),
     request_token: str = Form(...),
 ) -> RedirectResponse:
-    # Same-origin form submission + signed one-time login challenge.
-    require_https(request)
-    source = request.headers.get("origin") or request.headers.get("referer", "")
-    parsed = urllib.parse.urlsplit(source)
-    if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
-        raise HTTPException(status_code=403, detail="owner_login_same_origin_required")
+    # Mobile browsers may suppress Referer; the signed cookie-bound challenge
+    # is mandatory, and any explicit foreign Origin/Referer is still rejected.
+    require_challenge_bound_form(request, owner_state)
     return _finish_owner_login(request, owner_state, request_token)
 
 
@@ -784,13 +782,7 @@ def update_token(
     if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
         owner = owner_user_id(_read_env())
         if not owner or not valid_owner_session(request, owner):
-            require_https(request)
-            source = request.headers.get("origin") or request.headers.get("referer", "")
-            parsed = urllib.parse.urlsplit(source)
-            if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
-                raise HTTPException(
-                    status_code=403, detail="admin_same_origin_required"
-                )
+            require_challenge_bound_form(request, owner_state)
             if access_token:
                 raise HTTPException(status_code=401, detail="owner_login_required")
             return _finish_owner_login(request, owner_state, request_token)
