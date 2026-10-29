@@ -67,12 +67,18 @@ function cleanStartupAudit(raw: unknown): Record<string, unknown> | null {
   }
   for (const name of [
     'first_startup_at_ist', 'last_startup_at_ist', 'last_live_ready_at_ist',
-    'first_live_ready_at_ist',
   ]) {
     const value = input[name]
     if (value !== null && (typeof value !== 'string' ||
         !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(value))) return null
     safe[name] = value
+  }
+  // Optional fields must not reject previously deployed archive senders.
+  if (input.first_live_ready_at_ist !== undefined) {
+    const first = input.first_live_ready_at_ist
+    if (first !== null && (typeof first !== 'string' ||
+        !/^(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$/.test(first))) return null
+    safe.first_live_ready_at_ist = first
   }
   if (input.opening_window_ready_event_observed !== undefined) {
     if (typeof input.opening_window_ready_event_observed !== 'boolean') return null
