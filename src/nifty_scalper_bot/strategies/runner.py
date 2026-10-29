@@ -5196,7 +5196,7 @@ class StrategyRunner:
             "strategy": str(
                 metadata.get("strategy_name") or metadata.get("strategy") or ""
             ),
-            "regime": str(metadata.get("regime") or ""),
+            "regime": str(metadata.get("runtime_regime") or metadata.get("regime") or ""),
             "approval_path": str(metadata.get("approval_path") or ""),
             "decision_stage": str(stage),
         }
