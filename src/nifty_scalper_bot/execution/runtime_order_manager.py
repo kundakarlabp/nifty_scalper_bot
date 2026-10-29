@@ -4,6 +4,7 @@
 Key responsibilities:
     - Apply unresolved-exit entry blocking before broker submission.
     - Run bounded entry recovery and finalize partial-entry reconciliation.
+    - Reject costly VWAP continuation retries against durable first-attempt prices.
     - Delegate unchanged order operations to ``order_manager_core``.
 
 Operational constraints:
@@ -17,7 +18,9 @@ Operational constraints:
 from __future__ import annotations
 
 import inspect
+import math
 import os
+import threading
 import time
 from contextlib import suppress
 from types import SimpleNamespace
@@ -51,6 +54,7 @@ _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket
 _CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
 _EXIT_TAG_PREFIXES = ("EXIT", "EXIT_", "SL_", "TP_", "EOD_")
 _REDUCE_TAG_PREFIXES = ("FLATTEN", "EXIT_FLATTEN", "SQUAREOFF", "PANIC")
+_ENTRY_PRICE_ANCHOR_LOCK = threading.RLock()
 
 
 def _truthy_check_risk_disabled(value: Any) -> bool:
@@ -614,6 +618,155 @@ def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
     return _core.OrderManager.submit_trade_plan_result(manager, plan)
 
 
+def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
+    """Prevent repeat VWAP continuation buys chasing a first broker attempt.
+
+    The anchor is durably written BEFORE touching the broker, retained if the
+    response is uncertain, and removed only on a proven pre-broker rejection.
+    Exit/reduce orders and other independently identified setups are untouched.
+    """
+
+    def _submit() -> Any:
+        return _recover_submit(_submit_core_with_exit_provenance, manager, plan)
+
+    provenance = getattr(plan, "trade_provenance", None)
+    if not isinstance(provenance, Mapping):
+        return _submit()
+    setup_name = str(provenance.get("setup_name") or "")
+    strategy = str(getattr(plan, "strategy_name", "") or "")
+    if (
+        setup_name != "vwap_continuation"
+        or strategy.replace("_", "").upper() != "VWAPPRO"
+        or str(getattr(plan, "intent", "ENTRY") or "ENTRY").upper() != "ENTRY"
+        or str(getattr(plan, "side", "") or "").upper() != "BUY"
+        or not manager.is_live_mode()
+    ):
+        return _submit()
+
+    contract = provenance.get("setup_contract")
+    setup_id = (
+        str(contract.get("setup_id") or "") if isinstance(contract, Mapping) else ""
+    ) or str(provenance.get("setup_id") or "")
+    signal_id = str(getattr(plan, "signal_id", "") or "")
+    symbol = str(getattr(plan, "symbol", "") or "").strip().upper()
+    if not symbol or not (setup_id or signal_id):
+        # No stable identity; the canonical plan validator still owns rejection.
+        return _submit()
+    try:
+        price = float(getattr(plan, "entry_price", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return _submit()
+    if not math.isfinite(price) or price <= 0:
+        return _submit()
+
+    state_owner = getattr(manager, "_positions", None)
+    reader = getattr(state_owner, "get_risk_circuit_state", None)
+    writer = getattr(state_owner, "persist_risk_circuit_state", None)
+    date_reader = getattr(state_owner, "_trading_date_ist", None)
+    if not callable(reader) or not callable(writer) or not callable(date_reader):
+        return _core.TradePlanSubmitResult(
+            accepted=False,
+            reason="entry_price_guard_state_unavailable",
+            broker_attempted=False,
+        )
+    now = time.time()
+    today = str(date_reader())
+    key = "|".join((symbol, strategy.upper(), setup_id or signal_id))
+    newly_reserved = False
+    with _ENTRY_PRICE_ANCHOR_LOCK:
+        try:
+            circuit = reader()
+            if not isinstance(circuit, Mapping):
+                raise ValueError("entry anchor circuit invalid")
+            prior = (
+                circuit.get("entry_attempt_price_anchors")
+                if circuit.get("trading_date") == today
+                else None
+            )
+            anchors = dict(prior) if isinstance(prior, Mapping) else {}
+            anchors = {
+                str(k): v
+                for k, v in anchors.items()
+                if isinstance(v, Mapping)
+                and isinstance(v.get("at"), (int, float))
+                and 0 <= now - float(v["at"]) <= 900
+            }
+            record = anchors.get(key)
+            if record is not None:
+                first = float(record["price"])
+                if first <= 0 or not math.isfinite(first):
+                    raise ValueError("invalid persisted entry anchor")
+                drift = (price - first) / first * 100.0
+                if drift > 2.0:
+                    logger = getattr(manager, "_logger", None)
+                    warn = getattr(logger, "warning", None)
+                    if callable(warn):
+                        warn(
+                            (
+                                "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s "
+                                "drift_pct=%.2f"
+                            ),
+                            symbol,
+                            drift,
+                            extra={
+                                "event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
+                                "symbol": symbol,
+                                "signal_id": signal_id,
+                                "setup_id": setup_id,
+                                "first_price": first,
+                                "candidate_price": price,
+                                "drift_pct": drift,
+                                "limit_pct": 2.0,
+                            },
+                        )
+                    return _core.TradePlanSubmitResult(
+                        accepted=False,
+                        reason="same_setup_adverse_reprice",
+                        details={
+                            "symbol": symbol,
+                            "setup_id": setup_id,
+                            "first_price": first,
+                            "candidate_price": price,
+                            "drift_pct": round(drift, 4),
+                            "limit_pct": 2.0,
+                        },
+                        broker_attempted=False,
+                    )
+            else:
+                if len(anchors) >= 128:
+                    oldest = min(anchors, key=lambda k: float(anchors[k]["at"]))
+                    anchors.pop(oldest)
+                anchors[key] = {"price": price, "at": now}
+                writer(entry_attempt_price_anchors=anchors)
+                newly_reserved = True
+        except (OSError, ValueError, TypeError, RuntimeError):
+            return _core.TradePlanSubmitResult(
+                accepted=False,
+                reason="entry_price_guard_persistence_unavailable",
+                broker_attempted=False,
+            )
+
+    result = _submit()
+    if newly_reserved and not bool(getattr(result, "broker_attempted", False)):
+        with _ENTRY_PRICE_ANCHOR_LOCK:
+            try:
+                circuit = reader()
+                current = circuit.get("entry_attempt_price_anchors")
+                if isinstance(current, Mapping):
+                    retained = dict(current)
+                    if retained.get(key) == {"price": price, "at": now}:
+                        retained.pop(key, None)
+                        writer(entry_attempt_price_anchors=retained)
+            except (OSError, ValueError, TypeError, RuntimeError):
+                # Fail closed: retaining an unnecessary anchor is safer than
+                # forgetting a possibly broker-attempted buy across a restart.
+                logger = getattr(manager, "_logger", None)
+                warn = getattr(logger, "warning", None)
+                if callable(warn):
+                    warn("ENTRY_PRICE_ANCHOR_CLEANUP_UNCONFIRMED symbol=%s", symbol)
+    return result
+
+
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
 
@@ -826,11 +979,7 @@ class RuntimeOrderManager(_core.OrderManager):
         blocked = self._blocked("submit_trade_plan_result", (plan,), {})
         if blocked is not NO_BLOCK:
             return blocked
-        return _recover_submit(
-            _submit_core_with_exit_provenance,
-            self,
-            plan,
-        )
+        return _submit_with_setup_price_guard(self, plan)
 
     def submit_trade_plan(self, *args: Any, **kwargs: Any) -> Any:
         blocked = self._blocked("submit_trade_plan", args, kwargs)

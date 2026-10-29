@@ -428,3 +428,21 @@ For first-time Lightsail host provisioning, see `deploy/LIGHTSAIL_SETUP.md`.
 For the separate research/backtesting environment see
 `docs/deployment/README.md`. Do not confuse Docker research deployment with
 production Lightsail deployment.
+
+## Same-setup VWAP continuation entry protection
+
+A LIVE VWAPPro \`vwap_continuation\` BUY now records the first attempted
+premium under its canonical symbol and deterministic setup identity. The
+PositionManager's existing same-day durable circuit snapshot keeps that
+anchor across a validated restart for up to 15 minutes. A second BUY for
+the same setup more than 2% **above** the original premium is rejected
+pre-broker with \`same_setup_adverse_reprice\`, including reference price,
+candidate price, and drift for audit. New structural setup identities and
+protective EXIT/REDUCE orders do not inherit this entry-only hold.
+
+The anchor is persisted before a possible broker attempt; a proven
+pre-broker rejection removes it. Broker timeout, missing acknowledgment,
+or interrupted submission conservatively retains it until expiry.
+If durable state cannot be written, LIVE entry fails closed with
+\`entry_price_guard_persistence_unavailable\`. This is an execution
+discipline rule, not evidence that the revised patterns are profitable.
