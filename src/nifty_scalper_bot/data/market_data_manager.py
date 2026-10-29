@@ -13034,12 +13034,6 @@ class MarketDataManager:
                     extra={"symbol": symbol, "key": key, "trace_id": trace_id},
                 )
                 continue
-            now_ms = self._now_ms()
-            bid = _coerce_float(quote.get("bid"))
-            ask = _coerce_float(quote.get("ask"))
-            mid: float | None = None
-            if bid is not None and ask is not None:
-                mid = (bid + ask) / 2.0
             # Normalize through the standard REST tick pipeline so all
             # freshness markers (_last_tick_time, _last_tick_wallclock,
             # _last_quote_ts_ms, _latest_ticks) are updated consistently.
@@ -13049,9 +13043,9 @@ class MarketDataManager:
                 prev = self._latest_ticks.get(canonical_symbol)
             normalized_tick = self._normalize_tick(canonical_symbol, prepared, prev)
             if normalized_tick is not None:
-                if mid is not None:
-                    with self._lock:
-                        self._last_mid[canonical_symbol] = (mid, now_ms)
+                # Only the accepted canonical tick writer may update mid-price
+                # or its freshness. A delayed REST reply can lose authority to
+                # a newer FULL WS quote while this fetch is in flight.
                 self._emit_tick(canonical_symbol, normalized_tick, source="rest")
                 return normalized_tick
             # A broker reply without a validated price is not a quote tick.
