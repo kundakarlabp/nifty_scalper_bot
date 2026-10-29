@@ -455,7 +455,9 @@ def test_futures_vwap_provenance_reports_actual_consumed_quote(monkeypatch) -> N
     output: dict[str, Any] = {}
     manager._augment_futures_metrics(output)
 
-    provenance = [values for text, values in messages if "FUTURES_VWAP_PROVENANCE" in text]
+    provenance = [
+        values for text, values in messages if "FUTURES_VWAP_PROVENANCE" in text
+    ]
     assert len(provenance) == 1
     assert provenance[0][1] == 24102.25
     assert provenance[0][2] == "average_traded_price"
