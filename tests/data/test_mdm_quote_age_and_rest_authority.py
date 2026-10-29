@@ -107,6 +107,7 @@ def test_accepted_ws_tick_updates_mid_without_a_quote_read() -> None:
     assert age_ms is not None and age_ms < 1000
     assert mdm.quote_age_ms(SYMBOL) < 1000
 
+
 def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
     monkeypatch,
 ) -> None:
@@ -125,7 +126,8 @@ def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
         lambda _symbol: {"last_price": 99.0, "bid": 50.0, "ask": 51.0},
     )
     monkeypatch.setattr(
-        mdm, "_normalize_tick",
+        mdm,
+        "_normalize_tick",
         lambda _symbol, _raw, _prev: {
             "symbol": SYMBOL,
             "ltp": 99.0,
