@@ -178,4 +178,16 @@ def test_owner_dashboard_shows_real_budget_only_after_auth(monkeypatch):
     )
     assert "₹60.00" in admin_dashboard._daily_risk_panel(True)
     assert "₹700.00" in admin_dashboard._daily_risk_panel(True)
-    assert "₹60.00" not in admin_dashboard._daily_risk_panel(False)
+    assert 'action="/admin/risk/reset-day"' in admin_dashboard._daily_risk_panel(True)
+    assert 'action="/admin/risk/reset-day"' not in admin_dashboard._daily_risk_panel(False)
+    monkeypatch.setattr(
+        admin_dashboard,
+        "_engine_risk_request",
+        lambda action: {
+            "daily_loss_cap": 700.0,
+            "day_loss_since_reset": 0.0,
+            "remaining_daily_risk_budget": 700.0,
+            "reset_applied_today": True,
+        },
+    )
+    assert 'action="/admin/risk/reset-day"' not in admin_dashboard._daily_risk_panel(True)
