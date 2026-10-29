@@ -172,8 +172,10 @@ def test_forward_path_verifies_exact_contract_when_requested() -> None:
         [{"timestamp": 101.0, "bid": 112.0}], **kwargs
     ) is None
     assert label_forward_option_buy_path(
-        [{"timestamp": 101.0, "symbol": contract, "bid": 112.0},
-         {"timestamp": 102.0, "bid": 120.0}],
+        [
+            {"timestamp": 101.0, "symbol": contract, "bid": 112.0},
+            {"timestamp": 102.0, "bid": 120.0},
+        ],
         **kwargs,
     ) is None
     with pytest.raises(ValueError, match="expected_symbol"):
