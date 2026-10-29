@@ -243,7 +243,9 @@ RuntimeOrderManager._get_latest_quote_safe = _get_latest_quote_freshest_cached
 _original_submit_trade_plan_result = RuntimeOrderManager.submit_trade_plan_result
 
 
-def _submit_trade_plan_with_setup_price_guard(self, plan):
+def _submit_trade_plan_with_setup_price_guard(
+    self: RuntimeOrderManager, plan: _core.TradePlan
+) -> _core.TradePlanSubmitResult:
     try:
         live = bool(self.is_live_mode())
     except Exception:
