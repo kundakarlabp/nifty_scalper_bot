@@ -1344,12 +1344,15 @@ def _emit_option_symbol_pipeline_status(
                 # False even while fresh, confirmed option ticks were flowing.
                 confirmed = getattr(mdm, "_confirmed_subscriptions", set())
                 desired = getattr(mdm, "_desired_tokens", set())
+                ws_age_getter = getattr(mdm, "time_since_last_live_ws_tick", None)
+                live_ws_age_s = (
+                    ws_age_getter(symbol) if callable(ws_age_getter) else None
+                )
                 broker_ws_token_active = bool(
                     token in confirmed
                     and token in desired
-                    and live_tick_seen
-                    and last_tick_age_s is not None
-                    and last_tick_age_s <= 5.0
+                    and live_ws_age_s is not None
+                    and 0.0 <= float(live_ws_age_s) <= 5.0
                 )
         except Exception:
             pass
