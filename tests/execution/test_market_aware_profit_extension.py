@@ -539,6 +539,34 @@ def test_adaptive_lock_skips_unexecutable_or_stale_quotes(monkeypatch, invalid):
     assert bracket.sl_trigger_price == 94.0
 
 
+@pytest.mark.parametrize("invalid_clock", ["future", "nan", "inf", "future_iso"])
+def test_adaptive_lock_rejects_noncausal_or_nonfinite_quote_clock(
+    monkeypatch, invalid_clock
+):
+    from datetime import datetime, timedelta, timezone
+    from time import time
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0)
+    if invalid_clock == "future":
+        quote["received_at"] = time() + 120.0
+    elif invalid_clock == "nan":
+        quote["received_at"] = float("nan")
+    elif invalid_clock == "inf":
+        quote["received_at"] = float("inf")
+    else:
+        quote["received_at"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=120)
+        ).isoformat()
+
+    assert not profit_extension.tighten_adaptive_profit_lock(
+        manager, bracket, 115.0
+    )
+    assert bracket.sl_trigger_price == 94.0
+
+
 def test_adaptive_lock_never_reuses_one_quote_as_multiple_confirmations(monkeypatch):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     manager = FakeManager(strong=False)
