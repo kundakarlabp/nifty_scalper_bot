@@ -804,8 +804,13 @@ def test_smc_manager_option_structure_must_follow_its_actual_sweep(
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
     signal = strategy.generate_signal(CE, indicators, 103.0)
-    assert signal is not None
-    assert signal.metadata["structure_confirmed"] is should_vote
+    if should_vote:
+        assert signal is not None
+        assert signal.metadata["structure_confirmed"] is True
+        assert signal.metadata["smc_quality_corroborated"] is True
+    else:
+        assert signal is None
+        assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
 
 
 def test_smc_manager_option_retest_and_reclaim_do_not_use_pre_sweep_bars(
