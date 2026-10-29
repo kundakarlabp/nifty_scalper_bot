@@ -446,6 +446,10 @@ def status_snapshot() -> dict[str, Any]:
         "strategy_evaluation_basis": no_trade.get("basis"),
         "strategy_evaluations": no_trade.get("strategy_evaluations"),
         "dominant_rejection_reasons": no_trade.get("dominant_rejection_reasons"),
+        "top_no_vote_reason_by_strategy": no_trade.get(
+            "top_no_vote_reason_by_strategy"
+        ),
+        "risk_limited_contracts": no_trade.get("risk_limited_contracts"),
         "rejection_count_basis": "evaluations_not_unique_setups",
         "candidate_generated_since_start": no_trade.get(
             "candidate_generated_since_start"

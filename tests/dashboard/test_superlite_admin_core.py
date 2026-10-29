@@ -428,6 +428,10 @@ def test_trade_scorecard_uses_engine_counters_not_log_occurrences(monkeypatch) -
                 ],
                 "candidate_generated_since_start": 2,
                 "candidate_approved_since_start": 0,
+                "top_no_vote_reason_by_strategy": {
+                    "SMC": {"reason": "no_independent_flow_confirmation", "count": 34}
+                },
+                "risk_limited_contracts": ["NFO:NIFTY26OCT22650CE"],
             },
             "effective_risk_policy": {
                 "known": True,
@@ -448,6 +452,8 @@ def test_trade_scorecard_uses_engine_counters_not_log_occurrences(monkeypatch) -
     assert card["scope"] == "current_engine_snapshot_not_full_session"
     assert card["candidate_generated_since_start"] == 2
     assert card["candidate_approved_since_start"] == 0
+    assert card["top_no_vote_reason_by_strategy"]["SMC"]["count"] == 34
+    assert card["risk_limited_contracts"] == ["NFO:NIFTY26OCT22650CE"]
     assert card["rejection_count_basis"] == "evaluations_not_unique_setups"
     assert card["market_regime"] == "RANGE"
     assert card["per_trade_budget_rupees"] is None
