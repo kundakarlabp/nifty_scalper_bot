@@ -1145,7 +1145,7 @@ class MarketDataManager:
             diag_before = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             engine.import_history(frame, mode="incremental", source="historical")
             diag_after = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
-            self._refresh_candle_projection(normalized_symbol)
+            self._refresh_candle_projection(normalized_symbol, source="historical")
             after = self.get_ohlc_bars(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
@@ -1467,16 +1467,12 @@ class MarketDataManager:
             }
             self._candle_projection_diagnostics[normalized] = diagnostics
         if divergence:
-            # A full historical hydrate/rebase legitimately changes the size
-            # of the read-only projection. Preserve the metric, distinguish
-            # that repair from a mismatch in existing completed live candles.
-            historical_refresh = bool(
-                any(
-                    marker in str(source or "").lower()
-                    for marker in ("history", "historical", "hydration", "backfill")
-                )
-                and len(previous) != len(projected)
-                and lag_after_bars == 0.0
+            # Historical REST may revise an already completed live candle
+            # without changing its count. The import caller explicitly owns
+            # this provenance, so equal-length reconciliations are expected
+            # too. Unattributed live mismatches remain warnings.
+            historical_refresh = (
+                source == "historical" and lag_after_bars == 0.0
             )
             classification = (
                 "history_reconciliation" if historical_refresh else "live_mismatch"
@@ -12028,15 +12024,9 @@ class MarketDataManager:
             return None
         if latest is None:
             return None
-        quote = dict(latest)
-        now_ms = self._now_ms()
-        bid = _coerce_float(quote.get("bid"))
-        ask = _coerce_float(quote.get("ask"))
-        if bid is not None and ask is not None and bid > 0 and ask > 0:
-            mid = (float(bid) + float(ask)) / 2.0
-            self._last_mid[canonical_symbol] = (mid, now_ms)
-        self._last_quote_ts_ms[canonical_symbol] = now_ms
-        return quote
+        # Read-only: freshness and mid-price age are stamped on accepted
+        # ingress, not by a consumer repeatedly requesting the same quote.
+        return dict(latest)
 
     def resolve_active_nifty_future_symbol(
         self, now: datetime | None = None
@@ -13077,14 +13067,17 @@ class MarketDataManager:
                         self._last_mid[canonical_symbol] = (mid, now_ms)
                 self._emit_tick(canonical_symbol, normalized_tick, source="rest")
                 return normalized_tick
-            # Fallback: raw cache update when normalization yields no ltp
-            with self._lock:
-                self._latest_ticks[canonical_symbol] = quote
-                self._last_quote_ts_ms[canonical_symbol] = now_ms
-                self._last_tick_time[canonical_symbol] = time.time()
-                if mid is not None:
-                    self._last_mid[canonical_symbol] = (mid, now_ms)
-            return quote
+            # A broker reply without a validated price is not a quote tick.
+            # Do not overwrite a more complete live WS quote or renew its age.
+            self._logger.warning(
+                "MDM_REST_QUOTE_REJECTED_NO_VALID_TICK symbol=%s key=%s",
+                canonical_symbol,
+                key,
+                extra={
+                    "event": "MDM_REST_QUOTE_REJECTED_NO_VALID_TICK",
+                    "symbol": canonical_symbol,
+                },
+            )
         self._logger.error(
             "refresh_quote_failed_all_candidates",
             extra={
