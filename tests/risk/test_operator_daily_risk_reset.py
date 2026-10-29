@@ -128,3 +128,87 @@ def test_missing_operator_baseline_keeps_legacy_seed_behavior() -> None:
     RiskManager._seed_day_pnl_from_persisted_state(owner)
 
     assert switches.day_loss() == pytest.approx(400.0)
+
+
+def test_operator_risk_reset_is_at_most_once_per_trading_day() -> None:
+    today = "2026-10-29"
+    persisted: dict[str, object] = {}
+    manager = SimpleNamespace(
+        get_realized_pnl=lambda: -450.0,
+        _trading_date_ist=lambda: today,
+        get_risk_circuit_state=lambda: dict(persisted),
+        persist_risk_circuit_state=lambda **updates: persisted.update(
+            updates, trading_date=today
+        ),
+    )
+    switches = RiskSwitches(
+        max_day_loss=700.0,
+        max_consecutive_losses=3,
+        cooldown_minutes=1.0,
+        reset_hour_utc=3,
+    )
+    switches.record_pnl(-450.0)
+    switches.record_trade_result(-400.0)
+    owner = SimpleNamespace(
+        position_manager=manager,
+        _switches=switches,
+        _completed_trade_costs_today=35.0,
+        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        _format_switch_reason=lambda reason: reason,
+    )
+    first = RiskManager.operator_reset_daily_loss_budget(owner)
+    assert first["prior_day_loss"] == pytest.approx(450.0)
+    assert switches.day_loss() == 0.0
+    assert persisted["operator_reset_trading_date"] == today
+    assert persisted["operator_reset_realized_baseline"] == -450.0
+    assert switches.consecutive_losses() == 1
+    assert switches.cooldown_remaining() > 0
+    with pytest.raises(ValueError, match="daily_risk_reset_already_applied"):
+        RiskManager.operator_reset_daily_loss_budget(owner)
+    assert switches.day_loss() == 0.0
+
+
+def test_failed_durable_write_does_not_clear_loss_allowance() -> None:
+    switches = RiskSwitches(
+        max_day_loss=700.0,
+        max_consecutive_losses=3,
+        cooldown_minutes=0.0,
+        reset_hour_utc=3,
+    )
+    switches.record_pnl(-650.0)
+
+    def fail_to_persist(**_updates):
+        raise OSError("disk write unavailable")
+
+    owner = SimpleNamespace(
+        position_manager=SimpleNamespace(
+            get_realized_pnl=lambda: -650.0,
+            persist_risk_circuit_state=fail_to_persist,
+        ),
+        _switches=switches,
+        _completed_trade_costs_today=0.0,
+    )
+    with pytest.raises(OSError, match="disk write unavailable"):
+        RiskManager.operator_reset_daily_loss_budget(owner)
+    assert switches.day_loss() == pytest.approx(650.0)
+
+
+def test_restoring_stale_reset_baseline_cannot_erase_next_day_loss() -> None:
+    today = "2026-10-29"
+    owner = SimpleNamespace(
+        position_manager=SimpleNamespace(
+            _trading_date_ist=lambda: today,
+            get_risk_circuit_state=lambda: {
+                "trading_date": "2026-10-28",
+                "operator_reset_trading_date": "2026-10-28",
+                "operator_reset_realized_baseline": -800.0,
+                "operator_reset_cost_baseline": 70.0,
+            },
+        ),
+        _operator_reset_realized_baseline=0.0,
+        _operator_reset_cost_baseline=0.0,
+        _operator_reset_trading_date="",
+    )
+    RiskManager._restore_operator_reset_baseline(owner)
+    assert owner._operator_reset_realized_baseline == 0.0
+    assert owner._operator_reset_trading_date == ""
