@@ -286,25 +286,28 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
     try:
         if isinstance(raw, datetime):
             stamp = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-            return max(
-                0.0,
-                (
-                    datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
-                ).total_seconds(),
-            )
-        if isinstance(raw, (int, float)):
-            seconds = float(raw) / 1000.0 if float(raw) > 1e12 else float(raw)
-            return max(0.0, time.time() - seconds)
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        return max(
-            0.0,
-            (
+            age = (
                 datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
-            ).total_seconds(),
-        )
-    except (TypeError, ValueError, OSError):
+            ).total_seconds()
+        elif isinstance(raw, (int, float)):
+            timestamp = float(raw)
+            if not math.isfinite(timestamp):
+                return None
+            seconds = timestamp / 1000.0 if timestamp > 1e12 else timestamp
+            age = time.time() - seconds
+        else:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (
+                datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
+            ).total_seconds()
+        # Never classify a nonfinite or future-dated quote as fresh.
+        # Tolerate up to one second of exchange/host clock skew.
+        if not math.isfinite(age) or age < -1.0:
+            return None
+        return max(0.0, age)
+    except (TypeError, ValueError, OSError, OverflowError):
         return None
 
 
