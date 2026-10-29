@@ -123,8 +123,18 @@ def test_remote_and_unsigned_requests_cannot_rebase(monkeypatch):
 @pytest.mark.parametrize(
     ("positions", "orders", "reconciled", "reason"),
     [
-        ([SimpleNamespace(symbol="NFO:NIFTY")], None, True, "broker_positions_or_orders_open"),
-        (None, [SimpleNamespace(status="OPEN")], True, "broker_positions_or_orders_open"),
+        (
+            [SimpleNamespace(symbol="NFO:NIFTY")],
+            None,
+            True,
+            "broker_positions_or_orders_open",
+        ),
+        (
+            None,
+            [SimpleNamespace(status="OPEN")],
+            True,
+            "broker_positions_or_orders_open",
+        ),
         (None, None, False, "broker_reconciliation_unverified"),
     ],
 )
