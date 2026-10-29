@@ -4412,42 +4412,16 @@ class MarketDataManager:
                                         except Exception:
                                             pass
                                     else:
-                                        _now_ts = time.time()
-                                        _now_ms_v = self._now_ms()
-                                        with self._lock:
-                                            self._latest_ticks[canonical_symbol] = {
-                                                "symbol": canonical_symbol,
-                                                "ltp": p,
-                                                "price": p,
-                                                "timestamp": _now_ts,
-                                                "source": "rest",
-                                            }
-                                            self._last_tick_time[canonical_symbol] = (
-                                                _now_ts
-                                            )
-                                            self._last_tick_wallclock[
-                                                canonical_symbol
-                                            ] = _now_ts
-                                            self._last_quote_ts_ms[canonical_symbol] = (
-                                                _now_ms_v
-                                            )
-                                            self._last_tick_source[canonical_symbol] = (
-                                                "rest"
-                                            )
-                                        try:
-                                            self.update_authoritative_ticks(
-                                                [
-                                                    {
-                                                        "symbol": canonical_symbol,
-                                                        "ltp": p,
-                                                        "price": p,
-                                                        "timestamp": _now_ts,
-                                                        "source": "rest",
-                                                    }
-                                                ]
-                                            )
-                                        except Exception:
-                                            pass
+                                        # A direct price may be returned to
+                                        # this explicit caller, but a quote
+                                        # rejected by normalization must not
+                                        # overwrite canonical WS FULL state or
+                                        # reset the quote's freshness clock.
+                                        self._logger.warning(
+                                            "MDM_REST_LTP_UNCACHED_INVALID_TICK "
+                                            "symbol=%s",
+                                            canonical_symbol,
+                                        )
                             except Exception:  # noqa: BLE001
                                 pass
                             return p
