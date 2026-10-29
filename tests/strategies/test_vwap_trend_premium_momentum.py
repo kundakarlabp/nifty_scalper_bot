@@ -774,7 +774,11 @@ def test_default_080_confidence_floor_accepts_080_but_not_weaker_context(
 def test_strict_continuation_retest_rebreak_is_eligible(monkeypatch):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     _, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, prior_high=102.0
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=102.0,
     )
     assert signal is not None
     assert signal.metadata["setup_type"] == "vwap_continuation"
@@ -785,7 +789,11 @@ def test_strict_continuation_retest_rebreak_is_eligible(monkeypatch):
 def test_strict_continuation_rejects_no_breakout(monkeypatch):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     strategy, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, prior_high=105.0
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=105.0,
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_continuation_quality_unconfirmed"
@@ -794,7 +802,11 @@ def test_strict_continuation_rejects_no_breakout(monkeypatch):
 def test_strict_continuation_rejects_range_regime(monkeypatch):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     strategy, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", regime="RANGE", low=100.0
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        regime="RANGE",
+        low=100.0,
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_quality_regime_not_trend"
@@ -803,7 +815,11 @@ def test_strict_continuation_rejects_range_regime(monkeypatch):
 def test_strict_continuation_requires_finalized_candle(monkeypatch):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     strategy, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, is_complete=False
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        is_complete=False,
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
@@ -817,7 +833,11 @@ def test_strict_continuation_rejects_stale_thesis(monkeypatch):
         lambda self, *args, **kwargs: "2026-09-10T09:55:00+05:30",
     )
     strategy, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, prior_high=102.0
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=102.0,
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_continuation_quality_unconfirmed"
@@ -827,7 +847,11 @@ def test_strict_continuation_rejects_untraded_prior_retest(monkeypatch):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     prior_volumes = [900.0] * 9 + [0.0]
     strategy, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, prior_high=102.0,
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=102.0,
         prior_volumes=prior_volumes,
     )
     assert signal is None
@@ -837,7 +861,11 @@ def test_strict_continuation_rejects_untraded_prior_retest(monkeypatch):
 def test_strict_continuation_is_default_off(monkeypatch):
     monkeypatch.delenv("VWAP_STRICT_CONTINUATION_ENABLED", raising=False)
     _, signal = _evaluate(
-        monkeypatch, enabled=False, execution_mode="SHADOW", low=100.0, prior_high=105.0
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=105.0,
     )
     assert signal is not None
     assert signal.metadata["vwap_strict_continuation_enabled"] is False
