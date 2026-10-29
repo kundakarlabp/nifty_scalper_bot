@@ -95,7 +95,7 @@ def _orb_indicators(side: str, latest_ts: datetime) -> dict[str, object]:
         "underlying_direction_bias": side,
         "regime": "TREND_UP" if side == "CE" else "TREND_DOWN",
         "spread_pct": 0.5,
-        "bid": 49.5,
+        "bid": 49.8,
         "ask": 50.0,
         "quote_depth_valid": True,
         "tradable_quote": True,

@@ -2,6 +2,7 @@
 
 Responsibilities:
 - Parse finite top-of-book bid/ask and observed spread into quote evidence.
+- Never let a supplied spread percentage understate same-quote bid/ask width.
 - Treat the producer tradable_quote bit as provisional, not executable proof.
 - Preserve separate structural, freshness, post-cost and broker risk owners.
 
@@ -127,11 +128,13 @@ def build_execution_evidence(
     if spread_pct is None or not isfinite(spread_pct) or spread_pct < 0:
         spread_pct = None
         spread_observed = False
-    if not spread_observed and bid_ask_valid:
-        midpoint = (bid + ask) / 2.0
-        if midpoint > 0:
-            spread_pct = ((ask - bid) / midpoint) * 100.0
-            spread_observed = True
+    if bid_ask_valid:
+        # The quote's own bid/ask cannot be contradicted by an older,
+        # mis-scaled or otherwise underestimated supplied spread value.
+        midpoint = bid + (ask - bid) / 2.0
+        quote_spread_pct = ((ask - bid) / midpoint) * 100.0
+        spread_pct = max(spread_pct or 0.0, quote_spread_pct)
+        spread_observed = True
 
     spread_limit = canonical_max_spread_pct()
     spread_ok = (
