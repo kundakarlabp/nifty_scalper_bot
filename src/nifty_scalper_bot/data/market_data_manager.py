@@ -633,6 +633,12 @@ class MarketDataManager:
         self._tick_drain_invocation_budget_s = self._parse_float_env(
             "MDM_TICK_DRAIN_INVOCATION_BUDGET_SECONDS", default=0.05, minimum=0.005
         )
+        # Bound per-invocation fanout regardless of the queue size. Scheduling
+        # the next drain preserves ordered delivery and gives other callbacks
+        # an opportunity to run even when each worker tick is expensive.
+        self._tick_drain_invocation_max_ticks = self._parse_int_env(
+            "MDM_TICK_DRAIN_INVOCATION_MAX_TICKS", default=3, minimum=1
+        )
         self._tick_drain_callbacks_scheduled = 0
         self._tick_drain_callbacks_completed = 0
         self._tick_drain_callbacks_cancelled = 0
@@ -1461,12 +1467,36 @@ class MarketDataManager:
             }
             self._candle_projection_diagnostics[normalized] = diagnostics
         if divergence:
-            self._logger.warning(
-                "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s",
+            # A full historical hydrate/rebase legitimately changes the size
+            # of the read-only projection. Preserve the metric, distinguish
+            # that repair from a mismatch in existing completed live candles.
+            historical_refresh = bool(
+                any(
+                    marker in str(source or "").lower()
+                    for marker in ("history", "historical", "hydration", "backfill")
+                )
+                and len(previous) != len(projected)
+                and lag_after_bars == 0.0
+            )
+            classification = (
+                "history_reconciliation" if historical_refresh else "live_mismatch"
+            )
+            if historical_refresh:
+                with self._lock:
+                    self._candle_metrics["candle_projection_history_reconciled_total"] += 1
+            self._logger.log(
+                logging.INFO if historical_refresh else logging.WARNING,
+                "CANDLE_PROJECTION_DIVERGENCE symbol=%s previous=%s projected=%s classification=%s lag_after_bars=%s",
                 normalized,
                 len(previous),
                 len(projected),
-                extra={"event": "CANDLE_PROJECTION_DIVERGENCE", "symbol": normalized},
+                classification,
+                lag_after_bars,
+                extra={
+                    "event": "CANDLE_PROJECTION_DIVERGENCE",
+                    "symbol": normalized,
+                    "classification": classification,
+                },
             )
         return [dict(row) for row in projected]
 
@@ -7767,6 +7797,11 @@ class MarketDataManager:
             if worker_wait_ms is None
             else round(max(0.0, duration_ms - worker_wait_ms), 3)
         )
+        latency_owner = (
+            "worker"
+            if worker_wait_ms is not None and worker_wait_ms >= 0.8 * duration_ms
+            else "event_loop_or_callback"
+        )
         message = (
             f"TICK_STAGE_SLOW stage={stage} callback={callback_name} "
             f"symbol={symbol} duration_ms={duration_ms:.3f} "
@@ -7776,7 +7811,8 @@ class MarketDataManager:
             f"oldest_pending_age_ms={oldest_ms} drain_active={drain_active} "
             f"source={source} thread_id={thread_id} "
             f"event_loop_thread={loop_thread} awaited_worker_ms={awaited_ms} "
-            f"loop_overhead_ms={other_ms} ticks_processed={ticks_processed}"
+            f"loop_overhead_ms={other_ms} ticks_processed={ticks_processed} "
+            f"latency_owner={latency_owner}"
         )
         log_throttled(
             self._logger,
@@ -7806,6 +7842,7 @@ class MarketDataManager:
                     else None
                 ),
                 "ticks_processed": ticks_processed,
+                "latency_owner": latency_owner,
             },
         )
 
@@ -7851,6 +7888,12 @@ class MarketDataManager:
                         self._logger.error(
                             "MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True
                         )
+                    if (
+                        processed_in_invocation
+                        >= self._tick_drain_invocation_max_ticks
+                    ):
+                        self._requeue_unprocessed_ticks(batch[index + 1 :])
+                        return
                     if time.monotonic() - start >= self._tick_drain_budget_s:
                         self._requeue_unprocessed_ticks(batch[index + 1 :])
                         break
