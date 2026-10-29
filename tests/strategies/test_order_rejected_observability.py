@@ -191,6 +191,30 @@ def test_decision_research_context_preserves_only_known_structural_facts() -> No
     assert context["confirmation_contract"] == {"passed": True}
 
 
+def test_decision_research_context_uses_actual_runtime_regime_when_available() -> None:
+    # The runner sets runtime_regime before constructing the trade decision.
+    # A legacy strategy-level label must not overwrite the observed regime.
+    context = StrategyRunner._decision_research_context(
+        metadata={
+            "strategy": "VWAPPro",
+            "regime": "RANGE",
+            "runtime_regime": "TREND",
+        },
+        stage="runner_structural_execution_validation",
+    )
+
+    assert context["regime"] == "TREND"
+    assert "runtime_regime" not in context
+
+
+def test_decision_research_context_keeps_legacy_regime_when_runtime_missing() -> None:
+    context = StrategyRunner._decision_research_context(
+        metadata={"strategy": "SMC", "regime": "RANGE"},
+        stage="runner_structural_execution_validation",
+    )
+    assert context["regime"] == "RANGE"
+
+
 def test_reject_signal_execution_forwards_existing_research_context() -> None:
     captured: list[dict[str, object]] = []
     runner = SimpleNamespace(
