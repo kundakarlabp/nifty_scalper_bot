@@ -6,7 +6,8 @@
 Responsibilities: Calculate premium and underlying evidence, scope VWAP thesis
 to the originating option contract, and report effective context gate settings.
 Safety: Never bypass fresh bars, bid/ask quality, trend proof, risk geometry or
-live trade safeguards merely to increase candidate frequency.
+live trade safeguards merely to increase candidate frequency. A default-off
+continuation-quality profile checks completed-bar breakout/retest provenance.
 """
 from __future__ import annotations
 
@@ -192,6 +193,12 @@ class VWAPProStrategy(EliteStrategy):
         # finalized option candle. Existing LIVE candidacy is unchanged.
         self._require_finalized_signal_bar = str(
             os.getenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        # Research-only continuation profile: preserve the ordinary LIVE rule
+        # until matched executable-quote replay supports promotion.
+        self._strict_continuation_enabled = str(
+            os.getenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
 
         # get_session_vwap_slope() returns percentage change over finalized
@@ -853,7 +860,7 @@ class VWAPProStrategy(EliteStrategy):
 
             confirmed_bar = None
             last_bars = []
-            if premium_momentum_required or self._require_finalized_signal_bar:
+            if premium_momentum_required or self._require_finalized_signal_bar or self._strict_continuation_enabled:
                 # Confirm exactly the completed premium candle used by this vote.
                 # One proof owner serves both research profiles without a second
                 # signal path or an unconditional LIVE admission change.
@@ -1091,6 +1098,86 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("vwap_event_unconfirmed")
                 return None
 
+            # Research profile: a bullish candle above VWAP is insufficient by
+            # itself. Require a recent structural thesis, finalized breakout
+            # bar and either a genuine as-of-VWAP retest or strong momentum.
+            # OFI remains a separate context vote and cannot waive this proof.
+            continuation_proof = None
+            if self._strict_continuation_enabled and setup_type == "vwap_continuation":
+                if trend_momentum_regime != MarketRegime.TREND:
+                    self._no_vote("vwap_quality_regime_not_trend")
+                    return None
+                if not strong_fresh_trend_context:
+                    self._no_vote("vwap_quality_underlying_unconfirmed")
+                    return None
+                try:
+                    current_ts = datetime.fromisoformat(
+                        _normalize_thesis_anchor(confirmed_bar["timestamp"])
+                    )
+                    anchor_ts = datetime.fromisoformat(
+                        _normalize_thesis_anchor(thesis_anchor)
+                    )
+                    prior = last_bars[-2]
+                    prior_ts = datetime.fromisoformat(
+                        _normalize_thesis_anchor(prior["timestamp"])
+                    )
+                    prior_high = float(prior["high"])
+                    prior_low = float(prior["low"])
+                    prior_close = float(prior["close"])
+                    prior_volume = float(prior["volume"])
+                    current_high = float(confirmed_bar["high"])
+                    current_low = float(confirmed_bar["low"])
+                    current_vol = float(confirmed_bar["volume"])
+                    thesis_age = (current_ts - anchor_ts).total_seconds()
+                    contiguous = current_ts - prior_ts == timedelta(minutes=1)
+                    valid_prior = (
+                        prior.get("is_complete") is True
+                        and prior.get("is_provisional") is not True
+                        and all(math.isfinite(v) for v in (
+                            prior_high, prior_low, prior_close, prior_volume
+                        ))
+                        and prior_low <= prior_close <= prior_high
+                        and prior_volume > 0
+                    )
+                    close_location = (close - current_low) / (current_high - current_low)
+                    fresh_breakout = (
+                        current_ts.date() == anchor_ts.date()
+                        and 0.0 <= thesis_age <= 180.0
+                        and contiguous and valid_prior
+                        and current_vol > 0
+                        and close > prior_high
+                        and close_location >= 0.70
+                        and option_volume_ratio is not None
+                        and option_volume_ratio >= 1.0
+                        and distance_atr <= self._quality_max_distance_atr
+                    )
+                    prior_vwap_getter = getattr(
+                        self._indicator_engine, "get_session_vwap_at", None
+                    )
+                    prior_vwap = (
+                        prior_vwap_getter(symbol, prior_ts)
+                        if fresh_breakout and callable(prior_vwap_getter)
+                        else None
+                    )
+                    retest = bool(
+                        prior_vwap is not None
+                        and math.isfinite(float(prior_vwap))
+                        and float(prior_vwap) > 0
+                        and prior_low <= float(prior_vwap) <= prior_close
+                        and current_low >= vwap
+                        and close > open_price
+                    )
+                    strong_momentum = bool(
+                        momentum_continuation_confirmed and close > prior_close
+                    )
+                    if fresh_breakout and (retest or strong_momentum):
+                        continuation_proof = "retest_rebreak" if retest else "momentum_breakout"
+                except (KeyError, TypeError, ValueError, OverflowError, IndexError, ZeroDivisionError):
+                    continuation_proof = None
+                if continuation_proof is None:
+                    self._no_vote("vwap_continuation_quality_unconfirmed")
+                    return None
+
             # A weak same-direction slope may be replaced only by completed
             # momentum, causal option RVOL, fresh underlying trend and volume.
             # SHADOW research remains separate from explicit LIVE admission.
@@ -1245,6 +1332,8 @@ class VWAPProStrategy(EliteStrategy):
                 "context_required": False,
                 "setup_reasons": reasons,
                 "setup_type": setup_type,
+                "vwap_strict_continuation_enabled": self._strict_continuation_enabled,
+                "vwap_continuation_proof": continuation_proof,
                 "setup_name": setup_type,
                 "vwap_event_subtype": setup_type,
                 "required_data_present": required_data_present,
@@ -1312,7 +1401,7 @@ class VWAPProStrategy(EliteStrategy):
                 "trend_momentum_enabled": self._trend_momentum_enabled,
                 "vwap_neutral_slope_premium_proof_required": premium_momentum_required,
                 "vwap_finalized_bar_required": (
-                    self._require_finalized_signal_bar or premium_momentum_required
+                    self._require_finalized_signal_bar or premium_momentum_required or self._strict_continuation_enabled
                 ),
                 "vwap_finalized_bar_confirmed": confirmed_bar is not None,
                 "trend_momentum_regime": trend_momentum_regime.value,
