@@ -71,8 +71,7 @@ def test_reclaim_and_close_excluded_from_continuation_gate(monkeypatch):
         _signal(stale, action="SELL"),
     ):
         assert (
-            _approved_vwap_continuation_freshness_block(signal, now_epoch=EPOCH)
-            is None
+            _approved_vwap_continuation_freshness_block(signal, now_epoch=EPOCH) is None
         )
 
 
