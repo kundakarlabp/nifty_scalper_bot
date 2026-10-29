@@ -5,6 +5,8 @@ options and emit candidates only when directional, temporal and local
 confirmation conditions hold. Safety boundary: manager enrichment must
 timestamp every live local indicator used to corroborate the sweep;
 StrategyManager and the live-safety guard independently own final admission.
+A trend sweep needs distinct volume, timed structure, or retest/reclaim proof;
+price displacement alone is not sufficient.
 """
 
 from __future__ import annotations
