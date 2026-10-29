@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -139,3 +140,100 @@ def test_http_never_allows_owner_login_or_mutation(monkeypatch, tmp_path) -> Non
         == 403
     )
     assert client.get("/admin/manage").status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("source_headers", "allowed"),
+    [
+        ({}, True),  # Mobile browser with no Origin and no Referer
+        ({"origin": "null"}, True),  # Opaque origin with signed challenge
+        ({"referer": "https://65.0.255.84/admin"}, True),
+        ({"origin": "https://65.0.255.84:443"}, True),
+        ({"origin": "https://evil.invalid"}, False),
+        ({"referer": "https://evil.invalid/form"}, False),
+        ({"origin": "http://65.0.255.84"}, False),
+        ({"origin": "https://65.0.255.84:8443"}, False),
+        (
+            {
+                "origin": "https://65.0.255.84",
+                "referer": "https://evil.invalid/form",
+            },
+            False,
+        ),
+    ],
+)
+def test_mobile_owner_paste_origin_policy(
+    monkeypatch, tmp_path, source_headers, allowed
+) -> None:
+    client = _setup(monkeypatch, tmp_path)
+    state = _start(client)
+    exchanged = []
+    activated = []
+    monkeypatch.setattr(
+        dashboard,
+        "_exchange_request_token",
+        lambda *_: exchanged.append(True) or (True, "fresh-access"),
+    )
+    monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "AB1234"))
+    monkeypatch.setattr(
+        dashboard,
+        "_activate_access_token",
+        lambda token: activated.append(token)
+        or ControlResult(True, "restart_bot", "queued"),
+    )
+    response = client.post(
+        "/admin/token",
+        data={"owner_state": state, "request_token": "fresh-request"},
+        headers=source_headers,
+        follow_redirects=False,
+    )
+    assert response.status_code == (303 if allowed else 403)
+    assert len(exchanged) == len(activated) == (1 if allowed else 0)
+    if allowed:
+        assert response.headers["location"] == "/admin?token=ok"
+    else:
+        assert response.json()["detail"] == "admin_same_origin_required"
+
+
+def test_missing_origin_still_requires_valid_cookie_bound_challenge(
+    monkeypatch, tmp_path
+) -> None:
+    client = _setup(monkeypatch, tmp_path)
+    _start(client)
+    monkeypatch.setattr(
+        dashboard,
+        "_exchange_request_token",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not exchange")),
+    )
+    response = client.post(
+        "/admin/token",
+        data={"owner_state": "forged", "request_token": "fresh-request"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "owner_login_challenge_invalid"
+
+
+def test_mobile_privacy_policy_and_secondary_login_submit(
+    monkeypatch, tmp_path
+) -> None:
+    client = _setup(monkeypatch, tmp_path)
+    page = client.get("/admin")
+    assert page.headers["referrer-policy"] == "same-origin"
+    state = re.search(r'name="owner_state" value="([^"]+)"', page.text)
+    assert state is not None
+    monkeypatch.setattr(
+        dashboard, "_exchange_request_token", lambda *_: (True, "fresh-access")
+    )
+    monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "AB1234"))
+    monkeypatch.setattr(
+        dashboard,
+        "_activate_access_token",
+        lambda *_: ControlResult(True, "restart_bot", "queued"),
+    )
+    result = client.post(
+        "/admin/kite/complete",
+        data={"owner_state": state.group(1), "request_token": "fresh-request"},
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    assert result.headers["location"] == "/admin?token=ok"
