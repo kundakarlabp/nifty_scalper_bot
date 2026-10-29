@@ -1145,7 +1145,9 @@ class MarketDataManager:
             diag_before = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             engine.import_history(frame, mode="incremental", source="historical")
             diag_after = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
-            self._refresh_candle_projection(normalized_symbol, source="historical_import")
+            self._refresh_candle_projection(
+                normalized_symbol, source="historical_import"
+            )
             after = self.get_ohlc_bars(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
