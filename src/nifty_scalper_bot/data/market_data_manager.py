@@ -8119,6 +8119,11 @@ class MarketDataManager:
             payload["source"] = "ws"
             payload["received_at"] = now
             payload.setdefault("timestamp", now)
+            # KiteTicker emits average_traded_price, not REST average_price.
+            # The fast cache is read by DataHub before the queued tick is
+            # normalized; publish the canonical, broker-derived field here too.
+            # Never synthesize VWAP from LTP or carry an earlier observation.
+            payload.update(self._broker_quote_vwap_fields(raw_tick, canonical))
             if token is not None:
                 payload["instrument_token"] = int(token)
 
