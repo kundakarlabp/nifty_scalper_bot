@@ -9531,7 +9531,12 @@ class MarketDataManager:
             self._last_quote_ts_ms[symbol] = accepted_at_ms
             bid = _coerce_float(cached_tick.get("bid"))
             ask = _coerce_float(cached_tick.get("ask"))
-            if bid is not None and ask is not None and 0 < bid <= ask:
+            if (
+                bid is not None
+                and ask is not None
+                and 0 < bid <= ask
+                and hasattr(self, "_last_mid")
+            ):
                 self._last_mid[symbol] = ((bid + ask) / 2.0, accepted_at_ms)
         staleness_seconds = 0.0
         try:
