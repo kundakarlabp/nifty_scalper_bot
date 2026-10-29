@@ -308,24 +308,21 @@ def render() -> None:
     with st.expander("Decision and risk scorecard (current engine)", expanded=False):
         scorecard = status.get("trade_scorecard") or {}
         if scorecard.get("available"):
+            generated = scorecard.get("candidate_generated_since_start")
+            approved = scorecard.get("candidate_approved_since_start")
+            risk_pct = scorecard.get("per_trade_risk_pct")
             metrics = st.columns(3)
             metrics[0].metric(
                 "Candidates since engine start",
-                scorecard.get("candidate_generated_since_start")
-                if scorecard.get("candidate_generated_since_start") is not None
-                else "Unknown",
+                generated if generated is not None else "Unknown",
             )
             metrics[1].metric(
                 "Approved since engine start",
-                scorecard.get("candidate_approved_since_start")
-                if scorecard.get("candidate_approved_since_start") is not None
-                else "Unknown",
+                approved if approved is not None else "Unknown",
             )
             metrics[2].metric(
                 "Effective per-trade risk",
-                f"{scorecard['per_trade_risk_pct']}%"
-                if scorecard.get("per_trade_risk_pct") is not None
-                else "Unknown",
+                f"{risk_pct}%" if risk_pct is not None else "Unknown",
             )
             st.json(scorecard)
         else:
