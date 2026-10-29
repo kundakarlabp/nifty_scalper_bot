@@ -113,7 +113,7 @@ def test_execution_evidence_rejects_supplied_understated_spread(monkeypatch) -> 
     assert evidence["execution_evidence_pass"] is False
 
 
-def test_execution_evidence_keeps_more_conservative_supplied_spread(monkeypatch) -> None:
+def test_execution_evidence_preserves_stricter_spread(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
     evidence = build_execution_evidence(
         {
