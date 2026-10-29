@@ -402,3 +402,53 @@ def test_service_health_route_registered_without_app_import() -> None:
         and decorator.args[0].value == "/admin/api/service-health"
         for decorator in route.decorator_list
     )
+
+
+def test_trade_scorecard_uses_engine_counters_not_log_occurrences(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    def fake_json(path: str):
+        if path == "/livez":
+            return {"bot_loaded": True}
+        if path == "/trading/status":
+            return {"execution_mode": "LIVE"}
+        return {
+            "broker_authentication": "authenticated",
+            "blockers": [],
+            "signal_observability": {
+                "last_eval_age_sec": 4.2,
+                "regime_evidence": {"stable_regime": "RANGE"},
+            },
+            "no_trade_diagnostics": {
+                "reason": "candidates_not_approved_since_start",
+                "basis": "since_start",
+                "strategy_evaluations": {"SMC": 200},
+                "dominant_rejection_reasons": [
+                    {"reason": "no_independent_flow_confirmation", "occurrences": 34}
+                ],
+                "candidate_generated_since_start": 2,
+                "candidate_approved_since_start": 0,
+            },
+            "effective_risk_policy": {
+                "known": True,
+                "per_trade_risk_pct": 5.0,
+                "per_trade_budget_rupees": None,
+                "max_day_loss_rupees": None,
+            },
+        }
+
+    monkeypatch.setattr(core, "_http_json", fake_json)
+    monkeypatch.setattr(core, "_git_ref", lambda _ref: "abc1234")
+    monkeypatch.setattr(core, "bounded_logs", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "current"})
+    core.STATUS_CACHE.update({"at": 0.0, "data": {}})
+
+    card = core.status_snapshot()["trade_scorecard"]
+    assert card["available"] is True
+    assert card["scope"] == "current_engine_snapshot_not_full_session"
+    assert card["candidate_generated_since_start"] == 2
+    assert card["candidate_approved_since_start"] == 0
+    assert card["rejection_count_basis"] == "evaluations_not_unique_setups"
+    assert card["market_regime"] == "RANGE"
+    assert card["per_trade_budget_rupees"] is None
+    assert card["performance_evidence"] == "canonical_ledger_report_required"

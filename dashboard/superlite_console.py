@@ -2,7 +2,7 @@
 
 Responsibilities:
 - status_snapshot, service_health_snapshot and recent_events fetch bounded data.
-- render shows readiness, engine health, P&L summaries and event feed.
+- render shows readiness, engine health, bounded P&L and a read-only scorecard.
 - Display labels distinguish missing evidence from confirmed broker state.
 
 Boundaries: Console does not run strategy, orders or release activation.
@@ -305,6 +305,33 @@ def render() -> None:
         unsafe_allow_html=True,
     )
     st.download_button("Download current filtered events", csv_bytes(rows), file_name=f"niftybot-events-{datetime.now(IST):%Y%m%d-%H%M}.csv", mime="text/csv", width="stretch")
+    with st.expander("Decision and risk scorecard (current engine)", expanded=False):
+        scorecard = status.get("trade_scorecard") or {}
+        if scorecard.get("available"):
+            generated = scorecard.get("candidate_generated_since_start")
+            approved = scorecard.get("candidate_approved_since_start")
+            risk_pct = scorecard.get("per_trade_risk_pct")
+            metrics = st.columns(3)
+            metrics[0].metric(
+                "Candidates since engine start",
+                generated if generated is not None else "Unknown",
+            )
+            metrics[1].metric(
+                "Approved since engine start",
+                approved if approved is not None else "Unknown",
+            )
+            metrics[2].metric(
+                "Effective per-trade risk",
+                f"{risk_pct}%" if risk_pct is not None else "Unknown",
+            )
+            st.json(scorecard)
+        else:
+            st.warning("Current engine scorecard evidence unavailable.")
+        st.caption(
+            "Strategy evaluations and rejection occurrences are not unique trades. "
+            "This snapshot is not a session P&L or realized expectancy report. "
+            "Use the canonical completed-trade journal for cost-inclusive outcomes."
+        )
     with st.expander("Hardening install proof", expanded=False):
         st.json({"display": proof_status, "install_proof": proof})
     with st.expander("Service liveness (host-local)", expanded=False):

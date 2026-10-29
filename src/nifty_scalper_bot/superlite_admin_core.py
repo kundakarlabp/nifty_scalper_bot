@@ -1,7 +1,7 @@
 """Purpose: Provide bounded status and filesystem access for isolated admin UI.
 
 Responsibilities:
-- Read release state, engine health and operator-visible diagnostics.
+- Read release state, engine health and bounded operator quality diagnostics.
 - Verify host-local engine/admin/Streamlit HTTP liveness independently.
 - Keep admin settings and journal operations outside the trading engine.
 
@@ -425,6 +425,43 @@ def status_snapshot() -> dict[str, Any]:
         and checkout not in {"", "—"}
         and not runtime_sha.startswith(checkout)
     )
+    # The engine owns these counters. Do not derive unique setups or trades
+    # from repeated strategy evaluation occurrences or bounded log lines.
+    signals = trading.get("signal_observability") or {}
+    if not isinstance(signals, dict):
+        signals = {}
+    no_trade = trading.get("no_trade_diagnostics") or {}
+    if not isinstance(no_trade, dict):
+        no_trade = {}
+    risk = trading.get("effective_risk_policy") or {}
+    if not isinstance(risk, dict):
+        risk = {}
+    regime = signals.get("regime_evidence") or {}
+    if not isinstance(regime, dict):
+        regime = {}
+    scorecard = {
+        "scope": "current_engine_snapshot_not_full_session",
+        "available": engine_http_responsive and bool(trading),
+        "runner_last_eval_age_sec": signals.get("last_eval_age_sec"),
+        "strategy_evaluation_basis": no_trade.get("basis"),
+        "strategy_evaluations": no_trade.get("strategy_evaluations"),
+        "dominant_rejection_reasons": no_trade.get("dominant_rejection_reasons"),
+        "rejection_count_basis": "evaluations_not_unique_setups",
+        "candidate_generated_since_start": no_trade.get(
+            "candidate_generated_since_start"
+        ),
+        "candidate_approved_since_start": no_trade.get(
+            "candidate_approved_since_start"
+        ),
+        "no_trade_reason": no_trade.get("reason"),
+        "market_regime": regime.get("stable_regime"),
+        "regime_confidence": regime.get("stable_confidence"),
+        "risk_known": risk.get("known"),
+        "per_trade_risk_pct": risk.get("per_trade_risk_pct"),
+        "per_trade_budget_rupees": risk.get("per_trade_budget_rupees"),
+        "daily_loss_cap_rupees": risk.get("max_day_loss_rupees"),
+        "performance_evidence": "canonical_ledger_report_required",
+    }
     data = {
         "service_process_known": _service_process_known(),
         "process_up": bool(livez) and engine_http_responsive,
@@ -457,6 +494,7 @@ def status_snapshot() -> dict[str, Any]:
         "runtime_checkout_mismatch": runtime_checkout_mismatch,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,
         "updater": _update_state(),
+        "trade_scorecard": scorecard,
     }
     STATUS_CACHE.update({"at": now, "data": dict(data)})
     return data
