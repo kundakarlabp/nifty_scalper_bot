@@ -176,10 +176,11 @@ def test_owner_dashboard_shows_real_budget_only_after_auth(monkeypatch):
             "reset_applied_today": False,
         },
     )
+    reset_form = 'action="/admin/risk/reset-day"'
     assert "₹60.00" in admin_dashboard._daily_risk_panel(True)
     assert "₹700.00" in admin_dashboard._daily_risk_panel(True)
-    assert 'action="/admin/risk/reset-day"' in admin_dashboard._daily_risk_panel(True)
-    assert 'action="/admin/risk/reset-day"' not in admin_dashboard._daily_risk_panel(False)
+    assert reset_form in admin_dashboard._daily_risk_panel(True)
+    assert reset_form not in admin_dashboard._daily_risk_panel(False)
     monkeypatch.setattr(
         admin_dashboard,
         "_engine_risk_request",
@@ -190,4 +191,4 @@ def test_owner_dashboard_shows_real_budget_only_after_auth(monkeypatch):
             "reset_applied_today": True,
         },
     )
-    assert 'action="/admin/risk/reset-day"' not in admin_dashboard._daily_risk_panel(True)
+    assert reset_form not in admin_dashboard._daily_risk_panel(True)
