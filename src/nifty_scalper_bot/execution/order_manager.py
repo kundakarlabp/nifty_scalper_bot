@@ -13,6 +13,7 @@ Operational constraints:
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
@@ -235,6 +236,82 @@ def _get_latest_quote_freshest_cached(self, symbol):
 
 
 RuntimeOrderManager._get_latest_quote_safe = _get_latest_quote_freshest_cached
+
+# Single production submission path: a timed-out entry must not be silently
+# repriced upward by a later new TradePlan for the SAME deterministic setup.
+# Existing per-plan freshness guards alone cannot compare those two attempts.
+_original_submit_trade_plan_result = RuntimeOrderManager.submit_trade_plan_result
+
+
+def _submit_trade_plan_with_setup_price_guard(self, plan):
+    live = False
+    checker = getattr(self, "is_live_mode", None)
+    if callable(checker):
+        try:
+            live = bool(checker())
+        except Exception:
+            live = True
+    intent = str(getattr(plan, "intent", "ENTRY") or "ENTRY").upper()
+    signal_id = str(getattr(plan, "signal_id", "") or "")
+    symbol = str(getattr(plan, "symbol", "") or "")
+    buy_entry = live and intent == "ENTRY" and str(
+        getattr(plan, "side", "") or ""
+    ).upper() == "BUY" and bool(signal_id and symbol)
+    if not buy_entry:
+        return _original_submit_trade_plan_result(self, plan)
+
+    anchors = self.__dict__.setdefault("_entry_attempt_price_by_setup", {})
+    key = (signal_id, symbol)
+    now = time.time()
+    prior = anchors.get(key)
+    if prior is not None:
+        first_price, first_at = prior
+        age = now - first_at
+        try:
+            price = float(getattr(plan, "entry_price", 0.0))
+            cap = float(getattr(plan, "max_entry_drift_pct", 2.0) or 2.0)
+        except (ValueError, TypeError):
+            price, cap = float("nan"), 2.0
+        if 0 <= age <= 900 and first_price > 0:
+            drift_pct = (price - first_price) * 100.0 / first_price
+            if not math.isfinite(price) or drift_pct > max(0.0, cap):
+                logger = getattr(self, "_logger", None)
+                warning = getattr(logger, "warning", None)
+                if callable(warning):
+                    warning(
+                        "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s drift_pct=%s limit_pct=%s",
+                        symbol, drift_pct, cap,
+                        extra={
+                            "event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
+                            "signal_id": signal_id,
+                            "symbol": symbol,
+                            "drift_pct": drift_pct,
+                            "limit_pct": cap,
+                            "age_seconds": age,
+                        },
+                    )
+                return _core.TradePlanSubmitResult(
+                    accepted=False,
+                    order_id=None,
+                    reason="same_setup_adverse_reprice",
+                    details={"drift_pct": drift_pct, "limit_pct": cap},
+                    broker_attempted=False,
+                )
+
+    result = _original_submit_trade_plan_result(self, plan)
+    if bool(getattr(result, "broker_attempted", False)) and key not in anchors:
+        try:
+            first_price = float(getattr(plan, "entry_price", 0.0))
+        except (ValueError, TypeError):
+            first_price = 0.0
+        if math.isfinite(first_price) and first_price > 0:
+            if len(anchors) >= 512:
+                anchors.pop(next(iter(anchors)))
+            anchors[key] = (first_price, now)
+    return result
+
+
+RuntimeOrderManager.submit_trade_plan_result = _submit_trade_plan_with_setup_price_guard
 OrderManager = RuntimeOrderManager
 
 __all__ = sorted(
