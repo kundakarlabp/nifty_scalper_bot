@@ -2,6 +2,7 @@
 
 Responsibilities:
 - Issue signed short-lived login challenges and owner browser sessions.
+- Validate privacy-header-tolerant form POSTs against cookie-bound challenges and explicit foreign origins.
 - Persist a random signing key in the host's private configuration directory.
 - Never treat the Kite request token, public API key, or a guessed user ID as authority.
 
