@@ -462,6 +462,27 @@ def test_paired_runtime_rejects_unresolved_order_even_when_positions_are_flat(
     assert comparison["net_delta"] is None
 
 
+def test_paired_replay_allows_cancelled_unfilled_orders():
+    baseline = _paired_report()
+    baseline["orders"].append(
+        {
+            "transaction_type": "BUY",
+            "symbol": "NFO:NIFTY26OCT23100CE",
+            "status": "cancelled",
+            "filled_quantity": 0,
+            "timestamp": 105.0,
+        }
+    )
+    result = worker.compare_paired_reports(
+        baseline,
+        baseline,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=25,
+    )
+    assert result["state"] == "MODELED_PAIRED_COMPARISON"
+
+
 def test_paired_comparison_labels_legacy_control_not_assumed_live_baseline():
     row = _paired_report()
     result = worker.compare_paired_reports(
