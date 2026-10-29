@@ -20,6 +20,7 @@ import secrets
 import stat
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
 
@@ -135,6 +136,41 @@ def verify_challenge(request: Request, submitted: str) -> bool:
         and isinstance(payload.get("nonce"), str)
         and time.time() - issued_at <= LOGIN_TTL_SECONDS
     )
+
+
+
+def require_challenge_bound_form(request: Request, submitted: str) -> None:
+    """Protect a mobile token POST even when referrer headers are suppressed.
+
+    A signed challenge must match a Secure, SameSite browser cookie. Treat
+    Origin/Referer as extra checks when supplied, not mandatory credentials.
+    Explicit foreign origins remain forbidden, including cross-site Referer.
+    """
+    require_https(request)
+    if not verify_challenge(request, submitted):
+        raise HTTPException(status_code=403, detail="owner_login_challenge_invalid")
+
+    expected_host = request.url.hostname
+    expected_port = request.url.port or 443
+    for header in ("origin", "referer"):
+        source = request.headers.get(header, "").strip()
+        if not source or source == "null":
+            # Browser privacy policies may omit either header; authentication
+            # still requires the cryptographically signed form+cookie pair.
+            continue
+        try:
+            parsed = urlsplit(source)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname == expected_host
+                and (parsed.port or 443) == expected_port
+                and not parsed.username
+                and not parsed.password
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(status_code=403, detail="admin_same_origin_required")
 
 
 def clear_challenge(response: Response) -> None:
