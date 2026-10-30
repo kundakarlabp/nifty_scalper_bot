@@ -201,6 +201,14 @@ class VWAPProStrategy(EliteStrategy):
         self._strict_continuation_enabled = str(
             os.getenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Causal ablation on the existing continuation proof, never a second
+        # entry path. Explicitly restricted to SHADOW; LIVE/PAPER are unchanged
+        # even if a deployed environment accidentally sets the research flag.
+        self._research_retest_rebreak_only = bool(
+            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
+            and str(os.getenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "false"))
+            .strip().lower() in {"1", "true", "yes", "on"}
+        )
 
         # get_session_vwap_slope() returns percentage change over finalized
         # bars. Convert percentage points to basis points for a scale-readable
@@ -1219,6 +1227,17 @@ class VWAPProStrategy(EliteStrategy):
                     self._no_vote("vwap_continuation_quality_unconfirmed")
                     return None
 
+            # Compare the existing retest/rebreak proof with the unchanged
+            # either-proof baseline. Never relabel momentum as a retest; absent
+            # or disabled strict proof fails closed in this SHADOW-only arm.
+            if (
+                self._research_retest_rebreak_only
+                and setup_type == "vwap_continuation"
+                and continuation_proof != "retest_rebreak"
+            ):
+                self._no_vote("vwap_research_retest_rebreak_required")
+                return None
+
             # A weak same-direction slope may be replaced only by completed
             # momentum, causal option RVOL, fresh underlying trend and volume.
             # SHADOW research remains separate from explicit LIVE admission.
@@ -1374,6 +1393,7 @@ class VWAPProStrategy(EliteStrategy):
                 "setup_reasons": reasons,
                 "setup_type": setup_type,
                 "vwap_strict_continuation_enabled": self._strict_continuation_enabled,
+                "vwap_research_retest_rebreak_only": self._research_retest_rebreak_only,
                 "vwap_continuation_proof": continuation_proof,
                 "setup_name": setup_type,
                 "vwap_event_subtype": setup_type,
