@@ -10,6 +10,9 @@ Runtime role:
   orphan/position resync.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
+- reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
+  ghost cleanup: journal a proven protective exit before removing the bracket;
+  defer on missing fill or unresolved ledger accounting.
 
 Position in the pipeline:
     execution/order_manager.py -> THIS FILE (bracket_manager.py)
