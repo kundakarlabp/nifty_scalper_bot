@@ -5353,6 +5353,30 @@ class BracketManager:
                             and bracket.exit_executed
                             and int(bracket.remaining_quantity or 0) == 0
                         )
+                        if not already_closed:
+                            stop_status = self._get_broker_order_status(
+                                str(bracket.exchange_stop_order_id)
+                            )
+                            fill_qty = self._extract_status_filled_quantity(stop_status)
+                            fill_price = self._extract_status_fill_price(stop_status)
+                            if (
+                                fill_qty < int(bracket.remaining_quantity or 0)
+                                or fill_price is None
+                            ):
+                                LOGGER.warning(
+                                    "BRACKET_FLAT_CLEANUP_DEFERRED_INCOMPLETE_STOP_FILL "
+                                    "bracket_id=%s order_id=%s filled_qty=%s remaining=%s",
+                                    bracket.bracket_id,
+                                    bracket.exchange_stop_order_id,
+                                    fill_qty,
+                                    bracket.remaining_quantity,
+                                    extra={
+                                        "event": "BRACKET_FLAT_CLEANUP_DEFERRED_INCOMPLETE_STOP_FILL",
+                                        "bracket_id": bracket.bracket_id,
+                                        "symbol": bracket.symbol,
+                                    },
+                                )
+                                continue
                         converged = already_closed or self._promote_filled_exchange_stop(
                             bracket, reason="exchange_protective_stop_fill"
                         )
