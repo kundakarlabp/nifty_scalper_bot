@@ -1,7 +1,7 @@
 """Offline, fail-closed NIFTY volatility-structure research; no broker actions.
 
-Responsibilities: Evaluate quote-consistent entry geometry for four-leg defined-risk
-credit condors and debit straddles with the canonical per-order cost estimator.
+Responsibilities: Evaluate quote-consistent entry geometry and conservative
+portfolio budget assumptions for condors and straddles using canonical costs.
 Ownership: Research-only option strategy screening and read-only cache mapping,
 not StrategyManager/execution.
 Safety: Requires explicit SHADOW mode and synchronized FULL-depth quotes; never
@@ -237,6 +237,108 @@ def assess_long_atm_straddle(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PortfolioBudgetScreen:
+    """Conservative research liquidity/risk screen; never live authorization."""
+
+    research_budget_fits: bool
+    reason: str
+    planning_loss_reserve_rupees: float
+    planning_margin_reserve_rupees: float
+    live_eligible: bool = False
+    net_loss_bound_certified: bool = False
+
+
+def screen_volatility_portfolio_budget(
+    *,
+    assessment: CondorAssessment | LongStraddleAssessment,
+    broker_required_margin: float | None,
+    broker_free_margin: float | None,
+    remaining_trade_risk: float | None,
+    remaining_daily_risk: float | None,
+    exit_settlement_fee_reserve: float | None,
+    stressed_slippage_reserve: float | None,
+) -> PortfolioBudgetScreen:
+    """Check assumed portfolio risk and actual broker margin numbers.
+
+    Caller must independently establish timestamped broker margin authority,
+    unencumbered availability, pending obligations and a defensible stress
+    scenario. This pure screen cannot certify naked-leg recovery or safe LIVE
+    short-selling, even when its assumptions fit a supplied budget.
+    """
+    if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
+        raise ValueError("volatility_research_requires_shadow_process")
+    if not isinstance(assessment, (CondorAssessment, LongStraddleAssessment)):
+        raise ValueError("research_structure_not_supported")
+
+    inputs = (
+        broker_required_margin,
+        broker_free_margin,
+        remaining_trade_risk,
+        remaining_daily_risk,
+        exit_settlement_fee_reserve,
+        stressed_slippage_reserve,
+    )
+    if any(
+        value is None
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        for value in inputs
+    ):
+        return PortfolioBudgetScreen(False, "research_budget_evidence_missing", 0, 0)
+
+    assert broker_required_margin is not None
+    assert broker_free_margin is not None
+    assert remaining_trade_risk is not None
+    assert remaining_daily_risk is not None
+    assert exit_settlement_fee_reserve is not None
+    assert stressed_slippage_reserve is not None
+
+    gross_loss = (
+        assessment.gross_max_loss_rupees
+        if isinstance(assessment, CondorAssessment)
+        else assessment.premium_plus_entry_fees_rupees
+    )
+    entry_cost = (
+        assessment.entry_fees_rupees
+        if isinstance(assessment, CondorAssessment)
+        else 0.0
+    )
+    if (
+        not math.isfinite(gross_loss)
+        or not math.isfinite(entry_cost)
+        or gross_loss <= 0
+        or entry_cost < 0
+        or broker_required_margin <= 0
+        or exit_settlement_fee_reserve <= 0
+        or stressed_slippage_reserve <= 0
+    ):
+        return PortfolioBudgetScreen(False, "research_stress_or_margin_unverified", 0, 0)
+
+    loss_reserve = (
+        gross_loss + entry_cost + exit_settlement_fee_reserve
+        + stressed_slippage_reserve
+    )
+    margin_reserve = broker_required_margin + (
+        exit_settlement_fee_reserve + stressed_slippage_reserve
+    )
+    if not math.isfinite(loss_reserve) or not math.isfinite(margin_reserve):
+        return PortfolioBudgetScreen(False, "research_budget_evidence_missing", 0, 0)
+    if loss_reserve > min(remaining_trade_risk, remaining_daily_risk):
+        return PortfolioBudgetScreen(
+            False, "research_risk_budget_insufficient", loss_reserve, margin_reserve
+        )
+    if margin_reserve > broker_free_margin:
+        return PortfolioBudgetScreen(
+            False, "research_free_margin_insufficient", loss_reserve, margin_reserve
+        )
+    return PortfolioBudgetScreen(
+        True, "research_assumptions_fit_budget", loss_reserve, margin_reserve
+    )
+
+
 def quote_from_canonical_cache(
     *,
     symbol: str,
@@ -343,6 +445,8 @@ def quote_from_canonical_cache(
 
 __all__ = [
     "VolatilityOptionQuote",
+    "PortfolioBudgetScreen",
+    "screen_volatility_portfolio_budget",
     "quote_from_canonical_cache",
     "CondorAssessment",
     "LongStraddleAssessment",
