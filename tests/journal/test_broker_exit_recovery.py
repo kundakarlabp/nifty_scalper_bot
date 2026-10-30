@@ -263,3 +263,9 @@ def test_conflicting_prior_exit_fill_fails_closed(stores):
     )
     assert _recover(stores, commit=True) == []
     assert _read(stores[0])[0][0] == "OPEN"
+
+
+def test_missing_fill_database_is_not_created_by_dry_run(stores):
+    stores[1].unlink()
+    assert _recover(stores, commit=False) == []
+    assert not stores[1].exists()
