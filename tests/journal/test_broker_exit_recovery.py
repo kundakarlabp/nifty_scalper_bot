@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-import sqlite3
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -166,7 +166,7 @@ def test_dry_run_then_exact_recovery_and_idempotent_replay(stores):
     assert events == 3
 
     assert _recover(stores, commit=True) == []
-    assert _read(stores) == (result, 3)
+    assert _read(stores[0]) == (result, 3)
     fill = BracketFillLedgerStore(stores[1]).realized_pnl(_ENTRY)
     assert fill.complete is True
     assert fill.exit_quantity == 65
