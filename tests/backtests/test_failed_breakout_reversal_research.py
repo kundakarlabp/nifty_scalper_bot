@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 """Causal, SHADOW-only failed-breakout reversal research regression cases."""
 
 from datetime import datetime, timedelta, timezone
@@ -122,7 +123,9 @@ def test_reversal_only_buys_premium_with_existing_research_geometry(monkeypatch)
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="reversal_research_requires_shadow_process"):
-        research.ArchivedDirectionalHypothesis("failed_breakout_reversal", _Engine(rows))
+        research.ArchivedDirectionalHypothesis(
+            "failed_breakout_reversal", _Engine(rows)
+        )
 
 
 def test_reversal_is_opt_in_to_archived_replay_and_never_promoted(monkeypatch):
