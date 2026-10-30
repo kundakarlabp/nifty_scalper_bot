@@ -169,7 +169,7 @@ def test_overextended_quote_still_recovers_same_session_thesis_state(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("option_premium", "fraction_failed"), [(140.0, True), (115.0, False)]
+    ("option_premium", "fraction_failed"), [(140.0, True), (116.0, False)]
 )
 def test_distance_veto_reports_quantitative_reason_without_admitting_entry(
     monkeypatch, option_premium, fraction_failed
