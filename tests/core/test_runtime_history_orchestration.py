@@ -670,6 +670,7 @@ async def test_active_basket_helper_uses_recovery_phase_for_stale_and_gap(
     assert mdm.calls
     assert {kw["reason"] for _, kw in mdm.calls} == {expected_reason}
     assert {kw["phase"] for _, kw in mdm.calls} == {expected_phase}
+    assert all(kw["force"] is True for _, kw in mdm.calls)
     # Count-sufficient but stale/gapped candles must not be short-circuited
     # by MarketDataManager.ensure_history's count-only cache fast path.
     assert all(kw["force"] is True for _, kw in mdm.calls)
@@ -881,3 +882,44 @@ async def test_non_gating_option_context_short_history_still_hydrates(
     context_calls = [call for call in mdm.calls if call[0] == context_symbol]
     assert context_calls
     assert context_calls[0][1]["reason"] == "history_short"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_reason", ["history_stale", "recovery_gap_fill"])
+async def test_canonical_quality_repair_forces_fetch_despite_warm_count(
+    monkeypatch, repair_reason
+) -> None:
+    """A count-warm cache must not short-circuit a requested quality repair."""
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    mdm = MDM(bars=100)
+    runner = Runner(bars=100)
+
+    await app.ensure_symbol_runtime_history(
+        ctx(mdm, runner),
+        "NSE:NIFTY",
+        role="spot_context",
+        phase="recovery",
+        reason=repair_reason,
+    )
+
+    assert len(mdm.calls) == 1
+    assert mdm.calls[0][1]["force"] is True
+
+
+@pytest.mark.asyncio
+async def test_canonical_warm_cache_refresh_does_not_force_broker(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    mdm = MDM(bars=100)
+    runner = Runner(bars=100)
+
+    await app.ensure_symbol_runtime_history(
+        ctx(mdm, runner),
+        "NSE:NIFTY",
+        role="spot_context",
+        phase="dynamic_update",
+        reason="futures_context_refresh",
+    )
+
+    assert len(mdm.calls) == 1
+    assert mdm.calls[0][1]["force"] is False
