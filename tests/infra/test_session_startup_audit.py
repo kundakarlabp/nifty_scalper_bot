@@ -118,6 +118,68 @@ def test_audit_stop_markers_do_not_prove_continuous_protection() -> None:
     assert "SECRET_MUST_NOT_LEAK" not in str(summary)
 
 
+def test_stop_warning_recovered_by_same_order_broker_proof() -> None:
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line(
+                    "13:58:55",
+                    "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=stop-a "
+                    "status=MODIFY PENDING reason=broker_stop_status_unverified",
+                ),
+                line(
+                    "13:58:55",
+                    "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=stop-a "
+                    "prior_reason=broker_stop_status_unverified",
+                ),
+                line("13:59:03", "EXCHANGE_PROTECTIVE_STOP_FILLED order_id=stop-a"),
+            )
+        )
+    )
+    assert summary["stop_unverified_event_count"] == 1
+    assert summary["stop_unverified_reconciled_event_count"] == 1
+    assert summary["stop_unverified_unresolved_event_count"] == 0
+    assert summary["stop_unverified_max_observed_recovery_seconds"] == 0
+    assert summary["stop_warning_resolution"] == "all_warnings_reconciled_in_log"
+    assert "stop-a" not in str(summary)
+    assert summary["protective_stop_verification"] == (
+        "not_established_from_log_markers"
+    )
+
+
+def test_unrelated_or_earlier_stop_proof_cannot_clear_warning() -> None:
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line("10:00:00", "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=stop-a"),
+                line("10:00:05", "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=stop-a"),
+                line("10:00:06", "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=stop-b"),
+            )
+        )
+    )
+    assert summary["stop_unverified_event_count"] == 1
+    assert summary["stop_unverified_reconciled_event_count"] == 0
+    assert summary["stop_unverified_unresolved_event_count"] == 1
+    assert summary["stop_warning_resolution"] == "unresolved_warning_in_log"
+
+
+def test_delayed_recovery_counts_lag_and_new_warning_stays_unresolved() -> None:
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line("11:00:00", "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=stop-a"),
+                line("11:00:04", "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=stop-a"),
+                line("11:00:09", "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=stop-a"),
+                line("11:00:10", "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED status=UNKNOWN"),
+            )
+        )
+    )
+    assert summary["stop_unverified_event_count"] == 3
+    assert summary["stop_unverified_reconciled_event_count"] == 1
+    assert summary["stop_unverified_unresolved_event_count"] == 2
+    assert summary["stop_unverified_max_observed_recovery_seconds"] == 4
+
+
 def test_opening_window_ready_marker_is_observed_not_uptime_proof() -> None:
     # An earlier READY event can be observed even when its startup marker
     # was outside the 09:15 archive window. Do not invent an uptime interval.
