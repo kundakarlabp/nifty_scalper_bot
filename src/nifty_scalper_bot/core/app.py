@@ -16169,10 +16169,10 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                             reconcile_flat(ghost_sym, settle_filled_stop=True)
                             if bm.is_symbol_managed(ghost_sym):
                                 LOGGER.warning(
-                                    "GHOST_SWEEP_DEFERRED_PENDING_EXIT_ACCOUNTING symbol=%s",
+                                    "GHOST_SWEEP_EXIT_ACCOUNTING_PENDING symbol=%s",
                                     ghost_sym,
                                     extra={
-                                        "event": "GHOST_SWEEP_DEFERRED_PENDING_EXIT_ACCOUNTING",
+                                        "event": "GHOST_SWEEP_EXIT_ACCOUNTING_PENDING",
                                         "symbol": ghost_sym,
                                     },
                                 )
