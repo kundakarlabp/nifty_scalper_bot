@@ -132,7 +132,7 @@ def _read(journal_path: Path):
                WHERE trade_id = ?
                  AND event_name IN
                  ('exit.filled', 'trade.closed',
-                  'historical.exit.recovery.verified')""",
+                  'recovery.verified')""",
             (_TRADE,),
         ).fetchone()[0]
     return row, event_count
