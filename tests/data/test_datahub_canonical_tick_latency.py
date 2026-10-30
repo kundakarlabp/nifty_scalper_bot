@@ -69,6 +69,7 @@ def test_noncanonical_tick_still_receives_canonical_timestamp(monkeypatch) -> No
     assert latest is not None
     assert latest["timestamp_ms"] > 0
 
+
 def test_discordant_millisecond_timestamp_uses_parsed_exchange_time(
     monkeypatch,
 ) -> None:
