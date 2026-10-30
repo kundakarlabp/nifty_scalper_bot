@@ -9194,6 +9194,12 @@ async def _ensure_symbol_runtime_history_canonical(
             phase=policy.phase,
             reason=reason,
             minimum_only=policy.minimum_only,
+            # A stale/gapped cache can have enough bars. Count-only cache
+            # sufficiency must not bypass an explicitly requested repair.
+            force=(
+                policy.phase == "recovery"
+                and reason in {"history_stale", "recovery_gap_fill"}
+            ),
         )
         if getattr(hydration, "failure_reason", None):
             failure_reason = str(hydration.failure_reason)
@@ -9489,6 +9495,9 @@ async def _ensure_active_basket_history(
                 phase=hydration_phase,
                 reason=ensure_reason,
                 minimum_only=False,
+                # Bypass the MDM count-only early return for genuine quality
+                # repairs; the rearm-loop cooldown still bounds REST calls.
+                force=ensure_reason in {"history_stale", "recovery_gap_fill"},
             )
             result[symbol] = hydration
             if getattr(hydration, "failure_reason", None):
