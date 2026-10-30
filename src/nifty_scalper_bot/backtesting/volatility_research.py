@@ -315,10 +315,14 @@ def screen_volatility_portfolio_budget(
         or exit_settlement_fee_reserve <= 0
         or stressed_slippage_reserve <= 0
     ):
-        return PortfolioBudgetScreen(False, "research_stress_or_margin_unverified", 0, 0)
+        return PortfolioBudgetScreen(
+            False, "research_stress_or_margin_unverified", 0, 0
+        )
 
     loss_reserve = (
-        gross_loss + entry_cost + exit_settlement_fee_reserve
+        gross_loss
+        + entry_cost
+        + exit_settlement_fee_reserve
         + stressed_slippage_reserve
     )
     margin_reserve = broker_required_margin + (
