@@ -670,6 +670,30 @@ async def test_active_basket_helper_uses_recovery_phase_for_stale_and_gap(
     assert mdm.calls
     assert {kw["reason"] for _, kw in mdm.calls} == {expected_reason}
     assert {kw["phase"] for _, kw in mdm.calls} == {expected_phase}
+    # Count-sufficient but stale/gapped candles must not be short-circuited
+    # by MarketDataManager.ensure_history's count-only cache fast path.
+    assert all(kw["force"] is True for _, kw in mdm.calls)
+
+
+@pytest.mark.asyncio
+async def test_active_basket_short_history_keeps_non_forced_fetch(monkeypatch) -> None:
+    mdm = _ActiveMDM()
+    c = _active_ctx(mdm, _ActiveRunner())
+    monkeypatch.setattr(
+        app,
+        "build_symbol_hydration_status",
+        lambda *_a, **_k: _status(bars=0, fresh=True, contiguous=True),
+    )
+    await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+    assert mdm.calls
+    assert {kw["reason"] for _, kw in mdm.calls} == {"history_short"}
+    assert all(kw["force"] is False for _, kw in mdm.calls)
 
 
 @pytest.mark.asyncio
