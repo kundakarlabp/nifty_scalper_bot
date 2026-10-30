@@ -144,10 +144,11 @@ def recover_broker_proven_exit(
                 continue
 
             matching = [
-                o for o in order_rows
-                if _symbol(o) == symbol and
-                str(o.get("product") or "").upper() == "MIS" and
-                _number(o.get("filled_quantity") or 0) > 0
+                o
+                for o in order_rows
+                if _symbol(o) == symbol
+                and str(o.get("product") or "").upper() == "MIS"
+                and _number(o.get("filled_quantity") or 0) > 0
             ]
             if len(matching) != 2:
                 continue  # Ambiguous historical ownership: never guess.
@@ -174,9 +175,7 @@ def recover_broker_proven_exit(
             exit_price = _number(exit_order.get("average_price"))
             if exit_price <= 0:
                 continue
-            exited_at = _fill_timestamp(
-                exit_order.get("exchange_update_timestamp")
-            )
+            exited_at = _fill_timestamp(exit_order.get("exchange_update_timestamp"))
             if (
                 exited_at < opened_at
                 or exited_at > timestamp
@@ -185,9 +184,9 @@ def recover_broker_proven_exit(
                 continue
 
             if any(
-                _symbol(pos) == symbol and
-                str(pos.get("product") or "").upper() == "MIS" and
-                _number(pos.get("quantity") or 0) != 0
+                _symbol(pos) == symbol
+                and str(pos.get("product") or "").upper() == "MIS"
+                and _number(pos.get("quantity") or 0) != 0
                 for pos in position_rows
             ):
                 continue
@@ -294,8 +293,7 @@ def recover_broker_proven_exit(
                     "event_name": {
                         "EXIT_FILLED": "exit.filled",
                         "BRACKET_CLOSED": "trade.closed",
-                        "HISTORICAL_EXIT_RECOVERY_VERIFIED":
-                            "historical.exit.recovery.verified",
+                        "HISTORICAL_EXIT_RECOVERY_VERIFIED": "historical.exit.recovery.verified",
                     }[kind],
                     "timestamp": occurred_at,
                     "symbol": symbol,
@@ -350,12 +348,21 @@ def recover_broker_proven_exit(
                            strategy, reason_code, build_sha, meta_json, event_json
                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
-                            item["timestamp"], item["event_type"],
-                            item["event_name"], item["symbol"], item["side"],
-                            item["qty"], item["price"], item["order_id"],
-                            item["trade_id"], item["signal_id"], item["trace_id"],
-                            item["strategy"], item["reason_code"],
-                            item["build_sha"], json.dumps(item["meta"]),
+                            item["timestamp"],
+                            item["event_type"],
+                            item["event_name"],
+                            item["symbol"],
+                            item["side"],
+                            item["qty"],
+                            item["price"],
+                            item["order_id"],
+                            item["trade_id"],
+                            item["signal_id"],
+                            item["trace_id"],
+                            item["strategy"],
+                            item["reason_code"],
+                            item["build_sha"],
+                            json.dumps(item["meta"]),
                             json.dumps(item),
                         ),
                     )
