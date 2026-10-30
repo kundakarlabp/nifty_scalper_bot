@@ -6,6 +6,8 @@
 Runtime role:
 - Receives DataHub or market-data callbacks and evaluates the active basket
   using cached bars, live quotes, readiness, regime, and quality gates.
+- Profiles slow tick stages without moving position protection off the ordered
+  callback path; reuses the already-bound canonical CandleEngine per symbol.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains active history counts and uses shared direction-context resolution.
@@ -8040,11 +8042,23 @@ class StrategyRunner:
                 pass
             now_mono = time.monotonic()
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
+            ofi_started = time.perf_counter()
             self._last_tick[normalized_symbol] = self._with_temporal_ofi(
                 normalized_symbol,
                 tick,
                 observed_at=now_mono,
             )
+            ofi_duration_ms = (time.perf_counter() - ofi_started) * 1000.0
+            if ofi_duration_ms >= 30.0:
+                log_throttled(
+                    self._logger,
+                    f"runner_tick_ofi_slow:{normalized_symbol}",
+                    "RUNNER_TICK_STAGE_SLOW stage=temporal_ofi symbol=%s duration_ms=%.1f",
+                    normalized_symbol,
+                    ofi_duration_ms,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
             if not hasattr(self, "_first_tick_ingested_symbols"):
                 self._first_tick_ingested_symbols = set()
             if normalized_symbol not in self._first_tick_ingested_symbols:
@@ -8062,7 +8076,11 @@ class StrategyRunner:
                         "history_count": history_count,
                     },
                 )
-            self._mirror_authoritative_candle_engine(normalized_symbol)
+            # MDM remains the CandleEngine owner; after initial binding the
+            # runner already holds the same engine object. Avoid redundant
+            # symbol normalization and registry lookup on every live tick.
+            if normalized_symbol not in self._candle_engines:
+                self._mirror_authoritative_candle_engine(normalized_symbol)
             self._last_tick_seen_ts = now_mono
             self._runner_tick_received_count = (
                 int(getattr(self, "_runner_tick_received_count", 0) or 0) + 1
@@ -8081,7 +8099,20 @@ class StrategyRunner:
                 normalized_symbol,
                 tick.get("ltp") or tick.get("last_price", "?"),
             )
+            watchdog_started = time.perf_counter()
             self._run_health_watchdog_on_cadence()
+            watchdog_duration_ms = (time.perf_counter() - watchdog_started) * 1000.0
+            if watchdog_duration_ms >= 30.0:
+                log_throttled(
+                    self._logger,
+                    f"runner_tick_watchdog_dispatch_slow:{normalized_symbol}",
+                    "RUNNER_TICK_STAGE_SLOW stage=watchdog_dispatch "
+                    "symbol=%s duration_ms=%.1f",
+                    normalized_symbol,
+                    watchdog_duration_ms,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
             self._logger.debug(
                 "PIPELINE_OK",
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
@@ -8220,7 +8251,20 @@ class StrategyRunner:
                 )
         finally:
             now = time.monotonic()
+            report_started = time.perf_counter()
             self._emit_composite_reports()
+            report_duration_ms = (time.perf_counter() - report_started) * 1000.0
+            if report_duration_ms >= 30.0:
+                log_throttled(
+                    self._logger,
+                    f"runner_tick_reports_slow:{symbol}",
+                    "RUNNER_TICK_STAGE_SLOW stage=composite_reports "
+                    "symbol=%s duration_ms=%.1f",
+                    symbol,
+                    report_duration_ms,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                )
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
                     "ENGINE_SUMMARY evals=%d evals_semantics=legacy_activity "
