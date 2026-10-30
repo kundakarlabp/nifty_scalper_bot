@@ -1,8 +1,11 @@
-"""Broker-evidence-only recovery of a missing local protective-stop exit.
+"""Purpose: Restore historical protective-stop fills only from broker proof.
 
-This operation never submits, modifies, or cancels broker orders. It may restore
-a *historical* journal and fill leg only after a fresh day orderbook, position
-snapshot, and the existing entry fill all agree. It is not an entry path.
+Responsibilities: Validate exact same-session order/position/fill identities and
+atomically journal a missing confirmed exit and close without synthetic trades.
+Ownership: Read/write historical local journal and fill-ledger records only;
+never broker execution, order submission, or strategy selection.
+Safety: Dry-run by default; refuse missing or ambiguous proof, never fabricate
+net P&L or broker charges, and preserve exact original broker fill time.
 """
 
 from __future__ import annotations
