@@ -305,7 +305,8 @@ def quote_from_canonical_cache(
             expiry = date.fromisoformat(str(expiry_value))
         raw_time = tick.get("exchange_timestamp") or tick.get("timestamp")
         observed = (
-            raw_time if isinstance(raw_time, datetime)
+            raw_time
+            if isinstance(raw_time, datetime)
             else datetime.fromisoformat(str(raw_time))
         )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
