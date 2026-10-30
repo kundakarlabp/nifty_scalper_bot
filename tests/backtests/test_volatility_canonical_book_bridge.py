@@ -11,7 +11,6 @@ from nifty_scalper_bot.backtesting.volatility_research import (
     quote_from_canonical_cache,
 )
 
-
 _AT = datetime(2026, 10, 30, 10, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
 
 
