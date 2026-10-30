@@ -216,3 +216,48 @@ def test_other_day_and_unverified_timestamp_fail_closed(stores):
     with pytest.raises(HistoricalExitRecoveryError, match="timestamp_missing"):
         _recover(stores, orders=orders, commit=True)
     assert _read(stores)[0][0] == "OPEN"
+
+
+def test_resume_when_exit_leg_was_written_but_journal_flush_failed(stores):
+    """A crash between the separate SQLite stores must not strand the trade."""
+    fills = BracketFillLedgerStore(stores[1])
+    fills.record_fill(
+        FillLeg(
+            fill_id=f"EXIT:{_EXIT}",
+            bracket_id=_ENTRY,
+            order_id=_EXIT,
+            kind="EXIT",
+            side="SELL",
+            quantity=65,
+            price=150.6,
+            target="FINAL",
+            reason="exchange_protective_stop_fill",
+            recorded_at=_CLOSE,
+            metadata={"symbol": _SYMBOL, "source": "broker_orderbook_recovery"},
+        )
+    )
+    assert _read(stores[0])[0][0] == "OPEN"
+    assert _recover(stores, commit=True)[0]["status"] == "recovered"
+    assert _read(stores[0])[0][0] == "CLOSED"
+    assert len(fills.load_fills(_ENTRY)) == 2
+    assert _recover(stores, commit=True) == []
+
+
+def test_conflicting_prior_exit_fill_fails_closed(stores):
+    fills = BracketFillLedgerStore(stores[1])
+    fills.record_fill(
+        FillLeg(
+            fill_id="EXIT:other-broker-order",
+            bracket_id=_ENTRY,
+            order_id="other-broker-order",
+            kind="EXIT",
+            side="SELL",
+            quantity=65,
+            price=151.0,
+            target="FINAL",
+            reason="exchange_protective_stop_fill",
+            recorded_at=_CLOSE,
+        )
+    )
+    assert _recover(stores, commit=True) == []
+    assert _read(stores[0])[0][0] == "OPEN"
