@@ -108,6 +108,18 @@ def test_adverse_slippage_sensitivity_monotonic():
     assert b.net_pnl < a.net_pnl and b.net_r < a.net_r
 
 
+def test_adverse_entry_slippage_cannot_cross_recorded_target():
+    path = [(100, 99), (105, 113)]
+    valid = evaluate(path, adverse_slippage_bps=50)
+    invalid = evaluate(path, adverse_slippage_bps=1500)
+
+    assert valid.status == "MODELED"
+    assert valid.entry_price is not None and valid.entry_price < 112.0
+    assert invalid.status == "UNRESOLVED"
+    assert invalid.reason == "slippage_invalidates_entry_geometry"
+    assert invalid.net_pnl is None and invalid.net_r is None
+
+
 def test_same_timestamp_ambiguous_quote_never_picks_favorable_path():
     result = evaluate([(100, 99), (105, 89), (105, 113)])
     assert result.status == "UNRESOLVED"
