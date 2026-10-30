@@ -2426,17 +2426,14 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides, minutes, minimum_rr, rvol in variants:
-        # Keep every reference arm free of experimental overrides, even if
-        # the calling research process has the feature flag in its environment.
-        original = {
-            key: os.environ.get(key)
-            for key in {
-                "ORB_RESEARCH_ALLOW_RANGE_TRANSITION",
-                "ORB_RESEARCH_STRICT_RETEST_WICK",
-                *overrides,
-            }
-        }
+        # Prespecified comparison arms must not inherit unrelated tuning
+        # from a SHADOW worker's environment. Record the operator settings
+        # above, then reset all comparison knobs for this arm and restore them
+        # in finally. Production configuration is never changed by this job.
+        original = {key: os.environ.get(key) for key in environment_keys}
         try:
+            for key in environment_keys:
+                os.environ.pop(key, None)
             os.environ["ORB_RESEARCH_ALLOW_RANGE_TRANSITION"] = "false"
             os.environ["ORB_RESEARCH_STRICT_RETEST_WICK"] = "false"
             os.environ.update(overrides)
