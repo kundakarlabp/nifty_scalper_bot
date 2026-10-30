@@ -186,7 +186,7 @@ def test_unsupported_orderbook_does_not_write(stores, change):
         extra["average_price"] = 165.0
         orders.append(extra)
     assert _recover(stores, orders=orders, commit=True) == []
-    assert _read(stores)[0][0] == "OPEN"
+    assert _read(stores[0])[0][0] == "OPEN"
     assert len(BracketFillLedgerStore(stores[1]).load_fills(_ENTRY)) == 1
 
 
@@ -200,14 +200,14 @@ def test_nonflat_broker_position_never_reconciles(stores):
         }
     ]
     assert _recover(stores, positions=pos, commit=True) == []
-    assert _read(stores)[1] == 0
+    assert _read(stores[0])[1] == 0
 
 
 def test_missing_durable_entry_fill_blocks_recovery(stores):
     with sqlite3.connect(stores[1]) as connection:
         connection.execute("DELETE FROM bracket_fill_legs")
     assert _recover(stores, commit=True) == []
-    assert _read(stores)[0][0] == "OPEN"
+    assert _read(stores[0])[0][0] == "OPEN"
 
 
 def test_other_day_and_unverified_timestamp_fail_closed(stores):
@@ -217,7 +217,7 @@ def test_other_day_and_unverified_timestamp_fail_closed(stores):
     del orders[1]["exchange_update_timestamp"]
     with pytest.raises(HistoricalExitRecoveryError, match="timestamp_missing"):
         _recover(stores, orders=orders, commit=True)
-    assert _read(stores)[0][0] == "OPEN"
+    assert _read(stores[0])[0][0] == "OPEN"
 
 
 def test_resume_when_exit_leg_was_written_but_journal_flush_failed(stores):
