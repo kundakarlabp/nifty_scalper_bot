@@ -1,5 +1,11 @@
 """Non-live directional hypothesis candidates for archived NIFTY research.
 
+Responsibilities: Classify point-in-time completed futures structures for
+bounded, costed SHADOW comparisons using the existing archived simulator.
+Ownership: Research hypotheses only; no production strategy registration.
+Safety: Do not submit broker orders, infer executable historical option quotes,
+or promote a reversal into live direction authority.
+
 These deliberately do not implement EliteStrategy or enter the production catalog.
 Signals are generated after completed futures bars and consumed only by the
 existing archived option execution/cost simulator. Research proxy stops and targets
@@ -21,10 +27,16 @@ from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 
+_DEFAULT_FAMILIES = (
+    "trend_pullback",
+    "compression_breakout",
+    "momentum_acceleration",
+)
 _FAMILIES = {
     "trend_pullback": "PullbackResearch",
     "compression_breakout": "CompressionResearch",
     "momentum_acceleration": "MomentumResearch",
+    "failed_breakout_reversal": "FailedBreakoutResearch",
 }
 
 
@@ -200,6 +212,49 @@ def classify_completed_futures_bars(
         elif prior_trend == "PE" and current_close < prev_low:
             candidates["momentum_acceleration"] = "PE"
 
+    # Research-only failed-breakout rejection: the preceding fully closed
+    # candle must probe a level drawn from 20 *earlier* completed bars and
+    # return inside. A separate completed candle must then confirm rejection.
+    # This cannot use the current bar to choose or move the reference level.
+    reference_rows = rows[-22:-2]
+    reference_high = max(float(row["high"]) for row in reference_rows)
+    reference_low = min(float(row["low"]) for row in reference_rows)
+    previous_open = float(previous["open"])
+    previous_volume = float(previous["volume"])
+    current_open = float(last["open"])
+    current_high = float(last["high"])
+    current_low = float(last["low"])
+    prior_volume_mean = sum(volumes[-22:-2]) / 20.0
+    if (
+        prior_volume_mean > 0
+        and previous_volume >= 1.1 * prior_volume_mean
+        and volumes[-1] >= 0.8 * prior_volume_mean
+    ):
+        failed_high = (
+            previous_open <= reference_high
+            and prev_high > reference_high + 0.1 * atr
+            and prev_close < reference_high
+        )
+        confirmed_lower = (
+            current_open > current_close
+            and current_high <= reference_high + 0.1 * atr
+            and current_close < prev_low - 0.05 * atr
+        )
+        failed_low = (
+            previous_open >= reference_low
+            and prev_low < reference_low - 0.1 * atr
+            and prev_close > reference_low
+        )
+        confirmed_higher = (
+            current_close > current_open
+            and current_low >= reference_low - 0.1 * atr
+            and current_close > prev_high + 0.05 * atr
+        )
+        if failed_high and confirmed_lower:
+            candidates["failed_breakout_reversal"] = "PE"
+        elif failed_low and confirmed_higher:
+            candidates["failed_breakout_reversal"] = "CE"
+
     return candidates
 
 
@@ -215,6 +270,11 @@ class ArchivedDirectionalHypothesis:
     ) -> None:
         if family not in _FAMILIES:
             raise ValueError("unknown_research_hypothesis")
+        if (
+            family == "failed_breakout_reversal"
+            and os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() != "SHADOW"
+        ):
+            raise ValueError("reversal_research_requires_shadow_process")
         if min_prior_trend_efficiency is not None and (
             not math.isfinite(min_prior_trend_efficiency)
             or not 0 <= min_prior_trend_efficiency <= 1
@@ -467,14 +527,18 @@ def _research_strategies(
     engine: IndicatorEngine,
     *,
     min_prior_trend_efficiency: float | None = None,
+    include_failed_breakout: bool = False,
 ) -> list[ArchivedDirectionalHypothesis]:
+    families = _DEFAULT_FAMILIES + (
+        ("failed_breakout_reversal",) if include_failed_breakout else ()
+    )
     return [
         ArchivedDirectionalHypothesis(
             family,
             engine,
             min_prior_trend_efficiency=min_prior_trend_efficiency,
         )
-        for family in _FAMILIES
+        for family in families
     ]
 
 
@@ -492,17 +556,25 @@ def run_directional_hypothesis_research(
     if not math.isfinite(slippage_bps) or not 0 <= slippage_bps <= 1000:
         raise ValueError("research_slippage_invalid")
     histories, instruments, digest = load_archive(directory)
+    include_failed_breakout = os.getenv(
+        "RESEARCH_FAILED_BREAKOUT_REVERSAL_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    families = _DEFAULT_FAMILIES + (
+        ("failed_breakout_reversal",) if include_failed_breakout else ()
+    )
     scenarios = [
         _scenario(
             histories,
             instruments,
             get_settings().elite,
             bps,
-            components=set(_FAMILIES.values()),
+            components={_FAMILIES[family] for family in families},
             minimum_net_rr=1.5,
             strict_liquidity=True,
             lifecycle_proxy=True,
-            strategy_factory=_research_strategies,
+            strategy_factory=lambda engine: _research_strategies(
+                engine, include_failed_breakout=include_failed_breakout
+            ),
         )
         for bps in sorted(
             {slippage_bps, max(25.0, slippage_bps), max(50.0, slippage_bps)}
@@ -513,7 +585,8 @@ def run_directional_hypothesis_research(
         "evidence_label": "RESEARCH_CANDIDATE",
         "live_equivalent": False,
         "data_sha256": digest,
-        "families": dict(_FAMILIES),
+        "families": {family: _FAMILIES[family] for family in families},
+        "failed_breakout_reversal_opt_in": include_failed_breakout,
         "selected_for_live": None,
         "promotion_eligible": False,
         "assumptions": {
