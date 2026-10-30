@@ -166,9 +166,7 @@ def test_unequal_straddle_strikes_cannot_masquerade_as_atm():
 
 
 @pytest.mark.parametrize("mode", ["LIVE", "PAPER", "LIVE_SIMULATION", ""])
-def test_volatility_research_cannot_be_used_outside_explicit_shadow(
-    monkeypatch, mode
-):
+def test_volatility_research_cannot_be_used_outside_explicit_shadow(monkeypatch, mode):
     monkeypatch.setenv("EXECUTION_MODE", mode)
     with pytest.raises(ValueError, match="volatility_research_requires_shadow_process"):
         assess_credit_iron_condor(**condor())
