@@ -1,4 +1,8 @@
-"""Analyze canonical completed trades without modifying live strategy parameters."""
+"""Analyze canonical completed trades without modifying live strategy parameters.
+
+Safety: Selection diagnostics require complete finite R-multiple coverage;
+missing outcomes never silently disappear from a validated Sharpe sample.
+"""
 
 from __future__ import annotations
 
@@ -101,11 +105,23 @@ def build_analysis(
             continue
         if math.isfinite(resolved_r):
             r_values.append(resolved_r)
+    r_multiple_coverage = {
+        "finite_observations": len(r_values),
+        "canonical_completed_trades": len(trades),
+        "coverage_fraction": round(len(r_values) / len(trades), 4) if trades else 0.0,
+    }
     dsr: dict[str, Any]
     if selection_trials is None:
         dsr = {
             "ready": False,
             "reason": "selection_trial_count_not_supplied",
+        }
+    elif len(r_values) != len(trades):
+        dsr = {
+            "ready": False,
+            "reason": "incomplete_r_multiple_coverage",
+            "observations": len(r_values),
+            "required_observations": len(trades),
         }
     elif len(r_values) < 3:
         dsr = {
@@ -186,6 +202,7 @@ def build_analysis(
             ),
         },
         "deflated_sharpe": dsr,
+        "r_multiple_coverage": r_multiple_coverage,
         "attribution": {
             "ready": readiness.ready,
             "groups": [
