@@ -200,7 +200,20 @@ def recover_broker_proven_exit(
                 or entry_leg.side != "BUY"
                 or entry_leg.quantity != quantity
                 or abs(entry_leg.price - entry_price) > 0.01
-                or any(leg.kind == "EXIT" for leg in store.load_fills(entry_id))
+            ):
+                continue
+            prior_exits = [
+                leg for leg in store.load_fills(entry_id) if leg.kind == "EXIT"
+            ]
+            if prior_exits and (
+                len(prior_exits) != 1
+                or prior_exits[0].fill_id != f"EXIT:{exit_id}"
+                or prior_exits[0].order_id != exit_id
+                or prior_exits[0].side != "SELL"
+                or prior_exits[0].quantity != quantity
+                or abs(prior_exits[0].price - exit_price) > 0.01
+                or prior_exits[0].target != "FINAL"
+                or prior_exits[0].reason != "exchange_protective_stop_fill"
             ):
                 continue
             gross = round((exit_price - entry_price) * quantity, 2)
