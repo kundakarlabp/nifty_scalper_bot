@@ -1,5 +1,11 @@
 """Causal bar research of production strategy components, without broker orders.
 
+Responsibilities: Reuse canonical strategy components and historical observations
+to compare predeclared admission hypotheses with bounded cost/fill assumptions.
+Ownership: Research-only report generation, not a second live decision or order path.
+Safety: Never promote archive rankings directly to LIVE or treat incomplete
+historical option contracts and depth as verified execution evidence.
+
 This is deliberately not live-pipeline parity: today's archived contract basket,
 minute OHLC and modeled execution cannot reproduce historical ATM selection,
 depth, arbitration, dynamic sizing or the full protective-exit lifecycle.
@@ -2083,7 +2089,29 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 },
             )
         )
-    environment_keys = (
+    # Add the strict-proof A/B only when requested: regular nine-arm replays
+    # retain their runtime and candidate count. Both arms explicitly require
+    # strict continuation; the sole paired difference is the retest-only gate.
+    include_retest_rebreak_ablation = str(
+        os.getenv("VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if include_retest_rebreak_ablation:
+        variants.extend(
+            [
+                (
+                    "strict_continuation_either_proof",
+                    {"VWAP_STRICT_CONTINUATION_ENABLED": "true"},
+                ),
+                (
+                    "strict_continuation_retest_rebreak_only",
+                    {
+                        "VWAP_STRICT_CONTINUATION_ENABLED": "true",
+                        "VWAP_RESEARCH_RETEST_REBREAK_ONLY": "true",
+                    },
+                ),
+            ]
+        )
+    environment_keys: tuple[str, ...] = (
         "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
         "VWAP_FUTURES_SLOPE_MIN_BPS",
         "VWAP_FUTURES_VOLUME_MIN_RATIO",
@@ -2093,7 +2121,10 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         "VWAP_TREND_REQUIRE_RETEST",
         "VWAP_REQUIRE_FINALIZED_SIGNAL_BAR",
         "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE",
+        "VWAP_RESEARCH_RETEST_REBREAK_ONLY",
     )
+    if include_retest_rebreak_ablation:
+        environment_keys += ("VWAP_STRICT_CONTINUATION_ENABLED",)
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides in variants:
@@ -2232,6 +2263,15 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 "trend_premium_rvol_1_5",
                 "trend_premium_rvol_1_5_neutral_slope",
                 "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE",
+            )
+        )
+    if include_retest_rebreak_ablation:
+        comparison_pairs.append(
+            (
+                "strict_continuation_either_vs_retest_rebreak",
+                "strict_continuation_either_proof",
+                "strict_continuation_retest_rebreak_only",
+                "VWAP_RESEARCH_RETEST_REBREAK_ONLY",
             )
         )
     paired_comparisons = []

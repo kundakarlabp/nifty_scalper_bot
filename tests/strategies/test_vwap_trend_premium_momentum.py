@@ -902,3 +902,87 @@ def test_strict_continuation_does_not_restrict_vwap_reclaim(monkeypatch):
     assert signal is not None
     assert signal.metadata["setup_type"] == "vwap_reclaim_momentum"
     assert signal.metadata["vwap_finalized_bar_required"] is False
+
+
+def test_retest_rebreak_ablation_rejects_momentum_only_in_shadow(monkeypatch):
+    """Only the existing confirmation branch changes, not signal economics."""
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
+    monkeypatch.delenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", raising=False)
+    monkeypatch.setattr(
+        VWAPProStrategy,
+        "_recover_thesis_anchor_from_history",
+        lambda self, *args, **kwargs: "2026-09-10T09:59:00+05:30",
+    )
+    kwargs = {
+        "enabled": False,
+        "execution_mode": "SHADOW",
+        "low": 100.0,
+        "prior_open": 101.5,
+        "prior_low": 100.5,
+        "prior_close": 101.0,
+        "prior_high": 102.0,
+    }
+    _, baseline = _evaluate(monkeypatch, **kwargs)
+    assert baseline is not None
+    assert baseline.metadata["setup_type"] == "vwap_continuation"
+    assert baseline.metadata["vwap_continuation_proof"] == "momentum_breakout"
+    assert baseline.metadata["vwap_research_retest_rebreak_only"] is False
+
+    monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    strategy, filtered = _evaluate(monkeypatch, **kwargs)
+    assert filtered is None
+    assert strategy.last_no_vote_reason == "vwap_research_retest_rebreak_required"
+
+
+def test_retest_rebreak_ablation_keeps_confirmed_retest_in_shadow(monkeypatch):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
+    monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    _, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+        prior_high=102.0,
+    )
+    assert signal is not None
+    assert signal.metadata["vwap_continuation_proof"] == "retest_rebreak"
+    assert signal.metadata["vwap_research_retest_rebreak_only"] is True
+
+
+@pytest.mark.parametrize("execution_mode", ["LIVE", "PAPER"])
+def test_retest_rebreak_ablation_cannot_change_live_or_paper(
+    monkeypatch, execution_mode
+):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
+    monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    monkeypatch.setattr(
+        VWAPProStrategy,
+        "_recover_thesis_anchor_from_history",
+        lambda self, *args, **kwargs: "2026-09-10T09:59:00+05:30",
+    )
+    _, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode=execution_mode,
+        low=100.0,
+        prior_open=101.5,
+        prior_low=100.5,
+        prior_close=101.0,
+        prior_high=102.0,
+    )
+    assert signal is not None
+    assert signal.metadata["vwap_continuation_proof"] == "momentum_breakout"
+    assert signal.metadata["vwap_research_retest_rebreak_only"] is False
+
+
+def test_retest_rebreak_ablation_fails_closed_without_strict_proof(monkeypatch):
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
+    monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="SHADOW",
+        low=100.0,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "vwap_research_retest_rebreak_required"
