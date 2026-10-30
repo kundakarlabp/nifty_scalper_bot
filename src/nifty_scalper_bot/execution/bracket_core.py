@@ -10,6 +10,9 @@ Runtime role:
   orphan/position resync.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
+- reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
+  ghost cleanup: journal a proven protective exit before removing the bracket;
+  defer on missing fill or unresolved ledger accounting.
 
 Position in the pipeline:
     execution/order_manager.py -> THIS FILE (bracket_manager.py)
@@ -5307,7 +5310,9 @@ class BracketManager:
         with self._lock:
             return self._brackets.get(entry_id)
 
-    def reconcile_symbol_flat(self, symbol: str) -> int:
+    def reconcile_symbol_flat(
+        self, symbol: str, *, settle_filled_stop: bool = False
+    ) -> int:
         """Drop all brackets for a symbol the broker now reports as flat.
 
         Called when broker reconciliation finds a position closed externally
@@ -5337,6 +5342,60 @@ class BracketManager:
                             bracket.exchange_stop_order_id,
                         )
                         continue
+                    if outcome == "filled" and settle_filled_stop:
+                        # Ghost reconciliation can run immediately after a
+                        # protective SL fills. Never unregister its bracket
+                        # before the canonical exit/fill-ledger/journal path
+                        # records the proven sell. A missing broker fill price
+                        # must preserve the bracket for a subsequent retry.
+                        already_closed = bool(
+                            bracket.exit_state == BracketExitLifecycle.CLOSED.value
+                            and bracket.exit_executed
+                            and int(bracket.remaining_quantity or 0) == 0
+                        )
+                        if not already_closed:
+                            stop_status = self._get_broker_order_status(
+                                str(bracket.exchange_stop_order_id)
+                            )
+                            fill_qty = self._extract_status_filled_quantity(stop_status)
+                            fill_price = self._extract_status_fill_price(stop_status)
+                            if (
+                                fill_qty < int(bracket.remaining_quantity or 0)
+                                or fill_price is None
+                            ):
+                                LOGGER.warning(
+                                    "BRACKET_FLAT_CLEANUP_DEFERRED_INCOMPLETE_STOP_FILL "
+                                    "bracket_id=%s order_id=%s filled_qty=%s remaining=%s",
+                                    bracket.bracket_id,
+                                    bracket.exchange_stop_order_id,
+                                    fill_qty,
+                                    bracket.remaining_quantity,
+                                    extra={
+                                        "event": "BRACKET_FLAT_CLEANUP_DEFERRED_INCOMPLETE_STOP_FILL",
+                                        "bracket_id": bracket.bracket_id,
+                                        "symbol": bracket.symbol,
+                                    },
+                                )
+                                continue
+                        converged = already_closed or self._promote_filled_exchange_stop(
+                            bracket, reason="exchange_protective_stop_fill"
+                        )
+                        if not converged or str(bracket.bracket_id) in getattr(
+                            self, "_ledger_blocked", {}
+                        ):
+                            LOGGER.warning(
+                                "BRACKET_FLAT_CLEANUP_DEFERRED_EXIT_ACCOUNTING "
+                                "bracket_id=%s symbol=%s stop_order_id=%s",
+                                bracket.bracket_id,
+                                bracket.symbol,
+                                bracket.exchange_stop_order_id,
+                                extra={
+                                    "event": "BRACKET_FLAT_CLEANUP_DEFERRED_EXIT_ACCOUNTING",
+                                    "bracket_id": bracket.bracket_id,
+                                    "symbol": bracket.symbol,
+                                },
+                            )
+                            continue
                 self.unregister_bracket(eid)
                 removed += 1
             except Exception:  # noqa: BLE001

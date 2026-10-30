@@ -928,6 +928,54 @@ def test_flat_reconcile_recovers_confirmed_stop_when_status_unknown(
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
 
 
+def test_ghost_cleanup_records_complete_exchange_stop_before_unregister(
+    monkeypatch,
+) -> None:
+    """Proven same-order SL fill must reach bracket close/journal before ghost sweep."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    manager.confirm_entry_fill("entry-1", 150.0, 65)
+    bracket.exchange_stop_order_id = "filled-stop"
+    broker.statuses["filled-stop"] = "COMPLETE"
+    broker.protective_order_fields["filled-stop"] = {
+        "filled_quantity": 65,
+        "average_price": 152.0,
+    }
+    broker.positions = []
+    journal_events: list[str] = []
+    original_log = manager._log_bracket_event
+
+    def log_event(event_type, *args, **kwargs):
+        journal_events.append(event_type)
+        return original_log(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_log_bracket_event", log_event)
+    assert manager.reconcile_symbol_flat(SYMBOL, settle_filled_stop=True) == 1
+    assert bracket.exit_executed is True
+    assert bracket.exit_state == BracketExitLifecycle.CLOSED.value
+    assert bracket.exit_price == 152.0
+    assert "EXIT_FILLED" in journal_events
+    assert "BRACKET_CLOSED" in journal_events
+    assert manager.get_bracket("entry-1") is None
+    assert manager.reconcile_symbol_flat(SYMBOL, settle_filled_stop=True) == 0
+
+
+def test_ghost_cleanup_retains_protective_stop_without_complete_fill_evidence(
+    monkeypatch,
+) -> None:
+    """A terminal status without fill quantity/price is not a journalled exit."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "unverified-stop"
+    broker.statuses["unverified-stop"] = "COMPLETE"
+    broker.positions = []
+    assert manager.reconcile_symbol_flat(SYMBOL, settle_filled_stop=True) == 0
+    assert manager.get_bracket("entry-1") is bracket
+    assert bracket.exit_executed is False
+
+
 def test_flat_reconcile_checks_broker_orderbook_when_history_returns_unknown(
     monkeypatch,
 ) -> None:

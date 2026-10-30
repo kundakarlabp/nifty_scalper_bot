@@ -16154,10 +16154,29 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 f"👻 GHOST BRACKET DETECTED: {ghost_sym} has protection but no Open Position. "
                                 "Performing Safety Cleanup..."
                             )
-                            # Force kill the bracket so it doesn't misfire and open a new trade
-                            bm.manual_override_close(
-                                ghost_sym, reason="State Reconciliation (Ghost)"
-                            )
+                            # A broker-filled exchange stop can make the
+                            # local position flat before the bracket's exit
+                            # journal has converged. Do not unregister it via
+                            # manual_override_close: that loses the exact exit
+                            # identity, fill price and completed-trade record.
+                            reconcile_flat = getattr(bm, "reconcile_symbol_flat", None)
+                            if not callable(reconcile_flat):
+                                LOGGER.error(
+                                    "GHOST_SWEEP_DEFERRED_MISSING_RECONCILER symbol=%s",
+                                    ghost_sym,
+                                )
+                                continue
+                            reconcile_flat(ghost_sym, settle_filled_stop=True)
+                            if bm.is_symbol_managed(ghost_sym):
+                                LOGGER.warning(
+                                    "GHOST_SWEEP_EXIT_ACCOUNTING_PENDING symbol=%s",
+                                    ghost_sym,
+                                    extra={
+                                        "event": "GHOST_SWEEP_EXIT_ACCOUNTING_PENDING",
+                                        "symbol": ghost_sym,
+                                    },
+                                )
+                                continue
                             LOGGER.warning(
                                 "STALE_BRACKET_RECONCILED_FLAT symbol=%s",
                                 ghost_sym,
