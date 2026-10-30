@@ -4,6 +4,8 @@ Responsibilities:
 - audit_session_startups counts canonical WebSocket, reconciliation and ready events.
 - Extract clock times, first-ready/opening-window observations and bounded counts.
 - Mark missing readiness markers explicitly; do not infer continuous availability.
+- Correlate stop-unverified warnings to later broker-proof reconciliation logs
+  by exact order ID, without mistaking resolved warnings for continuous safety.
 - Mark absent evidence explicitly instead of inferring broker or stop safety.
 
 Boundaries: Offline/read-only log parsing; no broker, engine or scheduler imports.
@@ -22,6 +24,8 @@ _RECONCILE = "RECONCILE_COMPLETE"
 _LIVE_READY = "STARTUP_MODE_TRANSITION"
 _ORDER_OK = "BROKER_ORDER_RECONCILE_OK"
 # Event counts are retrospective diagnostics, never continuous stop coverage.
+_STOP_ORDER_ID = re.compile(r"\border_id=([A-Za-z0-9_-]{1,80})(?=\s|$)")
+
 _STOP_EVENTS = {
     "EXCHANGE_PROTECTIVE_STOP_ARMED": "stop_armed_event_count",
     "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED": "stop_unverified_event_count",
@@ -48,11 +52,41 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
     reconciled_count = 0
     order_ok_count = 0
     stop_counts = dict.fromkeys(_STOP_EVENTS.values(), 0)
+    pending_stop_warnings: dict[str, list[datetime]] = {}
+    unattributed_stop_warnings = 0
+    reconciled_stop_warnings = 0
+    recovery_lags: list[int] = []
 
     for line in log_text.splitlines():
         for event, key in _STOP_EVENTS.items():
             if event in line:
                 stop_counts[key] += 1
+        if "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED" in line:
+            order_match = _STOP_ORDER_ID.search(line)
+            warning_time = _event_time(line)
+            if order_match and warning_time is not None:
+                pending_stop_warnings.setdefault(order_match.group(1), []).append(
+                    warning_time
+                )
+            else:
+                unattributed_stop_warnings += 1
+        elif "EXCHANGE_PROTECTIVE_STOP_RECONCILED" in line:
+            order_match = _STOP_ORDER_ID.search(line)
+            recovery_time = _event_time(line)
+            if order_match and recovery_time is not None:
+                order_id = order_match.group(1)
+                pending = pending_stop_warnings.get(order_id, [])
+                recovered = [t for t in pending if t <= recovery_time]
+                if recovered:
+                    reconciled_stop_warnings += len(recovered)
+                    recovery_lags.extend(
+                        int((recovery_time - t).total_seconds()) for t in recovered
+                    )
+                    remaining = [t for t in pending if t > recovery_time]
+                    if remaining:
+                        pending_stop_warnings[order_id] = remaining
+                    else:
+                        pending_stop_warnings.pop(order_id, None)
         if _ORDER_OK in line:
             order_ok_count += 1
         if _WS in line:
@@ -92,6 +126,9 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
             opening_ready_seen = True
             break
 
+    unresolved_stop_warnings = unattributed_stop_warnings + sum(
+        len(values) for values in pending_stop_warnings.values()
+    )
     return {
         "schema_version": 1,
         "observed_startup_count": len(starts),
@@ -108,6 +145,20 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
             "09:30:00" <= start.strftime("%H:%M:%S") <= "15:00:00" for start in starts
         ),
         **stop_counts,
+        "stop_unverified_reconciled_event_count": reconciled_stop_warnings,
+        "stop_unverified_unresolved_event_count": unresolved_stop_warnings,
+        "stop_unverified_max_observed_recovery_seconds": (
+            max(recovery_lags) if recovery_lags else None
+        ),
+        "stop_warning_resolution": (
+            "unresolved_warning_in_log"
+            if unresolved_stop_warnings
+            else (
+                "all_warnings_reconciled_in_log"
+                if reconciled_stop_warnings
+                else "no_warning_observed"
+            )
+        ),
         "first_startup_at_ist": starts[0].strftime("%H:%M:%S") if starts else None,
         "last_startup_at_ist": starts[-1].strftime("%H:%M:%S") if starts else None,
         "first_live_ready_at_ist": first_ready_time,
