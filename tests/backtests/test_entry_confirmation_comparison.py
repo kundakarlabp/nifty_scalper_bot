@@ -244,12 +244,8 @@ def test_vwap_opt_in_retest_ablation_uses_matched_shadow_profiles(monkeypatch):
         "strict_continuation_retest_rebreak_only",
     ]
     assert [entry[0] for entry in observed[-6:]] == [10.0, 25.0, 50.0] * 2
-    assert [entry[1:] for entry in observed[-6:-3]] == [
-        ("true", None)
-    ] * 3
-    assert [entry[1:] for entry in observed[-3:]] == [
-        ("true", "true")
-    ] * 3
+    assert [entry[1:] for entry in observed[-6:-3]] == [("true", None)] * 3
+    assert [entry[1:] for entry in observed[-3:]] == [("true", "true")] * 3
     assert any(
         pair["name"] == "strict_continuation_either_vs_retest_rebreak"
         and pair["only_changed_rule"] == "VWAP_RESEARCH_RETEST_REBREAK_ONLY"
