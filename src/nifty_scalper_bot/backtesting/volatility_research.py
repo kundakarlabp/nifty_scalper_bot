@@ -2,7 +2,8 @@
 
 Responsibilities: Evaluate quote-consistent entry geometry for four-leg defined-risk
 credit condors and debit straddles with the canonical per-order cost estimator.
-Ownership: Research-only option strategy screening, not StrategyManager/execution.
+Ownership: Research-only option strategy screening and read-only cache mapping,
+not StrategyManager/execution.
 Safety: Requires explicit SHADOW mode and synchronized FULL-depth quotes; never
 registers a strategy, creates orders, or certifies historical/live profitability.
 """
@@ -13,7 +14,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Literal
+from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
@@ -236,8 +237,112 @@ def assess_long_atm_straddle(
     )
 
 
+def quote_from_canonical_cache(
+    *,
+    symbol: str,
+    instrument_manager: Any,
+    market_data_manager: Any,
+) -> VolatilityOptionQuote:
+    """Read one verified NIFTY instrument plus its existing WS FULL book.
+
+    This creates no subscription, cache, reservation or order. The caller must
+    assess the *entire* 2/4-leg snapshot against a common timestamp afterwards.
+    """
+    if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
+        raise ValueError("volatility_research_requires_shadow_process")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol.startswith("NFO:NIFTY"):
+        raise ValueError("research_contract_or_depth_unverified")
+    try:
+        contract = instrument_manager.lookup(normalized_symbol)
+        tick = market_data_manager.get_quote(normalized_symbol)
+    except Exception as exc:
+        raise ValueError("research_canonical_source_unavailable") from exc
+    if not isinstance(contract, Mapping) or not isinstance(tick, Mapping):
+        raise ValueError("research_canonical_source_unavailable")
+
+    option_type = str(contract.get("instrument_type") or "").upper()
+    bare = normalized_symbol.partition(":")[2]
+    if (
+        str(contract.get("exchange") or "").upper() != "NFO"
+        or str(contract.get("name") or "").upper() != "NIFTY"
+        or str(contract.get("tradingsymbol") or "").upper() != bare
+        or option_type not in {"CE", "PE"}
+        or str(tick.get("source") or "").lower()
+        not in {"ws", "ws_full", "full", "websocket"}
+        or str(tick.get("bid_ask_source") or "").lower() != "ws_full"
+        or tick.get("depth_available") is not True
+    ):
+        raise ValueError("research_contract_or_depth_unverified")
+
+    depth = tick.get("depth")
+    if not isinstance(depth, Mapping):
+        raise ValueError("research_contract_or_depth_unverified")
+    buy = depth.get("buy")
+    sell = depth.get("sell")
+    if not isinstance(buy, list) or not isinstance(sell, list) or not buy or not sell:
+        raise ValueError("research_contract_or_depth_unverified")
+    if not isinstance(buy[0], Mapping) or not isinstance(sell[0], Mapping):
+        raise ValueError("research_contract_or_depth_unverified")
+
+    try:
+        token = int(contract["instrument_token"])
+        tick_token = int(tick["instrument_token"])
+        strike_number = float(contract["strike"])
+        lot_size = int(contract["lot_size"])
+        bid = float(buy[0]["price"])
+        ask = float(sell[0]["price"])
+        bid_quantity = int(buy[0]["quantity"])
+        ask_quantity = int(sell[0]["quantity"])
+        top_bid = float(tick["bid"])
+        top_ask = float(tick["ask"])
+        expiry_value = contract["expiry"]
+        if isinstance(expiry_value, datetime):
+            expiry = expiry_value.date()
+        elif isinstance(expiry_value, date):
+            expiry = expiry_value
+        else:
+            expiry = date.fromisoformat(str(expiry_value))
+        raw_time = tick.get("exchange_timestamp") or tick.get("timestamp")
+        observed = (
+            raw_time if isinstance(raw_time, datetime)
+            else datetime.fromisoformat(str(raw_time))
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("research_contract_or_depth_unverified") from exc
+
+    if (
+        token <= 0
+        or token != tick_token
+        or not math.isfinite(strike_number)
+        or not strike_number.is_integer()
+        or lot_size <= 0
+        or not all(math.isfinite(x) for x in (bid, ask, top_bid, top_ask))
+        or abs(bid - top_bid) > 0.001
+        or abs(ask - top_ask) > 0.001
+        or observed.tzinfo is None
+        or observed.utcoffset() is None
+    ):
+        raise ValueError("research_contract_or_depth_unverified")
+    return VolatilityOptionQuote(
+        symbol=normalized_symbol,
+        instrument_token=token,
+        option_type=option_type,
+        strike=int(strike_number),
+        expiry=expiry,
+        lot_size=lot_size,
+        bid=bid,
+        ask=ask,
+        bid_quantity=bid_quantity,
+        ask_quantity=ask_quantity,
+        observed_at=observed,
+        source="FULL",
+    )
+
+
 __all__ = [
     "VolatilityOptionQuote",
+    "quote_from_canonical_cache",
     "CondorAssessment",
     "LongStraddleAssessment",
     "assess_credit_iron_condor",
