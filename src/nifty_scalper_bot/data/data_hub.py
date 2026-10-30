@@ -1345,9 +1345,7 @@ class DataHub:
         canonical_iso = tick.get("timestamp")
         if canonical_ms is not None and isinstance(canonical_iso, str):
             try:
-                parsed = datetime.fromisoformat(
-                    canonical_iso.replace("Z", "+00:00")
-                )
+                parsed = datetime.fromisoformat(canonical_iso.replace("Z", "+00:00"))
                 if (
                     parsed.tzinfo is None
                     or parsed.year < 2020
