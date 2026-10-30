@@ -68,3 +68,24 @@ def test_noncanonical_tick_still_receives_canonical_timestamp(monkeypatch) -> No
     latest = hub.get_quote(SYMBOL, allow_pull=False)
     assert latest is not None
     assert latest["timestamp_ms"] > 0
+
+def test_discordant_millisecond_timestamp_uses_parsed_exchange_time(
+    monkeypatch,
+) -> None:
+    hub = DataHub(MarketDataManager(kite=None))
+    payload = _canonical_tick()
+    payload["timestamp_ms"] += 60_000.0
+    parse_calls: list[object] = []
+    original = hub._coerce_tick_timestamp
+
+    def track(value):
+        parse_calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(hub, "_coerce_tick_timestamp", track)
+    hub.ingest_tick_sync(payload)
+
+    assert parse_calls == [payload["timestamp"]]
+    quote = hub.get_quote(SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert abs(quote["timestamp_ms"] - payload["timestamp_ms"]) >= 59_000.0
