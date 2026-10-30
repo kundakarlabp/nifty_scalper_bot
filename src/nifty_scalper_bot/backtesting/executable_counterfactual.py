@@ -1,7 +1,9 @@
 """Research-only post-decision executable quote labeling for missed NIFTY setups.
 
-Only accepts provenance-verified, exact-contract, two-sided full-depth quotes.
-No live strategy, risk, order, or broker code imports this module.
+Responsibilities: Label provenance-verified, exact-contract full-depth quotes
+with conservative entry slippage, recorded stop/target and canonical costs.
+Boundary: Research-only counterfactuals; no live or broker imports.
+Safety: A slipped entry outside the recorded protective geometry is unresolved.
 """
 
 from __future__ import annotations
@@ -111,6 +113,10 @@ def evaluate_executable_counterfactual(
         return unresolved("next_executable_ask_too_late")
     if not stop_price < ask < target_price:
         return unresolved("recorded_stop_target_incompatible_with_ask")
+    slippage = adverse_slippage_bps / 10_000.0
+    entry = ask * (1 + slippage)
+    if not stop_price < entry < target_price:
+        return unresolved("slippage_invalidates_entry_geometry")
 
     reason = "time_exit"
     last_ts = entry_ts
@@ -129,8 +135,6 @@ def evaluate_executable_counterfactual(
         if exit_ts < decision_ts + horizon_seconds - max_quote_gap_seconds:
             return unresolved("forward_horizon_incomplete")
 
-    slippage = adverse_slippage_bps / 10_000.0
-    entry = ask * (1 + slippage)
     exit_price = exit_bid * (1 - slippage)
     if exit_price <= 0:
         return unresolved("slippage_exceeds_executable_exit")
