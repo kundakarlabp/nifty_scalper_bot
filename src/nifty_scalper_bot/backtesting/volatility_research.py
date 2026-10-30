@@ -14,7 +14,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
@@ -327,7 +327,7 @@ def quote_from_canonical_cache(
     return VolatilityOptionQuote(
         symbol=normalized_symbol,
         instrument_token=token,
-        option_type=option_type,
+        option_type=cast(Literal["CE", "PE"], option_type),
         strike=int(strike_number),
         expiry=expiry,
         lot_size=lot_size,
