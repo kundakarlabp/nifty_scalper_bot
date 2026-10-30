@@ -214,8 +214,7 @@ def test_vwap_opt_in_retest_ablation_uses_matched_shadow_profiles(monkeypatch):
     def fake_scenario(*_args, **kwargs):
         observed.append(
             (
-                kwargs["slippage_bps_per_side"] if "slippage_bps_per_side" in kwargs
-                else _args[3],
+                _args[3],
                 research.os.environ.get("VWAP_STRICT_CONTINUATION_ENABLED"),
                 research.os.environ.get("VWAP_RESEARCH_RETEST_REBREAK_ONLY"),
             )
