@@ -162,10 +162,7 @@ def assess_credit_iron_condor(
         or short_call.option_type != "CE"
         or long_call.option_type != "CE"
         or not (
-            long_put.strike
-            < short_put.strike
-            < short_call.strike
-            < long_call.strike
+            long_put.strike < short_put.strike < short_call.strike < long_call.strike
         )
     ):
         raise ValueError("research_condor_wings_invalid")
