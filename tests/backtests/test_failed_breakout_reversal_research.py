@@ -129,8 +129,12 @@ def test_reversal_only_buys_premium_with_existing_research_geometry(monkeypatch)
 
 
 def test_reversal_is_opt_in_to_archived_replay_and_never_promoted(monkeypatch):
+    from nifty_scalper_bot.backtesting import strategy_research
+
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    monkeypatch.setattr(research, "load_archive", lambda _: ({}, {}, "archive_sha"))
+    monkeypatch.setattr(
+        strategy_research, "load_archive", lambda _: ({}, {}, "archive_sha")
+    )
     monkeypatch.setattr(
         research, "get_settings", lambda: SimpleNamespace(elite=object())
     )
@@ -148,7 +152,7 @@ def test_reversal_is_opt_in_to_archived_replay_and_never_promoted(monkeypatch):
         )
         return {"strategies": {}}
 
-    monkeypatch.setattr(research, "_scenario", fake_scenario)
+    monkeypatch.setattr(strategy_research, "_scenario", fake_scenario)
     monkeypatch.delenv("RESEARCH_FAILED_BREAKOUT_REVERSAL_ENABLED", raising=False)
     baseline = research.run_directional_hypothesis_research(Path("/unused"))
     assert baseline["failed_breakout_reversal_opt_in"] is False
