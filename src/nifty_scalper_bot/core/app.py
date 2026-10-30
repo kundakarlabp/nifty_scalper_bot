@@ -9488,6 +9488,11 @@ async def _ensure_active_basket_history(
                 role=role,
                 phase=hydration_phase,
                 reason=ensure_reason,
+                # A count-sufficient cache may still contain stale or gapped
+                # completed candles. Bypass the count-only MDM short circuit
+                # for quality recovery, while retaining the per-symbol retry
+                # cooldown and canonical broker-fetch rate limit.
+                force=ensure_reason in {"history_stale", "recovery_gap_fill"},
                 minimum_only=False,
             )
             result[symbol] = hydration
