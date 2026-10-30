@@ -2111,7 +2111,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 ),
             ]
         )
-    environment_keys = (
+    environment_keys: tuple[str, ...] = (
         "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
         "VWAP_FUTURES_SLOPE_MIN_BPS",
         "VWAP_FUTURES_VOLUME_MIN_RATIO",
