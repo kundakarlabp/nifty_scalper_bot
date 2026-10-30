@@ -556,10 +556,9 @@ def run_directional_hypothesis_research(
     if not math.isfinite(slippage_bps) or not 0 <= slippage_bps <= 1000:
         raise ValueError("research_slippage_invalid")
     histories, instruments, digest = load_archive(directory)
-    include_failed_breakout = (
-        os.getenv("RESEARCH_FAILED_BREAKOUT_REVERSAL_ENABLED", "false")
-        .strip().lower() in {"1", "true", "yes", "on"}
-    )
+    include_failed_breakout = os.getenv(
+        "RESEARCH_FAILED_BREAKOUT_REVERSAL_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
     families = _DEFAULT_FAMILIES + (
         ("failed_breakout_reversal",) if include_failed_breakout else ()
     )
