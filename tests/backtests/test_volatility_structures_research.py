@@ -12,7 +12,6 @@ from nifty_scalper_bot.backtesting.volatility_research import (
     assess_long_atm_straddle,
 )
 
-
 _AT = datetime(2026, 10, 30, 10, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
 _EXPIRY = date(2026, 11, 5)
 
@@ -81,7 +80,11 @@ def test_condor_asymmetric_wings_use_worst_width():
         ("long_put", {"strike": 23900}, "research_condor_wings_invalid"),
         ("short_put", {"bid_quantity": 0}, "research_contract_or_depth_unverified"),
         ("short_put", {"source": "LTP"}, "research_contract_or_depth_unverified"),
-        ("short_put", {"expiry": date(2026, 11, 12)}, "research_contract_or_depth_unverified"),
+        (
+            "short_put",
+            {"expiry": date(2026, 11, 12)},
+            "research_contract_or_depth_unverified",
+        ),
         ("short_put", {"bid": 40, "ask": 40}, "research_crossed_or_nonfinite_book"),
         (
             "short_put",
