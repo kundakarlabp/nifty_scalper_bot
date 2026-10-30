@@ -1338,7 +1338,15 @@ class DataHub:
         source = str(tick.get("source", "ws") or "ws").lower()
         if source == "rest":
             source = "poll"
-        ts_iso, ts_ms = self._coerce_tick_timestamp(tick.get("timestamp"))
+        # MDM already validated and serialized canonical tick timestamps.
+        # Re-parsing the same ISO string with pandas on every subscribed tick
+        # adds unnecessary processing to the synchronous runner callback.
+        canonical_ms = _runtime_tick_timestamp_ms(tick)
+        canonical_iso = tick.get("timestamp")
+        if canonical_ms is not None and isinstance(canonical_iso, str):
+            ts_iso, ts_ms = canonical_iso, canonical_ms
+        else:
+            ts_iso, ts_ms = self._coerce_tick_timestamp(canonical_iso)
         now_ms = self._now() * 1000.0
         mono_now = self._monotonic()
 
@@ -1450,10 +1458,33 @@ class DataHub:
             ) + 1
             self._last_datahub_runner_delivery_at = time.monotonic()
         for callback in subscribers:
+            callback_start = time.perf_counter()
             try:
                 callback(dict(canonical_tick))
             except Exception as exc:  # noqa: BLE001
                 self._log_listener_failure(exc)
+            finally:
+                callback_ms = (time.perf_counter() - callback_start) * 1000.0
+                if callback_ms >= 50.0:
+                    callback_name = str(
+                        getattr(callback, "__qualname__", type(callback).__name__)
+                    )
+                    cooldown = getattr(self, "_slow_callback_log_at", None)
+                    if cooldown is None:
+                        cooldown = {}
+                        self._slow_callback_log_at = cooldown
+                    key = (symbol, callback_name)
+                    now_mono = time.monotonic()
+                    if now_mono - cooldown.get(key, 0.0) >= 30.0:
+                        cooldown[key] = now_mono
+                        LOGGER.warning(
+                            "DATAHUB_LISTENER_SLOW symbol=%s callback=%s "
+                            "duration_ms=%.1f source=%s",
+                            symbol,
+                            callback_name,
+                            callback_ms,
+                            source,
+                        )
         self._mark_quotes_dirty()
         self.checkpoint_quotes()
 
