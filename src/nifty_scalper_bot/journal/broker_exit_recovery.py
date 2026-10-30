@@ -288,7 +288,9 @@ def recover_broker_proven_exit(
                 "charges_verified": False,
             }
 
-            def event(kind: str, occurred_at: float, meta: dict[str, Any]):
+            def event(
+                kind: str, occurred_at: float, meta: dict[str, Any]
+            ) -> dict[str, Any]:
                 return {
                     "event_type": kind,
                     "event_name": {
