@@ -1344,7 +1344,19 @@ class DataHub:
         canonical_ms = _runtime_tick_timestamp_ms(tick)
         canonical_iso = tick.get("timestamp")
         if canonical_ms is not None and isinstance(canonical_iso, str):
-            ts_iso, ts_ms = canonical_iso, canonical_ms
+            try:
+                parsed = datetime.fromisoformat(
+                    canonical_iso.replace("Z", "+00:00")
+                )
+                if (
+                    parsed.tzinfo is None
+                    or parsed.year < 2020
+                    or abs(parsed.timestamp() * 1000.0 - canonical_ms) > 1.0
+                ):
+                    raise ValueError("tick timestamp identity mismatch")
+                ts_iso, ts_ms = canonical_iso, canonical_ms
+            except (OverflowError, ValueError):
+                ts_iso, ts_ms = self._coerce_tick_timestamp(canonical_iso)
         else:
             ts_iso, ts_ms = self._coerce_tick_timestamp(canonical_iso)
         now_ms = self._now() * 1000.0
