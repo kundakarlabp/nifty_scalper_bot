@@ -202,6 +202,7 @@ def test_vwap_opt_in_retest_ablation_uses_matched_shadow_profiles(monkeypatch):
     monkeypatch.setenv("VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY", "true")
     monkeypatch.delenv("VWAP_RESEARCH_COMPARE_NEUTRAL_SLOPE", raising=False)
     monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    monkeypatch.delenv("VWAP_STRICT_CONTINUATION_ENABLED", raising=False)
     monkeypatch.setattr(
         research,
         "get_settings",
