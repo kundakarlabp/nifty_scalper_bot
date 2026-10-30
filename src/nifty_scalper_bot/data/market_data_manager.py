@@ -10052,18 +10052,36 @@ class MarketDataManager:
                     or token_int != current_token
                     or not token_expected
                 ):
-                    self._mismatched_generation_tick_counts[canonical_symbol] += 1
+                    # An unsubscribed basket token can briefly deliver while
+                    # KiteTicker processes the unsubscribe. Preserve rejection
+                    # but do not classify that normal race as a feed failure.
+                    retired = bool(
+                        token_int is not None
+                        and token_int == current_token
+                        and not token_expected
+                    )
+                    if retired:
+                        self._candle_metrics["ws_retired_token_dropped_total"] += 1
+                    else:
+                        self._mismatched_generation_tick_counts[canonical_symbol] += 1
+                    event = (
+                        "WS_RETIRED_TOKEN_TICK_DROPPED"
+                        if retired
+                        else "WS_GENERATION_TICK_REJECTED"
+                    )
                     log_throttled(
                         self._logger,
-                        f"ws_generation_tick_rejected:{canonical_symbol}",
-                        "WS_GENERATION_TICK_REJECTED symbol=%s token=%s expected_token=%s",
+                        f"{event}:{canonical_symbol}",
+                        "%s symbol=%s token=%s expected_token=%s desired=%s",
+                        event,
                         canonical_symbol,
                         token_int,
                         current_token,
+                        token_expected,
                         interval_sec=60.0,
-                        level=logging.WARNING,
+                        level=logging.DEBUG if retired else logging.WARNING,
                         extra={
-                            "event": "WS_GENERATION_TICK_REJECTED",
+                            "event": event,
                             "symbol": canonical_symbol,
                             "token": token_int,
                             "expected_token": current_token,
