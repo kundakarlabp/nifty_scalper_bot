@@ -168,6 +168,51 @@ def test_overextended_quote_still_recovers_same_session_thesis_state(monkeypatch
     assert strategy._thesis_anchor_by_scope[(symbol, "2026-09-08")]
 
 
+@pytest.mark.parametrize(
+    ("option_premium", "fraction_failed"), [(140.0, True), (116.0, False)]
+)
+def test_distance_veto_reports_quantitative_reason_without_admitting_entry(
+    monkeypatch, option_premium, fraction_failed
+):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    observed = []
+
+    def capture(_logger, _key, _msg, *_args, **kwargs):
+        observed.append(kwargs)
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.elite_strategies.vwap_pro.log_throttled",
+        capture,
+    )
+    symbol = "NFO:NIFTY2690823650CE"
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine([]))
+    indicators = _indicators(
+        session_date="2026-09-08",
+        latest_bar_ts="2026-09-08T10:40:00+05:30",
+    )
+    indicators.update(
+        {
+            "open": option_premium - 1.0,
+            "high": option_premium + 1.0,
+            "low": option_premium - 2.0,
+            "close": option_premium,
+        }
+    )
+    assert strategy._evaluate_signal(symbol, indicators, option_premium) is None
+    assert strategy.last_no_vote_reason == "distance_outside_band"
+    assert len(observed) == 1
+    diagnostic = observed[0]["extra"]
+    assert diagnostic["event"] == "VWAP_DISTANCE_REJECTED"
+    assert diagnostic["symbol"] == symbol
+    assert diagnostic["fraction_failed"] is fraction_failed
+    assert diagnostic["atr_failed"] is True
+    assert diagnostic["distance_fraction"] == pytest.approx(
+        (option_premium - 100.0) / 100.0
+    )
+    assert diagnostic["allowed_fraction"] >= 0.18
+    assert observed[0]["interval_sec"] == 60.0
+
+
 def test_overextended_below_vwap_records_current_reset_anchor(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     symbol = "NFO:NIFTY2690823650CE"
