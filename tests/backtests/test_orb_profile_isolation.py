@@ -31,15 +31,19 @@ def test_orb_research_resets_inherited_toggles_and_restores_environment(monkeypa
     seen = []
 
     def fake_scenario(*args, **kwargs):
-        seen.append({
-            "slippage": args[3],
-            "minutes": args[2].orb.orb_minutes,
-            "momentum": research.os.getenv("ORB_MOMENTUM_BRANCH_ENABLED"),
-            "entry_window": research.os.getenv("ORB_MAX_ENTRY_MINUTES_AFTER_RANGE"),
-            "target_rr": research.os.getenv("ORB_TARGET_RR"),
-            "allow_range": research.os.getenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION"),
-            "strict_wick": research.os.getenv("ORB_RESEARCH_STRICT_RETEST_WICK"),
-        })
+        seen.append(
+            {
+                "slippage": args[3],
+                "minutes": args[2].orb.orb_minutes,
+                "momentum": research.os.getenv("ORB_MOMENTUM_BRANCH_ENABLED"),
+                "entry_window": research.os.getenv("ORB_MAX_ENTRY_MINUTES_AFTER_RANGE"),
+                "target_rr": research.os.getenv("ORB_TARGET_RR"),
+                "allow_range": research.os.getenv(
+                    "ORB_RESEARCH_ALLOW_RANGE_TRANSITION"
+                ),
+                "strict_wick": research.os.getenv("ORB_RESEARCH_STRICT_RETEST_WICK"),
+            }
+        )
         return {
             "strategies": {
                 "ORBPro": {
