@@ -117,6 +117,7 @@ def test_long_atm_straddle_prices_at_asks_and_reports_vol_gap_only():
         call=call,
         put=put,
         at=_AT,
+        spot=24008.0,
         implied_annual_vol=0.17,
         forecast_annual_vol=0.22,
         forecast_asof=_AT - timedelta(seconds=15),
@@ -147,6 +148,7 @@ def test_long_straddle_unusable_vol_forecasts_fail_closed(
             call=quote("CE", 24000, token=5),
             put=quote("PE", 24000, token=6),
             at=_AT,
+        spot=24008.0,
             implied_annual_vol=market,
             forecast_annual_vol=forecast,
             forecast_asof=_AT - timedelta(seconds=age),
@@ -159,6 +161,7 @@ def test_unequal_straddle_strikes_cannot_masquerade_as_atm():
             call=quote("CE", 24000, token=5),
             put=quote("PE", 24050, token=6),
             at=_AT,
+        spot=24008.0,
             implied_annual_vol=0.17,
             forecast_annual_vol=0.22,
             forecast_asof=_AT,
@@ -181,3 +184,17 @@ def test_quote_from_unverified_expiry_or_after_hours_cannot_be_researched():
     legs["at"] = _AT.replace(hour=16)
     with pytest.raises(ValueError, match="research_outside_market_session"):
         assess_credit_iron_condor(**legs)
+
+
+@pytest.mark.parametrize("spot", [23940.0, float("nan"), 0.0])
+def test_straddle_uses_actual_spot_to_reject_non_atm_quotes(spot):
+    with pytest.raises(ValueError, match="research_straddle_not_atm"):
+        assess_long_atm_straddle(
+            call=quote("CE", 24000, token=5),
+            put=quote("PE", 24000, token=6),
+            at=_AT,
+            spot=spot,
+            implied_annual_vol=0.17,
+            forecast_annual_vol=0.22,
+            forecast_asof=_AT,
+        )
