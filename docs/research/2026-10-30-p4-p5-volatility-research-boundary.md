@@ -41,7 +41,9 @@ simulated. Never use this geometry for a real four-leg order.
 
 ## P5 — long ATM straddle
 
-Same-expiry, same-strike CE and PE both purchased at **ask**. Compute the
+Same-expiry, same-strike CE and PE both purchased at **ask**; the supplied
+point-in-time NIFTY spot must be within 25 points of the common strike to
+qualify as ATM. Compute the
 gross expiry breakevens `strike ± (CE_ask + PE_ask)`, premium outlay,
 canonical modeled entry fees, and the diagnostic difference between
 a separately supplied annualized realized-vol forecast and annualized IV.
