@@ -153,9 +153,11 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
         "stop_warning_resolution": (
             "unresolved_warning_in_log"
             if unresolved_stop_warnings
-            else "all_warnings_reconciled_in_log"
-            if reconciled_stop_warnings
-            else "no_warning_observed"
+            else (
+                "all_warnings_reconciled_in_log"
+                if reconciled_stop_warnings
+                else "no_warning_observed"
+            )
         ),
         "first_startup_at_ist": starts[0].strftime("%H:%M:%S") if starts else None,
         "last_startup_at_ist": starts[-1].strftime("%H:%M:%S") if starts else None,
