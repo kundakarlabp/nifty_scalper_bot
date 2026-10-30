@@ -63,7 +63,11 @@ def test_four_leg_condor_has_capped_gross_payoff_not_certified_net_loss():
 
 def test_condor_asymmetric_wings_use_worst_width():
     legs = condor()
-    legs["long_call"] = replace(legs["long_call"], strike=24250)
+    legs["long_call"] = replace(
+        legs["long_call"],
+        strike=24250,
+        symbol="NFO:NIFTY26NOV24250CE",
+    )
     result = assess_credit_iron_condor(**legs)
     assert result.max_call_width == 150
     assert result.max_put_width == 100
@@ -73,7 +77,7 @@ def test_condor_asymmetric_wings_use_worst_width():
 @pytest.mark.parametrize(
     ("field", "change", "reason"),
     [
-        ("long_put", {"ask": 40}, "research_condor_credit_invalid"),
+        ("long_put", {"ask": 60}, "research_condor_credit_invalid"),
         ("long_put", {"strike": 23900}, "research_condor_wings_invalid"),
         ("short_put", {"bid_quantity": 0}, "research_contract_or_depth_unverified"),
         ("short_put", {"source": "LTP"}, "research_contract_or_depth_unverified"),
