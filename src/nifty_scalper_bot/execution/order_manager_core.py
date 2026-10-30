@@ -31,6 +31,9 @@ Safe-edit notes:
   the existing entry gate stays blocked pending broker reconciliation.
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
+- The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
+  LIVE submissions are rejected until linked-leg margin, fill and crash recovery
+  are implemented in this canonical execution owner.
 - Restored broker SL/SL-M order types retain stop semantics; unknown persisted
   types are rejected rather than silently replaced with LIMIT or MARKET.
 """
@@ -8277,6 +8280,11 @@ class OrderManager:
             OrderPlacementError: If any leg fails placement or risk blocks the order.
         """
 
+        # Sequential broker submissions cannot provide a broker-confirmed
+        # portfolio fill, contingent margin reservation, or restart-safe unwind.
+        # Keep this legacy helper available for simulation, never LIVE.
+        if self.is_live_mode():
+            raise OrderPlacementError("linked_leg_live_execution_not_supported")
         if len(legs) != 2:
             raise ValueError("Atomic entry requires exactly two legs")
         normalized: list[AtomicLeg] = [self._normalize_leg(leg) for leg in legs]
