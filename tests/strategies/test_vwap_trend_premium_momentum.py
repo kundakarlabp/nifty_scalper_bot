@@ -950,7 +950,9 @@ def test_retest_rebreak_ablation_keeps_confirmed_retest_in_shadow(monkeypatch):
 
 
 @pytest.mark.parametrize("execution_mode", ["LIVE", "PAPER"])
-def test_retest_rebreak_ablation_cannot_change_live_or_paper(monkeypatch, execution_mode):
+def test_retest_rebreak_ablation_cannot_change_live_or_paper(
+    monkeypatch, execution_mode
+):
     monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "true")
     monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
     monkeypatch.setattr(
