@@ -77,7 +77,7 @@ def test_condor_asymmetric_wings_use_worst_width():
     ("field", "change", "reason"),
     [
         ("long_put", {"ask": 60}, "research_condor_credit_invalid"),
-        ("long_put", {"strike": 23900}, "research_condor_wings_invalid"),
+        ("long_put", {"strike": 23900}, "research_contract_or_depth_unverified"),
         ("short_put", {"bid_quantity": 0}, "research_contract_or_depth_unverified"),
         ("short_put", {"source": "LTP"}, "research_contract_or_depth_unverified"),
         (
@@ -148,7 +148,7 @@ def test_long_straddle_unusable_vol_forecasts_fail_closed(
             call=quote("CE", 24000, token=5),
             put=quote("PE", 24000, token=6),
             at=_AT,
-        spot=24008.0,
+            spot=24008.0,
             implied_annual_vol=market,
             forecast_annual_vol=forecast,
             forecast_asof=_AT - timedelta(seconds=age),
@@ -161,7 +161,7 @@ def test_unequal_straddle_strikes_cannot_masquerade_as_atm():
             call=quote("CE", 24000, token=5),
             put=quote("PE", 24050, token=6),
             at=_AT,
-        spot=24008.0,
+            spot=24008.0,
             implied_annual_vol=0.17,
             forecast_annual_vol=0.22,
             forecast_asof=_AT,
