@@ -443,3 +443,41 @@ def test_trigger_zombie_ws_restart_returns_dispatch_flag_and_backoff() -> None:
     # Immediate re-trigger: inflight/backoff must gate it.
     assert mdm._trigger_zombie_ws_restart() is False
     assert ws.calls == 1
+
+def test_retired_option_token_is_dropped_without_false_generation_warning(
+    caplog,
+) -> None:
+    import logging
+
+    mdm = MarketDataManager(kite=None, websocket=_FakeWebSocket())
+    symbol = "NFO:NIFTY26JUN24000CE"
+    token = 24000
+    _subscribe(mdm, symbol, token)
+    _ws_tick(mdm, symbol, token)
+    before = mdm.get_latest_tick(symbol)
+    before_mismatches = mdm._mismatched_generation_tick_counts[symbol]
+
+    with mdm._lock:
+        mdm._desired_tokens.discard(token)
+    with caplog.at_level(logging.WARNING):
+        _ws_tick(mdm, symbol, token, ltp=500.0)
+
+    assert mdm.get_latest_tick(symbol) == before
+    assert mdm._mismatched_generation_tick_counts[symbol] == before_mismatches
+    assert mdm._candle_metrics["ws_retired_token_dropped_total"] >= 1
+    assert not any("WS_GENERATION_TICK_REJECTED" in r.message for r in caplog.records)
+
+
+def test_unexpected_option_token_still_fails_closed() -> None:
+    mdm = MarketDataManager(kite=None, websocket=_FakeWebSocket())
+    symbol = "NFO:NIFTY26JUN24000CE"
+    token = 24000
+    _subscribe(mdm, symbol, token)
+    _ws_tick(mdm, symbol, token)
+    before = mdm.get_latest_tick(symbol)
+    before_mismatches = mdm._mismatched_generation_tick_counts[symbol]
+
+    _ws_tick(mdm, symbol, token + 1, ltp=500.0)
+
+    assert mdm.get_latest_tick(symbol) == before
+    assert mdm._mismatched_generation_tick_counts[symbol] == before_mismatches + 1
