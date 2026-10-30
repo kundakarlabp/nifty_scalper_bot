@@ -9193,6 +9193,10 @@ async def _ensure_symbol_runtime_history_canonical(
             role=policy.role,
             phase=policy.phase,
             reason=reason,
+            # A history-quality repair must not return early merely because
+            # the cache still contains the requested number of bars.
+            # Ordinary startup/prewarm requests retain the count fast path.
+            force=reason in {"history_stale", "recovery_gap_fill"},
             minimum_only=policy.minimum_only,
         )
         if getattr(hydration, "failure_reason", None):
