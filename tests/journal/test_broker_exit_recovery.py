@@ -191,12 +191,14 @@ def test_unsupported_orderbook_does_not_write(stores, change):
 
 
 def test_nonflat_broker_position_never_reconciles(stores):
-    pos = [{
-        "exchange": "NFO",
-        "tradingsymbol": _SYMBOL.removeprefix("NFO:"),
-        "product": "MIS",
-        "quantity": 65,
-    }]
+    pos = [
+        {
+            "exchange": "NFO",
+            "tradingsymbol": _SYMBOL.removeprefix("NFO:"),
+            "product": "MIS",
+            "quantity": 65,
+        }
+    ]
     assert _recover(stores, positions=pos, commit=True) == []
     assert _read(stores)[1] == 0
 
