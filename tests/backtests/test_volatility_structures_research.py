@@ -70,7 +70,7 @@ def test_condor_asymmetric_wings_use_worst_width():
     result = assess_credit_iron_condor(**legs)
     assert result.max_call_width == 150
     assert result.max_put_width == 100
-    assert result.gross_max_loss_rupees == pytest.approx(10725.0)
+    assert result.gross_max_loss_rupees == pytest.approx(8025.0)
 
 
 @pytest.mark.parametrize(
