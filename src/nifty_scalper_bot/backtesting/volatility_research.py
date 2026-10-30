@@ -107,7 +107,7 @@ def _validated(
             or quote.strike <= 0
             or quote.strike % 50 != 0
             or not quote.symbol.startswith("NFO:NIFTY")
-            or not quote.symbol.endswith(quote.option_type)
+            or not quote.symbol.endswith(f"{quote.strike}{quote.option_type}")
             or type(quote.instrument_token) is not int
             or quote.instrument_token <= 0
             or quote.symbol in identifiers
