@@ -136,6 +136,56 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
     assert exit_reason["value"] == "TARGET"
 
 
+def test_dsr_requires_full_r_multiple_coverage_across_completed_trades() -> None:
+    """A selected three-trade sample must not hide a fourth missing outcome."""
+    rows = []
+    for index, r_multiple in enumerate((0.8, -0.3, 1.4, None), start=1):
+        outcome = {
+            "cost_source": "broker_virtual_contract_note",
+            "effective_costs": {"total": 20.0},
+        }
+        if r_multiple is not None:
+            outcome["r_multiple"] = r_multiple
+        rows.append(
+            {
+                "trade_id": f"dsr-{index}",
+                "closed_at": float(index),
+                "strategy": "VWAPPro",
+                "gross_pnl": float(index * 10),
+                "estimated_costs": 20.0,
+                "net_pnl": float(index * 10 - 20),
+                "ledger_complete": True,
+                "state": "CLOSED",
+                "exit_reason": "TARGET",
+                "outcome": outcome,
+            }
+        )
+
+    partial = module.build_analysis(
+        rows, block_size=20, components=(), selection_trials=2
+    )
+    assert partial["overall_post_cost"]["trade_count"] == 4
+    assert partial["r_multiple_coverage"] == {
+        "finite_observations": 3,
+        "canonical_completed_trades": 4,
+        "coverage_fraction": 0.75,
+    }
+    assert partial["deflated_sharpe"] == {
+        "ready": False,
+        "reason": "incomplete_r_multiple_coverage",
+        "observations": 3,
+        "required_observations": 4,
+    }
+
+    rows[-1]["outcome"]["r_multiple"] = -0.5
+    complete = module.build_analysis(
+        rows, block_size=20, components=(), selection_trials=2
+    )
+    assert complete["r_multiple_coverage"]["coverage_fraction"] == 1.0
+    assert complete["deflated_sharpe"]["ready"] is True
+    assert complete["deflated_sharpe"]["observations"] == 4
+
+
 def test_cli_reports_all_historical_states_without_claiming_open_broker_orders(
     tmp_path, capsys
 ) -> None:
