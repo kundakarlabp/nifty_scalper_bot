@@ -444,6 +444,7 @@ def test_trigger_zombie_ws_restart_returns_dispatch_flag_and_backoff() -> None:
     assert mdm._trigger_zombie_ws_restart() is False
     assert ws.calls == 1
 
+
 def test_retired_option_token_is_dropped_without_false_generation_warning(
     caplog,
 ) -> None:
