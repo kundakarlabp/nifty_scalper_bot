@@ -1,5 +1,11 @@
 """Causal bar research of production strategy components, without broker orders.
 
+Responsibilities: Reuse canonical strategy components and historical observations
+to compare predeclared admission hypotheses with bounded cost/fill assumptions.
+Ownership: Research-only report generation, not a second live decision or order path.
+Safety: Never promote archive rankings directly to LIVE or treat incomplete
+historical option contracts and depth as verified execution evidence.
+
 This is deliberately not live-pipeline parity: today's archived contract basket,
 minute OHLC and modeled execution cannot reproduce historical ATM selection,
 depth, arbitration, dynamic sizing or the full protective-exit lifecycle.
