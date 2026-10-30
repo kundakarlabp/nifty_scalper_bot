@@ -195,3 +195,65 @@ def test_vwap_strict_comparison_reports_archive_ineligibility(monkeypatch):
     assert report["historical_eligibility"]["eligible_option_bar_count"] == 0
     assert report["selection"]["promotion_eligible"] is False
     assert report["selection"]["selected_for_live"] is None
+
+
+def test_vwap_opt_in_retest_ablation_uses_matched_shadow_profiles(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY", "true")
+    monkeypatch.delenv("VWAP_RESEARCH_COMPARE_NEUTRAL_SLOPE", raising=False)
+    monkeypatch.setenv("VWAP_RESEARCH_RETEST_REBREAK_ONLY", "true")
+    monkeypatch.setattr(
+        research,
+        "get_settings",
+        lambda: SimpleNamespace(elite=SimpleNamespace(vwap=_Config())),
+    )
+    monkeypatch.setattr(research, "load_archive", lambda _: ({}, {}, "archive_sha"))
+    observed = []
+
+    def fake_scenario(*_args, **kwargs):
+        observed.append(
+            (
+                kwargs["slippage_bps_per_side"] if "slippage_bps_per_side" in kwargs
+                else _args[3],
+                research.os.environ.get("VWAP_STRICT_CONTINUATION_ENABLED"),
+                research.os.environ.get("VWAP_RESEARCH_RETEST_REBREAK_ONLY"),
+            )
+        )
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "evaluations": 0,
+                    "data_quality": {
+                        "eligible_option_bar_count": 0,
+                        "eligible_session_count": 0,
+                        "development_unresolved_exit_count": 0,
+                    },
+                    "no_vote_reasons": {},
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                }
+            }
+        }
+
+    monkeypatch.setattr(research, "_scenario", fake_scenario)
+    report = research.run_vwap_comparison(Path("/unused"))
+    assert report["candidate_count"] == 11
+    assert [entry["name"] for entry in report["candidates"][-2:]] == [
+        "strict_continuation_either_proof",
+        "strict_continuation_retest_rebreak_only",
+    ]
+    assert [entry[0] for entry in observed[-6:]] == [10.0, 25.0, 50.0] * 2
+    assert [entry[1:] for entry in observed[-6:-3]] == [
+        ("true", None)
+    ] * 3
+    assert [entry[1:] for entry in observed[-3:]] == [
+        ("true", "true")
+    ] * 3
+    assert any(
+        pair["name"] == "strict_continuation_either_vs_retest_rebreak"
+        and pair["only_changed_rule"] == "VWAP_RESEARCH_RETEST_REBREAK_ONLY"
+        for pair in report["paired_comparisons"]
+    )
+    assert research.os.environ["VWAP_RESEARCH_RETEST_REBREAK_ONLY"] == "true"
+    assert "VWAP_STRICT_CONTINUATION_ENABLED" not in research.os.environ
+    assert report["selection"]["promotion_eligible"] is False
