@@ -68,7 +68,7 @@ def _order_quantity(order: Mapping[str, Any]) -> int:
     requested = _number(order.get("quantity"))
     filled = _number(order.get("filled_quantity"))
     if requested <= 0 or not requested.is_integer() or filled != requested:
-        raise HistoricalExitRecoveryError("broker_order_not_fully_filled")
+        return 0
     return int(requested)
 
 
@@ -293,7 +293,7 @@ def recover_broker_proven_exit(
                     "event_name": {
                         "EXIT_FILLED": "exit.filled",
                         "BRACKET_CLOSED": "trade.closed",
-                        "HISTORICAL_EXIT_RECOVERY_VERIFIED": "historical.exit.recovery.verified",
+                        "HISTORICAL_EXIT_RECOVERY_VERIFIED": "recovery.verified",
                     }[kind],
                     "timestamp": occurred_at,
                     "symbol": symbol,
