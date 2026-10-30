@@ -550,6 +550,7 @@ async def test_active_basket_helper_deduplicates_selected_and_passes_short_reaso
     assert {kw["reason"] for _, kw in mdm.calls} == {"history_short"}
     assert {kw["phase"] for _, kw in mdm.calls} == {"runtime"}
     assert len(runner.calls) == len(mdm.calls)
+    assert all(kw["force"] is False for _, kw in mdm.calls)
 
 
 @pytest.mark.asyncio
@@ -670,6 +671,46 @@ async def test_active_basket_helper_uses_recovery_phase_for_stale_and_gap(
     assert mdm.calls
     assert {kw["reason"] for _, kw in mdm.calls} == {expected_reason}
     assert {kw["phase"] for _, kw in mdm.calls} == {expected_phase}
+    # Even if the cached *count* is warm, stale/gapped bars need a real
+    # broker-history refetch instead of MDM's target_cache_sufficient skip.
+    assert all(kw["force"] is True for _, kw in mdm.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["history_stale", "recovery_gap_fill"])
+async def test_canonical_recovery_forces_fetch_of_count_sufficient_cache(
+    monkeypatch, reason
+) -> None:
+    mdm = MDM(bars=60)
+    runner = Runner(bars=60)
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    result = await app.ensure_symbol_runtime_history(
+        ctx(mdm, runner),
+        "NFO:NIFTY26NOV23000CE",
+        role="selected_option",
+        phase="recovery",
+        reason=reason,
+    )
+    assert result.minimum_ready
+    assert len(mdm.calls) == 1
+    assert mdm.calls[0][1]["force"] is True
+
+
+@pytest.mark.asyncio
+async def test_canonical_count_only_hydration_does_not_force_fetch(
+    monkeypatch,
+) -> None:
+    mdm = MDM(bars=20)
+    runner = Runner(bars=20)
+    monkeypatch.setattr(app, "get_runtime_market_mode", lambda: "OPEN")
+    await app.ensure_symbol_runtime_history(
+        ctx(mdm, runner),
+        "NFO:NIFTY26NOV23000CE",
+        role="selected_option",
+        phase="prewarm",
+        reason="selected_option_history_cold",
+    )
+    assert mdm.calls[0][1]["force"] is False
 
 
 @pytest.mark.asyncio
