@@ -1,5 +1,10 @@
 """Causal bar research of production strategy components, without broker orders.
 
+Responsibilities: Evaluate canonical strategy components on archived observations
+with explicit, isolated scenario settings and assumed execution economics.
+Ownership: Shadow-only research report generation, never the live order path.
+Safety: Research results must not promote configurations or trade real funds.
+
 This is deliberately not live-pipeline parity: today's archived contract basket,
 minute OHLC and modeled execution cannot reproduce historical ATM selection,
 depth, arbitration, dynamic sizing or the full protective-exit lifecycle.
