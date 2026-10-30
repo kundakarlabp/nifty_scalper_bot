@@ -1,4 +1,3 @@
-# ruff: noqa: I001
 """Causal, SHADOW-only failed-breakout reversal research regression cases."""
 
 from datetime import datetime, timedelta, timezone
@@ -8,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from nifty_scalper_bot.backtesting import directional_hypotheses as research
-
 
 _START = datetime(2026, 10, 1, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 _FUTURE = "NFO:NIFTY26OCTFUT"
