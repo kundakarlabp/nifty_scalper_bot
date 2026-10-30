@@ -89,6 +89,30 @@ async def test_cache_sufficient_for_target_skips_broker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_force_quality_recovery_bypasses_warm_count_only_cache() -> None:
+    """A sufficient count must not block a requested stale/gap repair."""
+    mdm = _mdm(_rows(35))
+    calls = 0
+
+    async def fetch(*_a, **_k):
+        nonlocal calls
+        calls += 1
+        return _rows(40)
+
+    mdm.fetch_history = fetch
+    result = await mdm.ensure_history(
+        "NSE:NIFTY",
+        required_bars=30,
+        target_bars=30,
+        reason="history_stale",
+        force=True,
+    )
+    assert calls == 1
+    assert result.broker_fetch_started is True
+    assert result.cached_after >= 40
+
+
+@pytest.mark.asyncio
 async def test_minimum_met_but_target_cold_fetches_target() -> None:
     mdm = _mdm(_rows(30))
     calls = 0
