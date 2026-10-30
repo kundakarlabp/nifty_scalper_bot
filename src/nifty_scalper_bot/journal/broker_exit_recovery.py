@@ -104,7 +104,8 @@ def recover_broker_proven_exit(
     if _safe_day(timestamp) != today:
         raise HistoricalExitRecoveryError("only_current_session_recovery_allowed")
     path = Path(journal_db)
-    if not path.is_file():
+    # A dry run must not create a new fill-ledger database or its schema.
+    if not path.is_file() or not Path(fill_db).is_file():
         return []
     order_rows = [dict(row) for row in orders if isinstance(row, Mapping)]
     if len(order_rows) != len(orders):
