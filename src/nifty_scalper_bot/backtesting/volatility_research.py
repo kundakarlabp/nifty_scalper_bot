@@ -211,11 +211,7 @@ def assess_long_atm_straddle(
         raise ValueError("research_straddle_sides_invalid")
     if call.strike != put.strike:
         raise ValueError("research_straddle_strikes_mismatched")
-    if (
-        not math.isfinite(spot)
-        or spot <= 0
-        or abs(call.strike - spot) > 25.0
-    ):
+    if not math.isfinite(spot) or spot <= 0 or abs(call.strike - spot) > 25.0:
         raise ValueError("research_straddle_not_atm")
     if forecast_asof.tzinfo is None or forecast_asof.utcoffset() is None:
         raise ValueError("research_forecast_clock_invalid")
