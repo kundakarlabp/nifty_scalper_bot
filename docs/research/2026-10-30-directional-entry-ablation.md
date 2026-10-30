@@ -27,6 +27,18 @@ This is an **eligibility ablation**, not proof of improved profitability. A
 trade suppressed by the retest-only arm must remain in the opportunity ledger,
 with time-stamped original option/futures context and reason.
 
+To run the archived paired study, set
+`VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY=true` in a **SHADOW**
+research process and invoke the existing `run_vwap_comparison` job.
+It adds the two arms `strict_continuation_either_proof` and
+`strict_continuation_retest_rebreak_only` to the nine baseline candidates.
+Both explicitly enable the existing strict continuation proof; the retest-only
+toggle is their sole policy difference. Compare at 10/25/50 bps per-side
+slippage, with the existing research simulator's net RR and eligibility rules.
+The research runner clears inherited experimental values before each arm and
+restores the original environment afterward. It does not certify execution
+parity; the existing report's `promotion_eligible=false` is retained.
+
 **Priority 2 — selective ORB.** Do not create another ORB implementation.
 The repository already exposes separate momentum/retest outcome metadata
 (`entry_branch`, `retest_confirmed`), opening range width / ATR,
