@@ -25,7 +25,7 @@ from nifty_scalper_bot.strategies.entry_evidence import (
     resolve_signal_domain,
 )
 from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
@@ -669,6 +669,41 @@ class VWAPProStrategy(EliteStrategy):
                 and distance_pct <= allowed_distance * 1.25
             )
             if overextended and not retest_extension_candidate:
+                # Preserve the strict entry veto, but make repeated live
+                # rejections quantitatively auditable without logging every
+                # quote update. A 60-second per-contract sample distinguishes
+                # the percentage band from the independent ATR quality limit.
+                log_throttled(
+                    LOGGER,
+                    f"vwap_distance_outside_band:{symbol_scope}",
+                    "VWAP_DISTANCE_REJECTED symbol=%s premium=%.4f vwap=%.4f distance_fraction=%.4f allowed_fraction=%.4f distance_atr=%.3f allowed_atr=%.3f fraction_failed=%s atr_failed=%s trend_confirmed=%s",
+                    symbol_scope,
+                    current_price,
+                    vwap,
+                    distance_pct,
+                    allowed_distance,
+                    distance_atr,
+                    effective_quality_max_distance_atr,
+                    distance_pct > allowed_distance,
+                    distance_atr > effective_quality_max_distance_atr,
+                    strong_fresh_trend_context,
+                    interval_sec=60.0,
+                    extra={
+                        "event": "VWAP_DISTANCE_REJECTED",
+                        "symbol": symbol_scope,
+                        "option_premium": current_price,
+                        "option_vwap": vwap,
+                        "vwap_source": vwap_source,
+                        "distance_fraction": distance_pct,
+                        "allowed_fraction": allowed_distance,
+                        "distance_atr": distance_atr,
+                        "allowed_atr": effective_quality_max_distance_atr,
+                        "fraction_failed": distance_pct > allowed_distance,
+                        "atr_failed": distance_atr > effective_quality_max_distance_atr,
+                        "underlying_trend_confirmed": strong_fresh_trend_context,
+                        "retest_extension_enabled": self._trend_retest_extension_enabled,
+                    },
+                )
                 self._no_vote("distance_outside_band")
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended")
                 return None
