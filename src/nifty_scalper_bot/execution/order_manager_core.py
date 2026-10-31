@@ -8290,10 +8290,10 @@ class OrderManager:
         if not parent or not isinstance(parent.get("legs"), Mapping):
             result["reason"] = "linked_parent_missing"
             return result
-        if (
-            parent.get("state") != "RESERVED_UNVERIFIED"
-            or any(leg.get("order_id") for leg in parent["legs"].values())
-        ):
+        has_bound_child = any(
+            leg.get("order_id") for leg in parent["legs"].values()
+        )
+        if parent.get("state") != "RESERVED_UNVERIFIED" or has_bound_child:
             result["reason"] = "linked_parent_in_progress_requires_reconciliation"
             return result
         risk = self._risk_manager
