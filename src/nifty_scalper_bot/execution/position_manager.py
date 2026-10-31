@@ -3381,8 +3381,11 @@ class PositionManager:
 
         # The legacy normalizer can infer filled quantity from requested qty;
         # that inferred value is not broker-confirmed multi-leg fill evidence.
+        raw_broker_fields = (
+            broker_payload if isinstance(broker_payload, Mapping) else {}
+        )
         raw_fill_reported = any(
-            key in broker_payload and broker_payload[key] is not None
+            key in raw_broker_fields and raw_broker_fields[key] is not None
             for key in ("filled_quantity", "filled", "filled_qty", "filledQuantity")
         )
         payload = _broker_order_payload(
