@@ -32,6 +32,8 @@ def legs():
             "quantity": 65,
             "lot_size": 65,
             "instrument_token": token,
+            "strike": 24000,
+            "expiry": "2026-11-26",
         }
         for role, symbol, token in (
             ("long_call", CALL, 123456),
@@ -120,6 +122,8 @@ def test_reused_parent_with_changed_leg_rejected(tmp_path):
         lambda x: x[1].update(instrument_token=0),
         lambda x: x[0].update(quantity=60),
         lambda x: x[1].update(symbol=x[0]["symbol"]),
+        lambda x: x[0].update(expiry="2026-10-01"),
+        lambda x: x[1].update(strike=24050),
     ],
 )
 def test_invalid_leg_does_not_persist_reservation(tmp_path, mutate):
