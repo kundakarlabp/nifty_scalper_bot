@@ -136,9 +136,7 @@ def test_live_risk_manager_block_cannot_be_ignored():
 def test_bracket_group_diagnostic_preserves_short_first_and_no_dispatch():
     positions = Positions()
     bracket = SimpleNamespace(order_manager=SimpleNamespace(_positions=positions))
-    result = BracketManager.linked_portfolio_exit_convergence(
-        bracket, "parent-001"
-    )
+    result = BracketManager.linked_portfolio_exit_convergence(bracket, "parent-001")
     assert result["exit_converged"] is False
     assert result["live_exit_dispatch_allowed"] is False
     assert [x["role"] for x in result["exit_intents"]] == [
@@ -160,9 +158,7 @@ def test_bracket_group_diagnostic_refuses_exit_on_ambiguous_order():
 
     positions.linked_portfolio_recovery_plan = ambiguous
     bracket = SimpleNamespace(order_manager=SimpleNamespace(_positions=positions))
-    result = BracketManager.linked_portfolio_exit_convergence(
-        bracket, "parent-001"
-    )
+    result = BracketManager.linked_portfolio_exit_convergence(bracket, "parent-001")
     assert result["exit_intents"] == []
     assert result["cancel_order_ids"] == ["child-1"]
     assert result["live_exit_dispatch_allowed"] is False
