@@ -107,7 +107,7 @@ def test_missing_or_partial_broker_margin_fails_closed():
     assert screen(broker).reason == "linked_margin_basket_invalid"
     broker.margin = {"initial": {"total": 100}, "final": {"total": 0}}
     broker.available = None
-    assert screen(broker).reason == "linked_margin_broker_values_invalid"
+    assert screen(broker).reason == "linked_margin_broker_funds_invalid"
 
 
 def test_broker_opening_balance_is_not_live_available_funds():
