@@ -187,9 +187,14 @@ def test_broker_mismatch_and_open_orders_never_confirm(tmp_path):
 def test_parent_can_never_certify_margin_or_group_exit(tmp_path):
     manager, broker = ready_manager(tmp_path)
     fill_pair(manager, broker)
-    assert manager.linked_portfolio_broker_state(PARENT)["group_exit_certified"] is False
+    assert (
+        manager.linked_portfolio_broker_state(PARENT)["group_exit_certified"] is False
+    )
     serialized = json.loads((tmp_path / "positions.json").read_text())
-    assert serialized["linked_portfolio_reservations"][PARENT]["live_entry_allowed"] is False
+    assert (
+        serialized["linked_portfolio_reservations"][PARENT]["live_entry_allowed"]
+        is False
+    )
 
 
 def test_broker_unavailable_fails_closed_after_recovery(tmp_path):
