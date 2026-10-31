@@ -43,7 +43,7 @@ class Risk:
             shadow_forced=False,
             breaker_tripped=False,
             per_trade_risk_pct=2.0,
-            daily_loss_limit=10000.0,
+            daily_loss_limit=20000.0,
             day_loss=1000.0,
             daily_realized=-500.0,
         )
@@ -106,7 +106,7 @@ def test_order_manager_uses_risk_owner_and_does_not_place():
     assert view["broker_execution_allowed"] is False
     assert view["live_entry_allowed"] is False
     assert margin.calls[0]["remaining_trade_risk"] == 20000
-    assert margin.calls[0]["remaining_daily_risk"] == 9000
+    assert margin.calls[0]["remaining_daily_risk"] == 19000
     assert margin.calls[0]["legs"] is positions.parent["legs"]
 
 
