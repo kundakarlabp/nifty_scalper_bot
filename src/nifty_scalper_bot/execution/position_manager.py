@@ -3881,14 +3881,17 @@ class PositionManager:
                 raise ValueError("linked_parent_child_identity_invalid")
             if current == oid:
                 return copy.deepcopy(parent)
-            leg["order_id"] = oid
             attempt = parent.get("child_attempts", {}).get(role)
+            if isinstance(attempt, dict) and attempt.get("state") not in {
+                "UNRESOLVED", "BOUND"
+            }:
+                raise ValueError("linked_child_attempt_state_invalid")
+            leg["order_id"] = oid
             if isinstance(attempt, dict):
-                if attempt.get("state") not in {"UNRESOLVED", "BOUND"}:
-                    raise ValueError("linked_child_attempt_state_invalid")
                 attempt["state"] = "BOUND"
                 attempt["broker_order_id"] = oid
-            parent["state"] = "IN_PROGRESS_UNVERIFIED"
+            if parent.get("state") != "ABORT_RECOVERY_REQUIRED":
+                parent["state"] = "IN_PROGRESS_UNVERIFIED"
             self.save_state()
             try:
                 stored = json.loads(self._state_path.read_text(encoding="utf-8"))
