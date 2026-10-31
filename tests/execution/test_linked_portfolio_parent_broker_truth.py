@@ -160,9 +160,10 @@ def test_broker_position_snapshot_required_after_verified_fills(tmp_path):
     assert view["exposure"][CALL]["broker_net"] == 65
     restored = PositionManager(state_file=str(tmp_path / "positions.json"))
     restored.set_broker_client(broker)
-    assert restored.linked_portfolio_broker_state(PARENT)[
-        "broker_portfolio_confirmed"
-    ] is True
+    assert (
+        restored.linked_portfolio_broker_state(PARENT)["broker_portfolio_confirmed"]
+        is True
+    )
 
 
 def test_broker_mismatch_and_open_orders_never_confirm(tmp_path):
@@ -233,9 +234,7 @@ def test_condor_reservation_requires_protective_wing_geometry(tmp_path):
             ("long_call", 24300, "CE", 114),
         )
     ]
-    parent = manager.reserve_linked_portfolio(
-        PARENT, "IRON_CONDOR", legs_in_order
-    )
+    parent = manager.reserve_linked_portfolio(PARENT, "IRON_CONDOR", legs_in_order)
     assert len(parent["legs"]) == 4
     assert parent["legs"]["long_call"]["side"] == "BUY"
     assert parent["legs"]["short_call"]["side"] == "SELL"
