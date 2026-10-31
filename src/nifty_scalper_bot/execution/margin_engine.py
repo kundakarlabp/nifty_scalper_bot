@@ -360,8 +360,10 @@ class MarginEngine:
             final = quote.get("final")
             if not isinstance(initial, Mapping) or not isinstance(final, Mapping):
                 return blocked("linked_margin_basket_invalid")
-            initial_total = float(initial.get("total"))
-            final_total = float(final.get("total"))
+            if initial.get("total") is None or final.get("total") is None:
+                return blocked("linked_margin_basket_invalid")
+            initial_total = float(initial["total"])
+            final_total = float(final["total"])
             available = self._extract_balance_from_snapshot(funding)
         except Exception:  # noqa: BLE001 - broker read boundary must fail closed
             return blocked("linked_margin_broker_read_failed")
