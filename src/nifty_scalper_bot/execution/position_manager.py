@@ -3717,7 +3717,7 @@ class PositionManager:
                             if name != "order_id"
                         } != {
                             name: value
-                            for name, value in proposed["legs"][role].items()
+                            for name, value in proposal["legs"][role].items()
                             if name != "order_id"
                         }
                         for role in roles
