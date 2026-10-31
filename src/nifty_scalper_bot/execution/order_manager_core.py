@@ -33,7 +33,9 @@ Safe-edit notes:
   responses remain blocked across timeout and process restart until reconciled.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
   LIVE submissions are rejected until linked-leg margin, fill and crash recovery
-  are implemented in this canonical execution owner.
+  are implemented in this canonical execution owner. In simulation it now
+  rejects acknowledged/unfilled or partially filled legs rather than claiming
+  completed portfolio entry.
 - Restored broker SL/SL-M order types retain stop semantics; unknown persisted
   types are rejected rather than silently replaced with LIMIT or MARKET.
 """
@@ -8264,16 +8266,16 @@ class OrderManager:
         tag: str | None = None,
         partial_fill_tolerance: float = 0.0,
     ) -> list[str]:
-        """Submit a two-leg entry atomically with risk-state enforcement.
+        """Simulate a sequential two-leg entry; never certify atomic broker fills.
 
         Args:
             legs: Iterable containing exactly two leg specifications.
             product: Optional broker product type applied to both legs.
             tag: Optional tag applied to both legs.
-            partial_fill_tolerance: Fractional tolerance (0-1] for partial fills.
+            partial_fill_tolerance: Legacy argument; only zero is safe.
 
         Returns:
-            List of broker order identifiers for the accepted legs.
+            Two order IDs only when both legs report exact completed fills.
 
         Raises:
             ValueError: If the leg specification is invalid.
@@ -8287,8 +8289,10 @@ class OrderManager:
             raise OrderPlacementError("linked_leg_live_execution_not_supported")
         if len(legs) != 2:
             raise ValueError("Atomic entry requires exactly two legs")
+        tolerance = float(partial_fill_tolerance)
+        if not math.isfinite(tolerance) or tolerance != 0.0:
+            raise ValueError("atomic_partial_fill_tolerance_unsupported")
         normalized: list[AtomicLeg] = [self._normalize_leg(leg) for leg in legs]
-        tolerance = max(0.0, min(1.0, float(partial_fill_tolerance)))
         for leg in normalized:
             self._validate_quantity(leg.symbol, leg.quantity)
             if not self._ensure_trading_allowed(
@@ -8323,6 +8327,8 @@ class OrderManager:
                     tag=tag,
                     client_order_id=client_order_id,
                 )
+                if details is None:
+                    raise OrderPlacementError("atomic_leg_acknowledgement_missing")
                 placed.append(details)
                 if self._leg_failed(details, tolerance):
                     status_value = details.status.value
@@ -14556,28 +14562,14 @@ class OrderManager:
 
     @staticmethod
     def _leg_failed(details: OrderDetails, tolerance: float) -> bool:
-        """Return ``True`` if a leg violates the partial fill tolerance."""
+        """Require the exact full quantity; an order ACK is never a fill."""
 
-        if details.status in {
-            OrderStatus.REJECTED,
-            OrderStatus.CANCELLED,
-            OrderStatus.EXPIRED,
-        }:
-            return True
-        threshold = max(0.0, min(1.0, 1.0 - tolerance))
-        quantity = max(details.quantity, 0)
-        if quantity <= 0:
-            return False
-        fill_ratio = details.filled_quantity / quantity
-        if details.status == OrderStatus.PARTIALLY_FILLED and fill_ratio < threshold:
-            return True
-        if (
-            details.status == OrderStatus.FILLED
-            and fill_ratio < threshold
-            and threshold > 0.0
-        ):
-            return True
-        return False
+        del tolerance  # Non-zero tolerance is rejected before submission.
+        return (
+            details.status != OrderStatus.FILLED
+            or details.quantity <= 0
+            or details.filled_quantity != details.quantity
+        )
 
     @staticmethod
     def _coerce_float(value: object | None) -> float | None:
