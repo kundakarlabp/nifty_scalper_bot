@@ -3869,6 +3869,18 @@ class PositionManager:
             ):
                 result["reason"] = "linked_parent_orderbook_fill_unverified"
                 return result
+        # Another broker order on a reserved instrument prevents attributing
+        # account-level net quantity to this parent, even when net matches.
+        bound_ids = set(ids)
+        for oid, record in orderbook.items():
+            if oid in bound_ids or record.get("symbol") not in expected:
+                continue
+            if (
+                record.get("filled_quantity", 0) > 0
+                or record.get("status") not in {"CANCELLED", "REJECTED", "EXPIRED"}
+            ):
+                result["reason"] = "linked_parent_external_order_ambiguity"
+                return result
         result["exposure"] = {
             symbol: {
                 "expected": qty,
