@@ -16,7 +16,9 @@ explicit broker observations; local registration never certifies fill or LIVE en
 Linked portfolio parent intentions are write-ahead persisted and read-only:
 no capital or LIVE permission follows from registering a parent.
 A read-only recovery plan uses broker truth, recommends wing-first ordering
-and short-first exits but never submits/cancels orders itself.
+and short-first exits but never submits/cancels orders itself. Each proposed
+broker child is write-ahead held before dispatch; an ambiguous attempt cannot
+be retried or forgotten on restart without broker reconciliation.
 """
 
 from __future__ import annotations
@@ -3747,6 +3749,102 @@ class PositionManager:
                 raise RuntimeError("linked_parent_persistence_unverified") from exc
             return copy.deepcopy(proposal)
 
+    def reserve_linked_child_attempt(
+        self, parent_id: str, role: str, correlation_tag: str
+    ) -> dict[str, Any]:
+        """Durably hold one child submission before an external broker call.
+
+        This is an unresolved attempt, NOT authority to place a broker order.
+        There is deliberately no TTL, automatic release or retry on startup.
+        """
+        key = str(parent_id or "").strip()
+        tag = str(correlation_tag or "").strip()
+        if (
+            not key
+            or not tag
+            or len(tag) > 20
+            or not all(c.isascii() and (c.isalnum() or c in "_-") for c in tag)
+        ):
+            raise ValueError("linked_child_correlation_invalid")
+        plan = self.linked_portfolio_recovery_plan(key)
+        if (
+            plan.get("state") != "RESEARCH_NEXT_LEG_ONLY"
+            or plan.get("next_roles") != [role]
+        ):
+            raise ValueError("linked_child_wing_first_gate_blocked")
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if parent is None or role not in parent.get("legs", {}):
+                raise ValueError("linked_child_parent_missing")
+            if parent["legs"][role].get("order_id"):
+                raise ValueError("linked_child_already_bound")
+            attempts = parent.setdefault("child_attempts", {})
+            if not isinstance(attempts, dict):
+                raise ValueError("linked_child_attempt_state_invalid")
+            if role in attempts:
+                raise ValueError("linked_child_attempt_unresolved")
+            if any(
+                attempt.get("state") == "UNRESOLVED"
+                for attempt in attempts.values()
+                if isinstance(attempt, Mapping)
+            ):
+                raise ValueError("linked_child_other_attempt_unresolved")
+            if any(
+                tag == attempt.get("correlation_tag")
+                for other in self._linked_portfolio_reservations.values()
+                for attempt in (
+                    other.get("child_attempts", {}).values()
+                    if isinstance(other.get("child_attempts", {}), Mapping)
+                    else ()
+                )
+                if isinstance(attempt, Mapping)
+            ):
+                raise ValueError("linked_child_correlation_reused")
+            attempt = {
+                "role": role,
+                "correlation_tag": tag,
+                "state": "UNRESOLVED",
+                "broker_order_id": None,
+                "reserved_at": _now().isoformat(),
+            }
+            attempts[role] = attempt
+            parent["state"] = "CHILD_SUBMISSION_UNVERIFIED"
+            self.save_state()
+            try:
+                persisted = json.loads(self._state_path.read_text(encoding="utf-8"))
+                saved = persisted["linked_portfolio_reservations"][key][
+                    "child_attempts"
+                ][role]
+                if saved != attempt:
+                    raise OSError("linked_child_write_ahead_unconfirmed")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError("linked_child_attempt_persistence_unverified") from exc
+            return copy.deepcopy(attempt)
+
+    def abort_linked_parent(self, parent_id: str, reason: str) -> dict[str, Any]:
+        """Permanently block new legs pending broker-confirmed recovery."""
+        key = str(parent_id or "").strip()
+        code = str(reason or "").strip()
+        if not code or len(code) > 120:
+            raise ValueError("linked_parent_abort_reason_invalid")
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if parent is None:
+                raise ValueError("linked_parent_missing")
+            parent["state"] = "ABORT_RECOVERY_REQUIRED"
+            parent["abort_reason"] = code
+            self.save_state()
+            try:
+                saved = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if (
+                    saved["linked_portfolio_reservations"][key]["state"]
+                    != "ABORT_RECOVERY_REQUIRED"
+                ):
+                    raise OSError("linked_parent_abort_write_failed")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError("linked_parent_abort_persistence_unverified") from exc
+            return copy.deepcopy(parent)
+
     def bind_linked_portfolio_order(
         self, parent_id: str, role: str, broker_order_id: str
     ) -> dict[str, Any]:
@@ -3783,8 +3881,17 @@ class PositionManager:
                 raise ValueError("linked_parent_child_identity_invalid")
             if current == oid:
                 return copy.deepcopy(parent)
+            attempt = parent.get("child_attempts", {}).get(role)
+            if isinstance(attempt, dict) and attempt.get("state") not in {
+                "UNRESOLVED", "BOUND"
+            }:
+                raise ValueError("linked_child_attempt_state_invalid")
             leg["order_id"] = oid
-            parent["state"] = "IN_PROGRESS_UNVERIFIED"
+            if isinstance(attempt, dict):
+                attempt["state"] = "BOUND"
+                attempt["broker_order_id"] = oid
+            if parent.get("state") != "ABORT_RECOVERY_REQUIRED":
+                parent["state"] = "IN_PROGRESS_UNVERIFIED"
             self.save_state()
             try:
                 stored = json.loads(self._state_path.read_text(encoding="utf-8"))
@@ -3927,6 +4034,18 @@ class PositionManager:
         ):
             result["reason"] = "linked_parent_corrupt"
             return result
+        attempts = parent.get("child_attempts", {})
+        if not isinstance(attempts, Mapping):
+            result["reason"] = "linked_child_attempt_state_invalid"
+            return result
+        if any(
+            not isinstance(attempt, Mapping)
+            or attempt.get("state") == "UNRESOLVED"
+            for attempt in attempts.values()
+        ):
+            result["reason"] = "linked_child_submission_ambiguous"
+            return result
+        recovering = parent.get("state") == "ABORT_RECOVERY_REQUIRED"
         position_fetcher = self._resolve_broker_position_fetcher()
         order_fetcher = self._resolve_broker_order_fetcher()
         if not callable(position_fetcher) or not callable(order_fetcher):
@@ -4034,6 +4153,10 @@ class PositionManager:
                 result["group_exit_intents"] = []
                 return result
 
+        if recovering:
+            result["state"] = "PARTIAL_EXPOSURE_RECOVERY_REQUIRED"
+            result["reason"] = "linked_parent_abort_hold"
+            return result
         if result["cancel_order_ids"]:
             result["state"] = "CANCEL_THEN_RECONCILE"
             result["reason"] = "inflight_child_may_still_fill"
