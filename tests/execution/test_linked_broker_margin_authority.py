@@ -112,9 +112,7 @@ def test_missing_or_partial_broker_margin_fails_closed():
 
 def test_broker_opening_balance_is_not_live_available_funds():
     broker = Broker()
-    broker.margins = lambda: {
-        "equity": {"available": {"opening_balance": 500000}}
-    }
+    broker.margins = lambda: {"equity": {"available": {"opening_balance": 500000}}}
     decision = screen(broker)
     assert decision.ok is False
     assert decision.reason == "linked_margin_broker_funds_invalid"
