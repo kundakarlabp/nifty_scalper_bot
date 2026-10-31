@@ -51,9 +51,10 @@ def test_local_registration_never_counts_as_broker_fill(tmp_path):
     assert view["reason"] == "linked_leg_broker_fill_unverified"
     assert view["live_entry_allowed"] is False
     assert view["portfolio_protection_certified"] is False
-    assert manager.get_broker_order_ledger()["call-1"].get(
-        "broker_fill_evidence", False
-    ) is False
+    assert (
+        manager.get_broker_order_ledger()["call-1"].get("broker_fill_evidence", False)
+        is False
+    )
 
 
 def test_explicit_open_and_partial_broker_updates_remain_unconfirmed(tmp_path):
@@ -139,8 +140,6 @@ def test_invalid_parent_or_leg_identity_rejected(tmp_path, parent, order_ids):
 
 def test_wrong_parent_fails_closed(tmp_path):
     manager = manager_with_pair(tmp_path)
-    view = manager.linked_leg_fill_snapshot(
-        "other-parent", ["call-1", "put-1"]
-    )
+    view = manager.linked_leg_fill_snapshot("other-parent", ["call-1", "put-1"])
     assert view["all_legs_broker_filled"] is False
     assert view["reason"] == "linked_leg_local_identity_missing"
