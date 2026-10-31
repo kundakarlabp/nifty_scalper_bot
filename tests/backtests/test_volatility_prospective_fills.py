@@ -112,24 +112,18 @@ def test_observed_broker_fills_have_separate_provenance_not_assumed_profit():
             "prospective_decision_quote_unverified",
         ),
         (
-            lambda i: i.update(
-                quote_observed_at=_DECISION - timedelta(seconds=3)
-            ),
+            lambda i: i.update(quote_observed_at=_DECISION - timedelta(seconds=3)),
             "prospective_decision_quote_unverified",
         ),
         (
             lambda i: i["entry_fills"].update(
-                long_put=replace(
-                    i["entry_fills"]["long_put"], quantity=25
-                )
+                long_put=replace(i["entry_fills"]["long_put"], quantity=25)
             ),
             "prospective_fill_contract_invalid",
         ),
         (
             lambda i: i["exit_fills"].update(
-                long_put=replace(
-                    i["exit_fills"]["long_put"], source="BROKER"
-                )
+                long_put=replace(i["exit_fills"]["long_put"], source="BROKER")
             ),
             "prospective_fill_sources_mixed",
         ),
@@ -144,17 +138,13 @@ def test_observed_broker_fills_have_separate_provenance_not_assumed_profit():
         ),
         (
             lambda i: i["exit_fills"].update(
-                long_put=replace(
-                    i["exit_fills"]["long_put"], order_id="exit-long_call"
-                )
+                long_put=replace(i["exit_fills"]["long_put"], order_id="exit-long_call")
             ),
             "prospective_fill_contract_invalid",
         ),
         (
             lambda i: i["entry_fills"].update(
-                long_call=replace(
-                    i["entry_fills"]["long_call"], status="OPEN"
-                )
+                long_call=replace(i["entry_fills"]["long_call"], status="OPEN")
             ),
             "prospective_fill_contract_invalid",
         ),
