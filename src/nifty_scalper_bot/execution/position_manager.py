@@ -3623,6 +3623,8 @@ class PositionManager:
             qty = leg.get("quantity")
             lot = leg.get("lot_size")
             token = leg.get("instrument_token")
+            strike = leg.get("strike")
+            expiry = leg.get("expiry")
             if (
                 role not in roles
                 or role in normalized
@@ -3636,23 +3638,42 @@ class PositionManager:
                 or qty <= 0
                 or lot <= 0
                 or token <= 0
+                or type(strike) is not int
+                or strike <= 0
+                or strike % 50
+                or not isinstance(expiry, str)
+                or not symbol.endswith(
+                    f"{strike}{'CE' if role.endswith('call') else 'PE'}"
+                )
                 or qty % lot
             ):
                 raise ValueError("linked_parent_leg_invalid")
+            try:
+                parsed_expiry = datetime.fromisoformat(expiry)
+                if parsed_expiry.tzinfo is not None or parsed_expiry.date() <= _now().date():
+                    raise ValueError("linked_parent_expiry_invalid")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("linked_parent_expiry_invalid") from exc
             normalized[role] = {
                 "symbol": symbol,
                 "side": side,
                 "quantity": qty,
                 "lot_size": lot,
                 "instrument_token": token,
+                "strike": strike,
+                "expiry": expiry,
                 "order_id": None,
             }
             symbols.add(symbol)
         if set(normalized) != set(roles):
             raise ValueError("linked_parent_roles_missing")
-        if len({v["lot_size"] for v in normalized.values()}) != 1 or len(
-            {v["quantity"] for v in normalized.values()}
-        ) != 1:
+        if (
+            len({v["lot_size"] for v in normalized.values()}) != 1
+            or len({v["quantity"] for v in normalized.values()}) != 1
+            or len({v["expiry"] for v in normalized.values()}) != 1
+            or len({v["instrument_token"] for v in normalized.values()})
+            != len(roles)
+        ):
             raise ValueError("linked_parent_lot_mismatch")
         if (
             normalized["long_call"]["symbol"].endswith("PE")
@@ -3664,6 +3685,17 @@ class PositionManager:
             )
         ):
             raise ValueError("linked_parent_option_type_invalid")
+        if kind == "STRADDLE" and (
+            normalized["long_call"]["strike"] != normalized["long_put"]["strike"]
+        ):
+            raise ValueError("linked_parent_strike_geometry_invalid")
+        if kind == "IRON_CONDOR" and not (
+            normalized["long_put"]["strike"]
+            < normalized["short_put"]["strike"]
+            < normalized["short_call"]["strike"]
+            < normalized["long_call"]["strike"]
+        ):
+            raise ValueError("linked_parent_strike_geometry_invalid")
         proposal: dict[str, Any] = {
             "parent_id": key,
             "structure": kind,
