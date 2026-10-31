@@ -364,7 +364,20 @@ class MarginEngine:
                 return blocked("linked_margin_basket_invalid")
             initial_total = float(initial["total"])
             final_total = float(final["total"])
-            available = self._extract_balance_from_snapshot(funding)
+            if not isinstance(funding, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            equity = funding.get("equity")
+            if not isinstance(equity, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            cash = equity.get("available")
+            if not isinstance(cash, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            available_raw = cash.get("live_balance")
+            if available_raw is None:
+                available_raw = cash.get("available_cash")
+            if available_raw is None:
+                return blocked("linked_margin_broker_funds_invalid")
+            available = float(available_raw)
         except Exception:  # noqa: BLE001 - broker read boundary must fail closed
             return blocked("linked_margin_broker_read_failed")
         if available is None:
