@@ -46,15 +46,16 @@ def create(tmp_path):
 
 def test_write_ahead_attempt_survives_restart_and_blocks_reorder(tmp_path):
     manager, path = create(tmp_path)
-    attempt = manager.reserve_linked_child_attempt(
-        PARENT, "long_put", "lp20261031a"
-    )
+    attempt = manager.reserve_linked_child_attempt(PARENT, "long_put", "lp20261031a")
     assert attempt["state"] == "UNRESOLVED"
     assert attempt["broker_order_id"] is None
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["linked_portfolio_reservations"][PARENT][
-        "child_attempts"
-    ]["long_put"]["correlation_tag"] == "lp20261031a"
+    assert (
+        saved["linked_portfolio_reservations"][PARENT]["child_attempts"]["long_put"][
+            "correlation_tag"
+        ]
+        == "lp20261031a"
+    )
     restored = PositionManager(state_file=str(path))
     restored.set_broker_client(Broker())
     view = restored.linked_portfolio_recovery_plan(PARENT)
@@ -70,9 +71,9 @@ def test_wrong_first_role_or_invalid_correlation_tag_does_not_write(tmp_path):
         manager.reserve_linked_child_attempt(PARENT, "short_put", "sp20261031a")
     with pytest.raises(ValueError, match="linked_child_correlation_invalid"):
         manager.reserve_linked_child_attempt(PARENT, "long_put", "not valid tag")
-    assert manager.get_linked_portfolio_reservation(PARENT).get(
-        "child_attempts"
-    ) is None
+    assert (
+        manager.get_linked_portfolio_reservation(PARENT).get("child_attempts") is None
+    )
 
 
 def test_broker_ack_bind_resolves_attempt_but_order_remains_unverified(tmp_path):
