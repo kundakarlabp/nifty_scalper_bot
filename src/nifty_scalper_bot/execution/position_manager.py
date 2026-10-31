@@ -15,6 +15,8 @@ Read-only linked-leg fill evidence uses persisted orders/terminal metadata and
 explicit broker observations; local registration never certifies fill or LIVE entry.
 Linked portfolio parent intentions are write-ahead persisted and read-only:
 no capital or LIVE permission follows from registering a parent.
+A read-only recovery plan uses broker truth, recommends wing-first ordering
+and short-first exits but never submits/cancels orders itself.
 """
 
 from __future__ import annotations
@@ -3896,6 +3898,194 @@ class PositionManager:
             return result
         result["broker_portfolio_confirmed"] = True
         result["reason"] = "linked_parent_broker_position_observed"
+        return result
+
+    def linked_portfolio_recovery_plan(self, parent_id: str) -> dict[str, Any]:
+        """Read-only wing-first, partial-fill and group-exit recovery policy.
+
+        Every decision uses a fresh complete broker net-position and orderbook.
+        This never calls place/cancel order; partial or unknown state cannot
+        advance an entry. Short risks must close before long protective wings.
+        """
+        parent = self.get_linked_portfolio_reservation(parent_id)
+        if parent is None:
+            raise ValueError("linked_parent_missing")
+        legs = parent.get("legs")
+        result: dict[str, Any] = {
+            "parent_id": str(parent_id),
+            "state": "RECONCILIATION_REQUIRED",
+            "reason": "broker_snapshot_unverified",
+            "next_roles": [],
+            "cancel_order_ids": [],
+            "group_exit_intents": [],
+            "live_entry_allowed": False,
+            "broker_execution_allowed": False,
+        }
+        if not isinstance(legs, Mapping) or set(legs) not in (
+            {"long_call", "long_put"},
+            {"long_put", "long_call", "short_put", "short_call"},
+        ):
+            result["reason"] = "linked_parent_corrupt"
+            return result
+        position_fetcher = self._resolve_broker_position_fetcher()
+        order_fetcher = self._resolve_broker_order_fetcher()
+        if not callable(position_fetcher) or not callable(order_fetcher):
+            result["reason"] = "broker_fetcher_missing"
+            return result
+        try:
+            broker_positions = position_fetcher()
+            broker_orders = order_fetcher()
+            if inspect.isawaitable(broker_positions) or inspect.isawaitable(
+                broker_orders
+            ):
+                result["reason"] = "async_broker_fetch_unsupported"
+                return result
+            snapshot = decode_position_snapshot(broker_positions)
+            if not isinstance(broker_orders, (list, tuple)):
+                result["reason"] = "broker_orderbook_invalid"
+                return result
+            orderbook: dict[str, dict[str, Any]] = {}
+            for raw in broker_orders:
+                if not isinstance(raw, Mapping):
+                    result["reason"] = "broker_orderbook_invalid"
+                    return result
+                row = _broker_order_payload(raw)
+                oid = str(row.get("order_id") or "")
+                if not oid or oid in orderbook:
+                    result["reason"] = "broker_orderbook_invalid"
+                    return result
+                orderbook[oid] = row
+        except Exception:  # noqa: BLE001 - external boundary fails closed
+            result["reason"] = "broker_snapshot_fetch_failed"
+            return result
+
+        active_status = {"PENDING", "OPEN", "PARTIALLY_FILLED"}
+        terminal_zero = {"CANCELLED", "REJECTED", "EXPIRED"}
+        role_state: dict[str, str] = {}
+        for role, leg in legs.items():
+            if not isinstance(leg, Mapping):
+                result["reason"] = "linked_parent_corrupt"
+                return result
+            symbol = str(leg.get("symbol") or "")
+            qty = leg.get("quantity")
+            side = str(leg.get("side") or "")
+            oid = leg.get("order_id")
+            if (
+                type(qty) is not int
+                or qty <= 0
+                or side not in {"BUY", "SELL"}
+                or not symbol.startswith("NFO:NIFTY")
+            ):
+                result["reason"] = "linked_parent_corrupt"
+                return result
+            signed_qty = snapshot.quantity_for(symbol)
+            signed_expected = qty if side == "BUY" else -qty
+            if (
+                signed_qty * signed_expected < 0
+                or abs(signed_qty) > qty
+            ):
+                result["reason"] = "broker_exposure_outside_parent_limits"
+                return result
+            if oid is None:
+                if signed_qty != 0:
+                    result["reason"] = "unbound_broker_exposure"
+                    return result
+                role_state[role] = "UNBOUND"
+                continue
+            row = orderbook.get(str(oid))
+            if (
+                row is None
+                or row.get("symbol") != symbol
+                or row.get("side") != side
+                or row.get("quantity") != qty
+            ):
+                result["reason"] = "linked_broker_child_unverified"
+                return result
+            status = str(row.get("status") or "")
+            filled = row.get("filled_quantity")
+            if type(filled) is not int or filled < 0 or filled > qty:
+                result["reason"] = "linked_broker_fill_invalid"
+                return result
+            if status in active_status:
+                result["cancel_order_ids"].append(str(oid))
+                role_state[role] = "PENDING"
+            elif status == "FILLED" and filled == qty and signed_qty == signed_expected:
+                role_state[role] = "FILLED"
+            elif status in terminal_zero and filled == 0 and signed_qty == 0:
+                role_state[role] = "TERMINAL_ZERO"
+            else:
+                role_state[role] = "PARTIAL_OR_MISMATCH"
+        parent_order_ids = {
+            str(leg.get("order_id"))
+            for leg in legs.values()
+            if leg.get("order_id")
+        }
+        reserved_symbols = {str(leg["symbol"]) for leg in legs.values()}
+        for oid, row in orderbook.items():
+            if oid in parent_order_ids or row.get("symbol") not in reserved_symbols:
+                continue
+            if (
+                row.get("filled_quantity", 0) > 0
+                or row.get("status") not in terminal_zero
+            ):
+                result["state"] = "RECONCILIATION_REQUIRED"
+                result["reason"] = "external_order_on_parent_symbol"
+                result["next_roles"] = []
+                result["group_exit_intents"] = []
+                return result
+
+        if result["cancel_order_ids"]:
+            result["state"] = "CANCEL_THEN_RECONCILE"
+            result["reason"] = "inflight_child_may_still_fill"
+            return result
+
+        exit_order = (
+            ("short_put", "short_call", "long_put", "long_call")
+            if parent.get("structure") == "IRON_CONDOR"
+            else ("long_call", "long_put")
+        )
+        for role in exit_order:
+            leg = legs[role]
+            signed_qty = snapshot.quantity_for(leg["symbol"])
+            if signed_qty:
+                result["group_exit_intents"].append(
+                    {
+                        "role": role,
+                        "symbol": leg["symbol"],
+                        "side": "SELL" if signed_qty > 0 else "BUY",
+                        "quantity": abs(signed_qty),
+                        "broker_submission_allowed": False,
+                    }
+                )
+        if any(value in {"PARTIAL_OR_MISMATCH", "TERMINAL_ZERO"} for value in role_state.values()):
+            result["state"] = "PARTIAL_EXPOSURE_RECOVERY_REQUIRED"
+            result["reason"] = "linked_child_not_fully_filled"
+            return result
+        if all(value == "FILLED" for value in role_state.values()):
+            result["state"] = "BROKER_PORTFOLIO_OBSERVED"
+            result["reason"] = "verified_all_child_rows_and_signed_net"
+            return result
+
+        stage_order = (
+            ("long_put", "long_call", "short_put", "short_call")
+            if parent.get("structure") == "IRON_CONDOR"
+            else ("long_call", "long_put")
+        )
+        for role in stage_order:
+            if role_state[role] != "UNBOUND":
+                continue
+            if role.startswith("short_") and not all(
+                role_state[wing] == "FILLED"
+                for wing in ("long_put", "long_call")
+            ):
+                result["state"] = "WAIT_PROTECTIVE_WINGS"
+                result["reason"] = "short_entry_requires_both_broker_filled_wings"
+                return result
+            result["next_roles"] = [role]
+            result["state"] = "RESEARCH_NEXT_LEG_ONLY"
+            result["reason"] = "advisory_nonlive_staging"
+            return result
+        result["reason"] = "linked_parent_state_unclassified"
         return result
 
     def get_linked_portfolio_reservation(self, parent_id: str) -> dict[str, Any] | None:
