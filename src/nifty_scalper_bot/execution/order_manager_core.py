@@ -8261,8 +8261,13 @@ class OrderManager:
             return order
 
     def screen_linked_portfolio_entry(
-        self, parent_id: str, *, product: str, gross_loss_bound: float,
-        entry_fee_reserve: float, exit_fee_reserve: float,
+        self,
+        parent_id: str,
+        *,
+        product: str,
+        gross_loss_bound: float,
+        entry_fee_reserve: float,
+        exit_fee_reserve: float,
         stressed_slippage_reserve: float,
     ) -> dict[str, Any]:
         """Read-only parent risk/cash admission with canonical owners.
@@ -8314,15 +8319,9 @@ class OrderManager:
             balance = float(risk.account_balance)
             per_trade_pct = float(snap.per_trade_risk_pct)
             daily_limit = float(snap.daily_loss_limit)
-            day_loss = max(
-                0.0, float(snap.day_loss), -float(snap.daily_realized)
-            )
-            if not all(
-                math.isfinite(v)
-                for v in (
-                    balance, per_trade_pct, daily_limit, day_loss,
-                )
-            ):
+            day_loss = max(0.0, float(snap.day_loss), -float(snap.daily_realized))
+            measured = (balance, per_trade_pct, daily_limit, day_loss)
+            if not all(math.isfinite(value) for value in measured):
                 result["reason"] = "linked_risk_values_invalid"
                 return result
             remaining_trade = balance * per_trade_pct / 100.0
