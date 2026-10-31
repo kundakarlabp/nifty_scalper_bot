@@ -11,8 +11,8 @@ position bookkeeping must not create independent entry or stop decisions.
 Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
 rejected exposure remains explicit until broker state is reconciled.
 Late cumulative fills on cancelled orders must be accounted for exactly once.
-Read-only linked-leg fill evidence uses persisted orders and explicit broker
-observations; local registration never certifies fill or authorizes LIVE entry.
+Read-only linked-leg fill evidence uses persisted orders/terminal metadata and
+explicit broker observations; local registration never certifies fill or LIVE entry.
 """
 
 from __future__ import annotations
@@ -3610,6 +3610,7 @@ class PositionManager:
             raise ValueError("linked_leg_identity_invalid")
         with self._lock:
             local_orders = {key: self._orders.get(key) for key in ids}
+            terminal_orders = {key: self._terminal_orders.get(key) for key in ids}
             broker_rows = {
                 key: dict(self._broker_order_ledger.get(key) or {}) for key in ids
             }
@@ -3617,24 +3618,49 @@ class PositionManager:
         blockers: list[str] = []
         for key in ids:
             local = local_orders[key]
+            terminal = terminal_orders[key] if local is None else None
             row = broker_rows[key]
-            if local is None or local.trade_lifecycle_id != parent:
+            record = local if local is not None else terminal
+            identity_ok = bool(
+                record is not None
+                and record.trade_lifecycle_id == parent
+                and getattr(record, "symbol", None)
+                and getattr(record, "side", None)
+            )
+            symbol = getattr(record, "symbol", None)
+            side = getattr(record, "side", None)
+            requested = (
+                local.quantity
+                if local is not None
+                else _broker_order_int(row.get("quantity"))
+            )
+            fill_complete = bool(
+                (
+                    local.status == "FILLED"
+                    and local.filled_quantity == requested
+                    if local is not None
+                    else terminal is not None
+                    and terminal.normalized_status == "FILLED"
+                    and terminal.terminal_update_seen
+                    and terminal.cumulative_filled_quantity == requested
+                )
+            )
+            if not identity_ok:
                 reason = "linked_leg_local_identity_missing"
             elif not row or not row.get("broker_fill_evidence"):
                 reason = "linked_leg_broker_fill_unverified"
             elif (
                 row.get("classification") != "managed_order"
-                or _canonical_key(row.get("symbol")) != local.symbol
-                or row.get("side") != local.side
-                or _broker_order_int(row.get("quantity")) != local.quantity
+                or _canonical_key(row.get("symbol")) != symbol
+                or row.get("side") != side
+                or _broker_order_int(row.get("quantity")) != requested
             ):
                 reason = "linked_leg_broker_identity_mismatch"
             elif (
                 row.get("broker_status") not in {"FILLED", "COMPLETE", "COMPLETED"}
-                or local.status != "FILLED"
-                or _broker_order_int(row.get("filled_quantity")) != local.quantity
-                or local.filled_quantity != local.quantity
-                or local.quantity <= 0
+                or not fill_complete
+                or _broker_order_int(row.get("filled_quantity")) != requested
+                or requested <= 0
             ):
                 reason = "linked_leg_not_fully_filled"
             else:
@@ -3647,9 +3673,9 @@ class PositionManager:
                 "broker_filled_quantity": _broker_order_int(
                     row.get("filled_quantity")
                 ),
-                "symbol": getattr(local, "symbol", None),
-                "side": getattr(local, "side", None),
-                "requested_quantity": getattr(local, "quantity", 0),
+                "symbol": symbol,
+                "side": side,
+                "requested_quantity": requested,
             }
         return {
             "trade_lifecycle_id": parent,
