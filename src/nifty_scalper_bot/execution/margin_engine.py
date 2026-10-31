@@ -1,7 +1,9 @@
-"""Canonical margin planning for single orders and non-trading linked baskets.
+"""Responsibility: Margin planning for single orders and linked baskets.
 
-Linked basket inspection requires fresh broker margin and available funds;
-no result from this module alone authorizes multi-leg LIVE orders.
+Ownership: MarginEngine reads broker margin and cash; OrderManager owns orders,
+RiskManager owns account loss limits, and PositionManager owns parent intent.
+Safety: Linked basket inspection requires fresh broker authority and never
+authorizes multi-leg LIVE submissions or bypasses existing single-leg gates.
 """
 
 from __future__ import annotations
