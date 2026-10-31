@@ -65,9 +65,7 @@ def reconcile_prospective_trade(
     if (
         decision_at.tzinfo is None
         or quote_observed_at.tzinfo is None
-        or not timedelta(0)
-        <= decision_at - quote_observed_at
-        <= timedelta(seconds=2)
+        or not timedelta(0) <= decision_at - quote_observed_at <= timedelta(seconds=2)
         or quote_source != "FULL"
     ):
         raise ValueError("prospective_decision_quote_unverified")
@@ -77,9 +75,11 @@ def reconcile_prospective_trade(
     expected = (
         {"long_call", "long_put"}
         if structure == "STRADDLE"
-        else {"long_put", "long_call", "short_put", "short_call"}
-        if structure == "IRON_CONDOR"
-        else set()
+        else (
+            {"long_put", "long_call", "short_put", "short_call"}
+            if structure == "IRON_CONDOR"
+            else set()
+        )
     )
     if (
         not parent_id
@@ -138,9 +138,7 @@ def reconcile_prospective_trade(
                 raise ValueError("prospective_fill_contract_invalid")
             ids.add(fill.order_id)
             sources.add(fill.source)
-            fees += estimate_order_cost(
-                turnover=fill.price * qty, side=fill.side
-            )
+            fees += estimate_order_cost(turnover=fill.price * qty, side=fill.side)
             cash += (1 if fill.side == "SELL" else -1) * fill.price * qty
         if not (decision_at <= entry.filled_at <= exit_fill.filled_at):
             raise ValueError("prospective_fill_chronology_invalid")
