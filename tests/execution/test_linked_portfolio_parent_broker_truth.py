@@ -108,6 +108,7 @@ def test_reused_parent_with_changed_leg_rejected(tmp_path):
     manager.reserve_linked_portfolio(PARENT, "STRADDLE", legs())
     changed = legs()
     changed[0]["quantity"] = 130
+    changed[1]["quantity"] = 130
     with pytest.raises(ValueError, match="linked_parent_id_conflict"):
         manager.reserve_linked_portfolio(PARENT, "STRADDLE", changed)
 
