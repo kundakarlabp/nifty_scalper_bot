@@ -116,9 +116,7 @@ def test_partial_fill_tolerance_cannot_allow_unconfirmed_leg(tolerance):
 def test_missing_broker_acknowledgement_is_never_success():
     manager, submitted, reconciled = simulated_manager([])
     manager._place_single_order = lambda **values: None
-    with pytest.raises(
-        OrderPlacementError, match="atomic_leg_acknowledgement_missing"
-    ):
+    with pytest.raises(OrderPlacementError, match="atomic_leg_acknowledgement_missing"):
         OrderManager.place_atomic_entry(manager, _LEGS)
     assert submitted == []
     assert reconciled == []
