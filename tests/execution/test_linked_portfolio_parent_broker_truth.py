@@ -183,6 +183,11 @@ def test_broker_mismatch_and_open_orders_never_confirm(tmp_path):
     assert manager.linked_portfolio_broker_state(PARENT)["reason"] == (
         "linked_parent_orderbook_fill_unverified"
     )
+    broker.orders[1]["status"] = "COMPLETE"
+    broker.orders.append(broker_row("manual-call-2", CALL))
+    assert manager.linked_portfolio_broker_state(PARENT)["reason"] == (
+        "linked_parent_external_order_ambiguity"
+    )
 
 
 def test_parent_can_never_certify_margin_or_group_exit(tmp_path):
