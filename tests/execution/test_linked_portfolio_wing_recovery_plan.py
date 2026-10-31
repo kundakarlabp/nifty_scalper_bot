@@ -114,10 +114,7 @@ def test_entry_planning_requires_both_wings_before_any_short(tmp_path):
 
 def test_partial_open_order_cannot_advance_and_requires_cancel_reconcile(tmp_path):
     manager, broker, parent = new_parent(tmp_path)
-    add_child(
-        manager, broker, parent, "long_put",
-        status="PARTIALLY FILLED", filled=25
-    )
+    add_child(manager, broker, parent, "long_put", status="PARTIALLY FILLED", filled=25)
     view = plan(manager, broker)
     assert view["state"] == "CANCEL_THEN_RECONCILE"
     assert view["next_roles"] == []
@@ -150,10 +147,16 @@ def test_group_exit_is_short_first_then_protective_longs(tmp_path):
     assert view["state"] == "BROKER_PORTFOLIO_OBSERVED"
     assert view["next_roles"] == []
     assert [intent["role"] for intent in view["group_exit_intents"]] == [
-        "short_put", "short_call", "long_put", "long_call"
+        "short_put",
+        "short_call",
+        "long_put",
+        "long_call",
     ]
     assert [intent["side"] for intent in view["group_exit_intents"]] == [
-        "BUY", "BUY", "SELL", "SELL"
+        "BUY",
+        "BUY",
+        "SELL",
+        "SELL",
     ]
 
 
