@@ -31,6 +31,8 @@ Safe-edit notes:
   the existing entry gate stays blocked pending broker reconciliation.
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
+- Parent-level broker margin screens reuse the existing PositionManager and
+  RiskManager. They never place linked children or authorize LIVE baskets.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
   LIVE submissions are rejected until linked-leg margin, fill and crash recovery
   are implemented in this canonical execution owner. In simulation it now
@@ -8257,6 +8259,103 @@ class OrderManager:
                     raise
 
             return order
+
+    def screen_linked_portfolio_entry(
+        self, parent_id: str, *, product: str, gross_loss_bound: float,
+        entry_fee_reserve: float, exit_fee_reserve: float,
+        stressed_slippage_reserve: float,
+    ) -> dict[str, Any]:
+        """Read-only parent risk/cash admission with canonical owners.
+
+        Cash estimates are refreshed from broker funds/basket-margin APIs.
+        No new order is placed; no caller can promote this into LIVE execution.
+        """
+        result: dict[str, Any] = {
+            "parent_id": str(parent_id or ""),
+            "risk_screen_passed": False,
+            "live_entry_allowed": False,
+            "broker_execution_allowed": False,
+            "reason": "linked_parent_not_ready",
+        }
+        try:
+            parent = self._positions.get_linked_portfolio_reservation(parent_id)
+        except Exception:  # noqa: BLE001 - corrupted durable parent
+            result["reason"] = "linked_parent_reservation_unverified"
+            return result
+        if not parent or not isinstance(parent.get("legs"), Mapping):
+            result["reason"] = "linked_parent_missing"
+            return result
+        if (
+            parent.get("state") != "RESERVED_UNVERIFIED"
+            or any(leg.get("order_id") for leg in parent["legs"].values())
+        ):
+            result["reason"] = "linked_parent_in_progress_requires_reconciliation"
+            return result
+        risk = self._risk_manager
+        if risk is None:
+            result["reason"] = "linked_risk_authority_missing"
+            return result
+        try:
+            if not risk.is_green():
+                result["reason"] = "linked_risk_gate_closed"
+                return result
+            allowed, _reasons = risk.risk_gate_should_trade()
+            if not allowed:
+                result["reason"] = "linked_risk_state_blocked"
+                return result
+            pnl_blocker = self._positions.current_pnl_reconciliation_blocker()
+            if pnl_blocker:
+                result["reason"] = "linked_pnl_authority_unverified"
+                return result
+            snap = risk.snapshot()
+            if bool(snap.shadow_forced) or bool(snap.breaker_tripped):
+                result["reason"] = "linked_risk_circuit_open"
+                return result
+            balance = float(risk.account_balance)
+            per_trade_pct = float(snap.per_trade_risk_pct)
+            daily_limit = float(snap.daily_loss_limit)
+            day_loss = max(
+                0.0, float(snap.day_loss), -float(snap.daily_realized)
+            )
+            if not all(
+                math.isfinite(v)
+                for v in (
+                    balance, per_trade_pct, daily_limit, day_loss,
+                )
+            ):
+                result["reason"] = "linked_risk_values_invalid"
+                return result
+            remaining_trade = balance * per_trade_pct / 100.0
+            remaining_daily = daily_limit - day_loss
+            if min(remaining_trade, remaining_daily) <= 0:
+                result["reason"] = "linked_risk_budget_exhausted"
+                return result
+            decision = self._margin_engine.screen_linked_portfolio(
+                legs=parent["legs"],
+                product=product,
+                gross_loss_bound=gross_loss_bound,
+                remaining_trade_risk=remaining_trade,
+                remaining_daily_risk=remaining_daily,
+                entry_fee_reserve=entry_fee_reserve,
+                exit_fee_reserve=exit_fee_reserve,
+                stressed_slippage_reserve=stressed_slippage_reserve,
+            )
+        except Exception:  # noqa: BLE001 - broker/risk authority must fail closed
+            result["reason"] = "linked_risk_or_margin_read_failed"
+            return result
+        result.update(
+            {
+                "risk_screen_passed": bool(decision.ok),
+                "reason": decision.reason,
+                "required_cash_with_reserves": decision.required_cash_with_reserves,
+                "stressed_loss_with_costs": decision.stressed_loss_with_costs,
+                "broker_funds": decision.available_cash,
+                "broker_initial_margin": decision.initial_margin,
+                "broker_final_margin": decision.final_margin,
+                "observed_at_utc": decision.observed_at_utc,
+            }
+        )
+        return result
 
     def place_atomic_entry(
         self,
