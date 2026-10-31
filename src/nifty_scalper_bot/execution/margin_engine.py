@@ -272,6 +272,7 @@ class MarginEngine:
         stressed_slippage_reserve: float,
     ) -> LinkedPortfolioMarginDecision:
         """Broker-only basket quote and funds; not a capital reservation."""
+
         def blocked(reason: str) -> LinkedPortfolioMarginDecision:
             return LinkedPortfolioMarginDecision(
                 ok=False,
@@ -364,12 +365,11 @@ class MarginEngine:
             available = self._extract_balance_from_snapshot(funding)
         except Exception:  # noqa: BLE001 - broker read boundary must fail closed
             return blocked("linked_margin_broker_read_failed")
+        if available is None:
+            return blocked("linked_margin_broker_values_invalid")
+        broker_values = (initial_total, final_total, available)
         if (
-            available is None
-            or not all(
-                math.isfinite(value) and value >= 0
-                for value in (initial_total, final_total, available)
-            )
+            any(not math.isfinite(value) or value < 0 for value in broker_values)
             or max(initial_total, final_total) <= 0
         ):
             return blocked("linked_margin_broker_values_invalid")
