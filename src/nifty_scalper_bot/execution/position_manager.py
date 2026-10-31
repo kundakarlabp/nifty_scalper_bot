@@ -3675,11 +3675,22 @@ class PositionManager:
         with self._lock:
             existing = self._linked_portfolio_reservations.get(key)
             if existing is not None:
-                comparable = dict(existing)
-                comparable.pop("created_at", None)
-                proposed = dict(proposal)
-                proposed.pop("created_at", None)
-                if comparable != proposed:
+                if (
+                    existing.get("structure") != kind
+                    or not isinstance(existing.get("legs"), Mapping)
+                    or any(
+                        {
+                            name: value
+                            for name, value in existing["legs"].get(role, {}).items()
+                            if name != "order_id"
+                        } != {
+                            name: value
+                            for name, value in proposed["legs"][role].items()
+                            if name != "order_id"
+                        }
+                        for role in roles
+                    )
+                ):
                     raise ValueError("linked_parent_id_conflict")
                 return copy.deepcopy(existing)
             for other in self._linked_portfolio_reservations.values():
@@ -3701,6 +3712,147 @@ class PositionManager:
             except (OSError, ValueError, TypeError) as exc:
                 raise RuntimeError("linked_parent_persistence_unverified") from exc
             return copy.deepcopy(proposal)
+
+    def bind_linked_portfolio_order(
+        self, parent_id: str, role: str, broker_order_id: str
+    ) -> dict[str, Any]:
+        """Attach an already tracked child without changing broker state.
+
+        Binding is durable and idempotent; no child order is submitted here.
+        """
+        key = str(parent_id or "").strip()
+        oid = str(broker_order_id or "").strip()
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if parent is None or not oid or role not in parent.get("legs", {}):
+                raise ValueError("linked_parent_binding_invalid")
+            leg = parent["legs"][role]
+            current = leg.get("order_id")
+            if current not in (None, oid):
+                raise ValueError("linked_parent_child_conflict")
+            if any(
+                other.get("order_id") == oid
+                for label, other in parent["legs"].items()
+                if label != role
+            ):
+                raise ValueError("linked_parent_order_reused")
+            local = self._orders.get(oid)
+            terminal = self._terminal_orders.get(oid)
+            record = local if local is not None else terminal
+            if (
+                record is None
+                or record.trade_lifecycle_id != key
+                or record.symbol != leg["symbol"]
+                or record.side != leg["side"]
+                or local is not None and local.quantity != leg["quantity"]
+            ):
+                raise ValueError("linked_parent_child_identity_invalid")
+            if current == oid:
+                return copy.deepcopy(parent)
+            leg["order_id"] = oid
+            parent["state"] = "IN_PROGRESS_UNVERIFIED"
+            self.save_state()
+            try:
+                stored = json.loads(self._state_path.read_text(encoding="utf-8"))
+                entry = stored["linked_portfolio_reservations"][key]["legs"][role]
+                if entry["order_id"] != oid:
+                    raise OSError("linked_parent_child_write_unconfirmed")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError("linked_parent_child_persistence_unverified") from exc
+            return copy.deepcopy(parent)
+
+    def linked_portfolio_broker_state(self, parent_id: str) -> dict[str, Any]:
+        """One fresh broker orderbook + net-position check of a durable parent.
+
+        Broker net quantities are portfolio/account truth, not ownership proof.
+        Even a matching account snapshot cannot certify exit protections.
+        """
+        parent = self.get_linked_portfolio_reservation(parent_id)
+        if parent is None:
+            raise ValueError("linked_parent_missing")
+        legs = parent.get("legs")
+        result: dict[str, Any] = {
+            "parent_id": str(parent_id),
+            "broker_portfolio_confirmed": False,
+            "live_entry_allowed": False,
+            "group_exit_certified": False,
+            "reason": "linked_parent_broker_unverified",
+            "exposure": {},
+        }
+        if not isinstance(legs, Mapping) or len(legs) not in {2, 4}:
+            result["reason"] = "linked_parent_corrupt"
+            return result
+        ids = [leg.get("order_id") for leg in legs.values()]
+        if any(not isinstance(oid, str) or not oid for oid in ids):
+            result["reason"] = "linked_parent_child_unbound"
+            return result
+        fills = self.linked_leg_fill_snapshot(str(parent_id), ids)
+        if not fills["all_legs_broker_filled"]:
+            result["reason"] = fills["reason"]
+            return result
+        position_fetcher = self._resolve_broker_position_fetcher()
+        order_fetcher = self._resolve_broker_order_fetcher()
+        if not callable(position_fetcher) or not callable(order_fetcher):
+            result["reason"] = "linked_parent_broker_fetcher_missing"
+            return result
+        try:
+            broker_positions = position_fetcher()
+            broker_orders = order_fetcher()
+            if inspect.isawaitable(broker_positions) or inspect.isawaitable(
+                broker_orders
+            ):
+                result["reason"] = "linked_parent_async_broker_unsupported"
+                return result
+            net = decode_position_snapshot(broker_positions)
+            if not isinstance(broker_orders, (list, tuple)):
+                result["reason"] = "linked_parent_orderbook_invalid"
+                return result
+            orderbook = {}
+            for raw in broker_orders:
+                if not isinstance(raw, Mapping):
+                    result["reason"] = "linked_parent_orderbook_invalid"
+                    return result
+                record = _broker_order_payload(raw)
+                oid = record.get("order_id")
+                if not oid or oid in orderbook:
+                    result["reason"] = "linked_parent_orderbook_invalid"
+                    return result
+                orderbook[oid] = record
+        except Exception:  # noqa: BLE001 - external broker boundary
+            result["reason"] = "linked_parent_broker_fetch_failed"
+            return result
+        expected = {}
+        for leg in legs.values():
+            symbol = leg["symbol"]
+            direction = 1 if leg["side"] == "BUY" else -1
+            expected[symbol] = direction * leg["quantity"]
+            record = orderbook.get(leg["order_id"])
+            if (
+                record is None
+                or record.get("symbol") != symbol
+                or record.get("side") != leg["side"]
+                or record.get("quantity") != leg["quantity"]
+                or record.get("filled_quantity") != leg["quantity"]
+                or record.get("status") != "FILLED"
+            ):
+                result["reason"] = "linked_parent_orderbook_fill_unverified"
+                return result
+        result["exposure"] = {
+            symbol: {
+                "expected": qty,
+                "broker_net": net.quantity_for(symbol),
+            }
+            for symbol, qty in expected.items()
+        }
+        if any(
+            item["broker_net"] != item["expected"]
+            for item in result["exposure"].values()
+        ):
+            result["reason"] = "linked_parent_broker_exposure_mismatch"
+            return result
+        result["broker_portfolio_confirmed"] = True
+        result["reason"] = "linked_parent_broker_position_observed"
+        return result
 
     def get_linked_portfolio_reservation(self, parent_id: str) -> dict[str, Any] | None:
         """Return a detached persisted parent; none is not a trading approval."""
