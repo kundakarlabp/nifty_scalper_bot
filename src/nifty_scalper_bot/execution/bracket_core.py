@@ -27,6 +27,8 @@ Owns / does NOT own:
 Safe-edit notes:
 - Live money and thread-sensitive (RLock-guarded). Preserve locking and the
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
+- Linked-portfolio group exits are currently broker-truth diagnostic only;
+  this owner never blindly submits a portfolio leg or claims flat by intent.
 """
 
 from __future__ import annotations
@@ -2450,6 +2452,44 @@ class BracketManager:
                 )
             ]
         )
+
+    def linked_portfolio_exit_convergence(self, parent_id: str) -> dict[str, Any]:
+        """Determine broker-confirmed group exit blockers without placing orders.
+
+        Group short legs must be reduced before the protective long wings.
+        No individual bracket is allowed to infer group flatness from an order
+        acknowledgement, a pending cancellation, or a stale local position.
+        """
+        result: dict[str, Any] = {
+            "parent_id": str(parent_id or ""),
+            "exit_converged": False,
+            "reason": "linked_bracket_position_owner_missing",
+            "cancel_order_ids": [],
+            "exit_intents": [],
+            "live_exit_dispatch_allowed": False,
+        }
+        owner = getattr(self.order_manager, "_positions", None)
+        planner = getattr(owner, "linked_portfolio_recovery_plan", None)
+        if not callable(planner):
+            return result
+        try:
+            plan = planner(parent_id)
+        except Exception:  # noqa: BLE001 - broker truth is uncertain
+            result["reason"] = "linked_bracket_broker_reconciliation_failed"
+            return result
+        state = str(plan.get("state") or "")
+        result["reason"] = str(plan.get("reason") or "linked_bracket_unverified")
+        result["cancel_order_ids"] = list(plan.get("cancel_order_ids") or ())
+        intents = list(plan.get("group_exit_intents") or ())
+        result["exit_intents"] = intents
+        if state in {"RECONCILIATION_REQUIRED", "CANCEL_THEN_RECONCILE"}:
+            result["exit_intents"] = []
+            return result
+        # 'all flat' is only observed from the authoritative complete broker
+        # snapshot and is not enough to certify exit order ownership.
+        if not intents and state == "BROKER_PORTFOLIO_OBSERVED":
+            result["reason"] = "linked_bracket_fills_not_exit_reconciled"
+        return result
 
     def eod_flatten_all(
         self,
