@@ -11,6 +11,8 @@ position bookkeeping must not create independent entry or stop decisions.
 Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
 rejected exposure remains explicit until broker state is reconciled.
 Late cumulative fills on cancelled orders must be accounted for exactly once.
+Read-only linked-leg fill evidence uses persisted orders and explicit broker
+observations; local registration never certifies fill or authorizes LIVE entry.
 """
 
 from __future__ import annotations
@@ -3377,6 +3379,12 @@ class PositionManager:
     ) -> None:
         """Classify broker order truth before applying managed lifecycle updates."""
 
+        # The legacy normalizer can infer filled quantity from requested qty;
+        # that inferred value is not broker-confirmed multi-leg fill evidence.
+        raw_fill_reported = any(
+            key in broker_payload and broker_payload[key] is not None
+            for key in ("filled_quantity", "filled", "filled_qty", "filledQuantity")
+        )
         payload = _broker_order_payload(
             dict(broker_payload or {}, order_id=str(order_id).strip())
         )
@@ -3412,7 +3420,14 @@ class PositionManager:
 
         if managed:
             with self._lock:
-                self._broker_order_ledger[oid] = _broker_ledger_row(
+                local = self._orders.get(oid)
+                exact_identity = bool(
+                    local is not None
+                    and _canonical_key(payload.get("symbol")) == local.symbol
+                    and str(payload.get("side") or "") == local.side
+                    and _broker_order_int(payload.get("quantity")) == local.quantity
+                )
+                row = _broker_ledger_row(
                     existing=previous,
                     broker_payload=payload,
                     classification="managed_order",
@@ -3421,6 +3436,10 @@ class PositionManager:
                     reason=None,
                     managed=True,
                 )
+                row["broker_fill_evidence"] = bool(
+                    exact_identity and raw_fill_reported
+                )
+                self._broker_order_ledger[oid] = row
             self._apply_managed_broker_order_update(oid, payload)
             self.save_state()
             return
@@ -3564,6 +3583,79 @@ class PositionManager:
                 continue
             out[str(ledger_order_id)] = dict(row)
         return out
+
+    def linked_leg_fill_snapshot(
+        self, trade_lifecycle_id: str, order_ids: Sequence[str]
+    ) -> dict[str, Any]:
+        """Read existing persisted broker fills; never grant live entry.
+
+        This cannot prove protective wing ordering, margin or group exits.
+        Missing or partial evidence fails closed, including after restart.
+        """
+        parent = str(trade_lifecycle_id or "").strip()
+        ids = (
+            tuple(str(order_id or "").strip() for order_id in order_ids)
+            if isinstance(order_ids, (list, tuple))
+            else ()
+        )
+        if (
+            not parent
+            or len(ids) not in {2, 4}
+            or not all(ids)
+            or len(ids) != len(set(ids))
+        ):
+            raise ValueError("linked_leg_identity_invalid")
+        with self._lock:
+            local_orders = {key: self._orders.get(key) for key in ids}
+            broker_rows = {
+                key: dict(self._broker_order_ledger.get(key) or {}) for key in ids
+            }
+        legs: dict[str, dict[str, Any]] = {}
+        blockers: list[str] = []
+        for key in ids:
+            local = local_orders[key]
+            row = broker_rows[key]
+            if local is None or local.trade_lifecycle_id != parent:
+                reason = "linked_leg_local_identity_missing"
+            elif not row or not row.get("broker_fill_evidence"):
+                reason = "linked_leg_broker_fill_unverified"
+            elif (
+                row.get("classification") != "managed_order"
+                or _canonical_key(row.get("symbol")) != local.symbol
+                or row.get("side") != local.side
+                or _broker_order_int(row.get("quantity")) != local.quantity
+            ):
+                reason = "linked_leg_broker_identity_mismatch"
+            elif (
+                row.get("broker_status") not in {"FILLED", "COMPLETE", "COMPLETED"}
+                or local.status != "FILLED"
+                or _broker_order_int(row.get("filled_quantity")) != local.quantity
+                or local.filled_quantity != local.quantity
+                or local.quantity <= 0
+            ):
+                reason = "linked_leg_not_fully_filled"
+            else:
+                reason = "linked_leg_broker_fill_observed"
+            if reason != "linked_leg_broker_fill_observed":
+                blockers.append(reason)
+            legs[key] = {
+                "reason": reason,
+                "broker_status": row.get("broker_status") or "UNKNOWN",
+                "broker_filled_quantity": _broker_order_int(
+                    row.get("filled_quantity")
+                ),
+                "symbol": getattr(local, "symbol", None),
+                "side": getattr(local, "side", None),
+                "requested_quantity": getattr(local, "quantity", 0),
+            }
+        return {
+            "trade_lifecycle_id": parent,
+            "all_legs_broker_filled": not blockers,
+            "reason": blockers[0] if blockers else "linked_leg_broker_fills_observed",
+            "legs": legs,
+            "live_entry_allowed": False,
+            "portfolio_protection_certified": False,
+        }
 
     def get_pending_orders(self, symbol: str | None = None) -> list[Order]:
         """Return tracked orders, optionally filtered by ``symbol``."""
