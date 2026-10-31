@@ -93,7 +93,7 @@ def reconcile_prospective_trade(
         raise ValueError("prospective_parent_or_leg_set_invalid")
 
     ids: set[str] = set()
-    sources: set[str] = set()
+    sources: set[FILL_SOURCE] = set()
     cash = 0.0
     fees = 0.0
     slippage = 0.0
