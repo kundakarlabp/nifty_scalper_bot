@@ -206,3 +206,38 @@ def test_parent_persistence_failure_does_not_certify(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "save_state", lambda: None)
     with pytest.raises(RuntimeError, match="linked_parent_persistence_unverified"):
         manager.reserve_linked_portfolio(PARENT, "STRADDLE", legs())
+
+
+def test_condor_reservation_requires_protective_wing_geometry(tmp_path):
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    legs_in_order = [
+        {
+            "role": role,
+            "symbol": f"NFO:NIFTY26NOV{strike}{option}",
+            "side": "BUY" if role.startswith("long") else "SELL",
+            "quantity": 65,
+            "lot_size": 65,
+            "instrument_token": token,
+            "strike": strike,
+            "expiry": "2026-11-26",
+        }
+        for role, strike, option, token in (
+            ("long_put", 23700, "PE", 111),
+            ("short_put", 23800, "PE", 112),
+            ("short_call", 24200, "CE", 113),
+            ("long_call", 24300, "CE", 114),
+        )
+    ]
+    parent = manager.reserve_linked_portfolio(
+        PARENT, "IRON_CONDOR", legs_in_order
+    )
+    assert len(parent["legs"]) == 4
+    assert parent["legs"]["long_call"]["side"] == "BUY"
+    assert parent["legs"]["short_call"]["side"] == "SELL"
+    assert parent["live_entry_allowed"] is False
+    another = PositionManager(state_file=str(tmp_path / "second.json"))
+    broken = [dict(leg) for leg in legs_in_order]
+    broken[1]["strike"] = 24400
+    broken[1]["symbol"] = "NFO:NIFTY26NOV24400PE"
+    with pytest.raises(ValueError, match="linked_parent_strike_geometry_invalid"):
+        another.reserve_linked_portfolio(PARENT, "IRON_CONDOR", broken)
