@@ -36,7 +36,9 @@ class FakeBroker:
     def get_orders(self):
         return list(self.orders)
 
-    def record(self, order_id, symbol, side, quantity, *, status="COMPLETE", filled=None):
+    def record(
+        self, order_id, symbol, side, quantity, *, status="COMPLETE", filled=None
+    ):
         amount = quantity if filled is None else filled
         self.orders.append(
             {
