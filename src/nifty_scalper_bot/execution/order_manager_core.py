@@ -32,7 +32,10 @@ Safe-edit notes:
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
 - Parent-level broker margin screens reuse the existing PositionManager and
-  RiskManager. They never place linked children or authorize LIVE baskets.
+  RiskManager. Canonical non-live linked entry steps first reserve a durable
+  child attempt, submit via place_order, and verify broker state before
+  advancing; uncertain responses remain held across restart.
+  They never authorize LIVE baskets.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
   LIVE submissions are rejected until linked-leg margin, fill and crash recovery
   are implemented in this canonical execution owner. In simulation it now
@@ -8269,6 +8272,7 @@ class OrderManager:
         entry_fee_reserve: float,
         exit_fee_reserve: float,
         stressed_slippage_reserve: float,
+        allow_verified_progress: bool = False,
     ) -> dict[str, Any]:
         """Read-only parent risk/cash admission with canonical owners.
 
@@ -8292,8 +8296,22 @@ class OrderManager:
             return result
         has_bound_child = any(leg.get("order_id") for leg in parent["legs"].values())
         if parent.get("state") != "RESERVED_UNVERIFIED" or has_bound_child:
-            result["reason"] = "linked_parent_in_progress_requires_reconciliation"
-            return result
+            if not allow_verified_progress or parent.get("state") != (
+                "IN_PROGRESS_UNVERIFIED"
+            ):
+                result["reason"] = "linked_parent_in_progress_requires_reconciliation"
+                return result
+            try:
+                plan = self._positions.linked_portfolio_recovery_plan(parent_id)
+            except Exception:  # noqa: BLE001 - broker verification required
+                result["reason"] = "linked_parent_progress_broker_unverified"
+                return result
+            if (
+                plan.get("state") != "RESEARCH_NEXT_LEG_ONLY"
+                or len(plan.get("next_roles") or []) != 1
+            ):
+                result["reason"] = "linked_parent_progress_broker_unverified"
+                return result
         risk = self._risk_manager
         if risk is None:
             result["reason"] = "linked_risk_authority_missing"
@@ -8353,6 +8371,105 @@ class OrderManager:
             }
         )
         return result
+
+    def execute_linked_child_step(
+        self,
+        parent_id: str,
+        role: str,
+        *,
+        correlation_id: str,
+        product: str,
+        gross_loss_bound: float,
+        entry_fee_reserve: float,
+        exit_fee_reserve: float,
+        stressed_slippage_reserve: float,
+    ) -> dict[str, Any]:
+        """Submit one paper/sim child through canonical place_order exactly once.
+
+        Broker orderbook and signed positions must prove the completed child
+        before the next stage. Any exception, timeout, partial fill or missing
+        ack permanently holds this parent pending explicit reconciliation.
+        """
+        if self.is_live_mode() or self.execution_mode not in {"PAPER", "SIMULATION"}:
+            raise OrderPlacementError("linked_child_live_execution_not_supported")
+        key = str(parent_id or "").strip()
+        signal = str(correlation_id or "").strip()
+        if not key or not signal or len(signal) > 20 or not signal.isascii():
+            raise ValueError("linked_child_signal_identity_invalid")
+        plan = self._positions.linked_portfolio_recovery_plan(key)
+        if (
+            plan.get("state") != "RESEARCH_NEXT_LEG_ONLY"
+            or plan.get("next_roles") != [role]
+        ):
+            raise OrderPlacementError(
+                str(plan.get("reason") or "linked_child_broker_gate_closed")
+            )
+        parent = self._positions.get_linked_portfolio_reservation(key)
+        if not parent or role not in parent.get("legs", {}):
+            raise OrderPlacementError("linked_child_parent_invalid")
+        admission = self.screen_linked_portfolio_entry(
+            key,
+            product=product,
+            gross_loss_bound=gross_loss_bound,
+            entry_fee_reserve=entry_fee_reserve,
+            exit_fee_reserve=exit_fee_reserve,
+            stressed_slippage_reserve=stressed_slippage_reserve,
+            allow_verified_progress=parent.get("state") == "IN_PROGRESS_UNVERIFIED",
+        )
+        if not admission["risk_screen_passed"]:
+            raise OrderPlacementError(
+                str(admission.get("reason") or "linked_child_margin_blocked")
+            )
+        leg = parent["legs"][role]
+        # place_order builds a deterministic 20-char broker tag from the
+        # supplied strategy tag and signal ID; persist exactly that tag.
+        suffix = f"bot_{signal[-12:]}"[-8:]
+        broker_tag = f"p45_{suffix}"[:20]
+        self._positions.reserve_linked_child_attempt(key, role, broker_tag)
+        try:
+            oid = self.place_order(
+                symbol=leg["symbol"],
+                side=leg["side"],
+                quantity=leg["quantity"],
+                order_type=OrderType.MARKET,
+                product=product,
+                tag="p45",
+                check_risk=True,
+                signal_id=signal,
+                strategy_name=f"linked_{parent['structure'].lower()}",
+                intent="ENTRY",
+                trade_lifecycle_id=key,
+                bracket_id=key,
+                instrument_token=leg["instrument_token"],
+                contract_expiry=leg["expiry"],
+                requested_lots=leg["quantity"] // leg["lot_size"],
+                resolved_lot_size=leg["lot_size"],
+            )
+            if not oid:
+                raise OrderPlacementError("linked_child_broker_ack_missing")
+            self._positions.bind_linked_portfolio_order(key, role, str(oid))
+            verified = self._positions.linked_portfolio_recovery_plan(key)
+            if verified.get("state") not in {
+                "RESEARCH_NEXT_LEG_ONLY", "BROKER_PORTFOLIO_OBSERVED"
+            }:
+                raise OrderPlacementError(
+                    "linked_child_fill_not_broker_confirmed"
+                )
+        except Exception:  # noqa: BLE001 - no automatic broker retry
+            # An order might have filled despite timeout. The hold remains
+            # durable and must NOT be automatically removed or re-submitted.
+            self._positions.abort_linked_parent(
+                key, "linked_child_submission_or_fill_unverified"
+            )
+            raise
+        return {
+            "parent_id": key,
+            "role": role,
+            "broker_order_id": str(oid),
+            "state": "BROKER_FILLED_OBSERVED",
+            "next_roles": list(verified.get("next_roles") or ()),
+            "live_entry_allowed": False,
+        }
 
     def place_atomic_entry(
         self,
