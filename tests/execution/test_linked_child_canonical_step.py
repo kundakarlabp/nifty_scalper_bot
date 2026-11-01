@@ -69,6 +69,9 @@ class Broker:
             intent="ENTRY",
             bracket_id=kwargs["trade_lifecycle_id"],
         )
+        positions.apply_broker_order_update(
+            oid, {**self.orderbook[-1], "average_price": 50.0}
+        )
         if self.timeout_after_submit:
             raise TimeoutError("broker ack lost after execution")
         return oid
