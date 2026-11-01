@@ -147,7 +147,10 @@ def test_all_four_short_first_exits_then_confirmed_flat(tmp_path):
             pos.get_linked_portfolio_reservation(PARENT)["legs"][role]["symbol"]
         )
     assert [item["side"] for item in broker.exits_sent] == [
-        "BUY", "BUY", "SELL", "SELL"
+        "BUY",
+        "BUY",
+        "SELL",
+        "SELL",
     ]
     assert pos.linked_portfolio_broker_flat_confirmed(PARENT) is True
     assert pos.get_linked_portfolio_reservation(PARENT)["state"] == (
@@ -180,9 +183,7 @@ def test_lost_exit_ack_remains_durable_after_restart_and_no_duplicate(tmp_path):
         ("REJECTED", 0),
     ],
 )
-def test_open_partial_and_rejected_exit_never_retried_blindly(
-    tmp_path, status, filled
-):
+def test_open_partial_and_rejected_exit_never_retried_blindly(tmp_path, status, filled):
     pos, broker, bracket = setup(tmp_path)
     broker.exit_status = status
     broker.exit_quantity = filled
