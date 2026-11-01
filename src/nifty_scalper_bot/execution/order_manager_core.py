@@ -8397,10 +8397,9 @@ class OrderManager:
         if not key or not signal or len(signal) > 20 or not signal.isascii():
             raise ValueError("linked_child_signal_identity_invalid")
         plan = self._positions.linked_portfolio_recovery_plan(key)
-        if (
-            plan.get("state") != "RESEARCH_NEXT_LEG_ONLY"
-            or plan.get("next_roles") != [role]
-        ):
+        if plan.get("state") != "RESEARCH_NEXT_LEG_ONLY" or plan.get(
+            "next_roles"
+        ) != [role]:
             raise OrderPlacementError(
                 str(plan.get("reason") or "linked_child_broker_gate_closed")
             )
@@ -8450,11 +8449,10 @@ class OrderManager:
             self._positions.bind_linked_portfolio_order(key, role, str(oid))
             verified = self._positions.linked_portfolio_recovery_plan(key)
             if verified.get("state") not in {
-                "RESEARCH_NEXT_LEG_ONLY", "BROKER_PORTFOLIO_OBSERVED"
+                "RESEARCH_NEXT_LEG_ONLY",
+                "BROKER_PORTFOLIO_OBSERVED",
             }:
-                raise OrderPlacementError(
-                    "linked_child_fill_not_broker_confirmed"
-                )
+                raise OrderPlacementError("linked_child_fill_not_broker_confirmed")
         except Exception:  # noqa: BLE001 - no automatic broker retry
             # An order might have filled despite timeout. The hold remains
             # durable and must NOT be automatically removed or re-submitted.
