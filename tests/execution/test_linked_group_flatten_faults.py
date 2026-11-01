@@ -116,7 +116,7 @@ def setup(tmp_path):
         broker.record(oid, leg["symbol"], leg["side"], 65)
     manager = SimpleNamespace(
         _positions=pos,
-        execution_mode="PAPER",
+        execution_mode="SIMULATION",
         is_live_mode=lambda: False,
         place_order=lambda **kw: broker.exit(pos, **kw),
     )
