@@ -4347,6 +4347,118 @@ class PositionManager:
                 raise RuntimeError("linked_group_exit_bind_persistence_failed") from exc
             return copy.deepcopy(attempt)
 
+    def linked_portfolio_broker_flat_confirmed(self, parent_id: str) -> bool:
+        """Require actual offsetting broker fills and zero net per contract."""
+        parent = self.get_linked_portfolio_reservation(parent_id)
+        if parent is None or not isinstance(parent.get("legs"), Mapping):
+            return False
+        legs = parent["legs"]
+        exits = parent.get("group_exit_attempts")
+        if not isinstance(exits, Mapping) or not exits:
+            return False
+        positions_fn = self._resolve_broker_position_fetcher()
+        orders_fn = self._resolve_broker_order_fetcher()
+        if not callable(positions_fn) or not callable(orders_fn):
+            return False
+        try:
+            net_raw = positions_fn()
+            orders_raw = orders_fn()
+            if (
+                inspect.isawaitable(net_raw)
+                or inspect.isawaitable(orders_raw)
+                or not isinstance(orders_raw, (list, tuple))
+            ):
+                return False
+            net = decode_position_snapshot(net_raw)
+            book: dict[str, dict[str, Any]] = {}
+            for raw in orders_raw:
+                if not isinstance(raw, Mapping):
+                    return False
+                row = _broker_order_payload(raw)
+                oid = str(row.get("order_id") or "")
+                if not oid or oid in book:
+                    return False
+                book[oid] = row
+        except Exception:  # noqa: BLE001 - broker provenance required
+            return False
+        known: set[str] = set()
+        for role, leg in legs.items():
+            symbol = leg.get("symbol")
+            if not isinstance(symbol, str) or net.quantity_for(symbol) != 0:
+                return False
+            entry_id = leg.get("order_id")
+            if entry_id:
+                entry = book.get(str(entry_id))
+                if (
+                    entry is None
+                    or entry.get("symbol") != symbol
+                    or entry.get("side") != leg.get("side")
+                    or entry.get("quantity") != leg.get("quantity")
+                ):
+                    return False
+                entry_filled = entry.get("filled_quantity")
+                if type(entry_filled) is not int or not 0 <= entry_filled <= leg["quantity"]:
+                    return False
+                known.add(str(entry_id))
+            else:
+                entry_filled = 0
+            if not entry_filled:
+                if role in exits:
+                    return False
+                continue
+            attempt = exits.get(role)
+            if not isinstance(attempt, Mapping):
+                return False
+            oid = str(attempt.get("broker_order_id") or "")
+            row = book.get(oid)
+            if (
+                not oid
+                or row is None
+                or row.get("symbol") != symbol
+                or row.get("side") != (
+                    "SELL" if leg["side"] == "BUY" else "BUY"
+                )
+                or row.get("status") != "FILLED"
+                or row.get("quantity") != entry_filled
+                or row.get("filled_quantity") != entry_filled
+            ):
+                return False
+            known.add(oid)
+        symbols = {leg["symbol"] for leg in legs.values()}
+        for oid, row in book.items():
+            if oid in known or row.get("symbol") not in symbols:
+                continue
+            if (
+                row.get("filled_quantity", 0) > 0
+                or row.get("status") not in {"CANCELLED", "REJECTED", "EXPIRED"}
+            ):
+                return False
+        return True
+
+    def mark_linked_portfolio_broker_flat(self, parent_id: str) -> dict[str, Any]:
+        """Persist closed state only after fresh broker-backed zero exposure."""
+        if not self.linked_portfolio_broker_flat_confirmed(parent_id):
+            raise ValueError("linked_group_exit_not_broker_flat")
+        key = str(parent_id or "").strip()
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if not parent:
+                raise ValueError("linked_parent_missing")
+            parent["state"] = "CLOSED_BROKER_CONFIRMED"
+            parent["closed_at"] = _now().isoformat()
+            self.save_state()
+            try:
+                disk = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if disk["linked_portfolio_reservations"][key]["state"] != (
+                    "CLOSED_BROKER_CONFIRMED"
+                ):
+                    raise OSError("linked_group_close_write_unverified")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    "linked_group_close_persistence_unverified"
+                ) from exc
+            return copy.deepcopy(parent)
+
     def get_linked_portfolio_reservation(self, parent_id: str) -> dict[str, Any] | None:
         """Return a detached persisted parent; none is not a trading approval."""
         with self._lock:
