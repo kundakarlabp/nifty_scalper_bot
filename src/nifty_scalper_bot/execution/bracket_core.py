@@ -27,8 +27,10 @@ Owns / does NOT own:
 Safe-edit notes:
 - Live money and thread-sensitive (RLock-guarded). Preserve locking and the
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
-- Linked-portfolio group exits are currently broker-truth diagnostic only;
-  this owner never blindly submits a portfolio leg or claims flat by intent.
+- Linked-portfolio group flattening stages one protective reduction via
+  the canonical OrderManager and durable PositionManager exit-attempt hold.
+  PAPER/SIMULATION only; broker exit fills and zero net are mandatory for
+  convergence, with no blind retry after timeout/restart.
 """
 
 from __future__ import annotations
@@ -2487,9 +2489,120 @@ class BracketManager:
             return result
         # 'all flat' is only observed from the authoritative complete broker
         # snapshot and is not enough to certify exit order ownership.
+        if not intents:
+            verifier = getattr(owner, "linked_portfolio_broker_flat_confirmed", None)
+            if callable(verifier):
+                try:
+                    if verifier(parent_id):
+                        result["exit_converged"] = True
+                        result["reason"] = "linked_group_broker_flat_observed"
+                        return result
+                except Exception:  # noqa: BLE001 - broker read failure
+                    pass
         if not intents and state == "BROKER_PORTFOLIO_OBSERVED":
             result["reason"] = "linked_bracket_fills_not_exit_reconciled"
         return result
+
+    def execute_linked_group_flatten_step(
+        self, parent_id: str, *, correlation_id: str, product: str = "NRML"
+    ) -> dict[str, Any]:
+        """Submit one broker-truth reducing group leg through OrderManager.
+
+        Short option exposure is closed before protective long wings. This
+        PAPER/SIMULATION path never bypasses canonical exit placement.
+        """
+        owner = self.order_manager
+        if owner.is_live_mode() or owner.execution_mode not in {
+            "PAPER", "SIMULATION"
+        }:
+            raise RuntimeError("linked_group_live_execution_not_supported")
+        key = str(parent_id or "").strip()
+        signal = str(correlation_id or "").strip()
+        if (
+            not key
+            or not signal
+            or len(signal) > 20
+            or not signal.isascii()
+        ):
+            raise ValueError("linked_group_exit_signal_invalid")
+        positions = owner._positions
+        if positions.linked_portfolio_broker_flat_confirmed(key):
+            closed = positions.mark_linked_portfolio_broker_flat(key)
+            return {
+                "parent_id": key,
+                "state": closed["state"],
+                "broker_flat_confirmed": True,
+                "live_execution_allowed": False,
+            }
+        plan = positions.linked_portfolio_recovery_plan(key)
+        allowed_states = {
+            "BROKER_PORTFOLIO_OBSERVED",
+            "PARTIAL_EXPOSURE_RECOVERY_REQUIRED",
+        }
+        intents = plan.get("group_exit_intents") or ()
+        if (
+            plan.get("state") not in allowed_states
+            or plan.get("cancel_order_ids")
+            or not intents
+        ):
+            raise RuntimeError(
+                str(plan.get("reason") or "linked_group_exit_broker_gate_closed")
+            )
+        intent = intents[0]
+        role = intent["role"]
+        parent = positions.get_linked_portfolio_reservation(key)
+        if not parent or role not in parent.get("legs", {}):
+            raise RuntimeError("linked_group_exit_parent_invalid")
+        leg = parent["legs"][role]
+        suffix = f"bot_{signal[-12:]}"[-8:]
+        broker_tag = f"group_exit_{suffix}"[:20]
+        positions.reserve_linked_group_exit_attempt(key, role, broker_tag)
+        try:
+            order_id = owner.place_order(
+                symbol=intent["symbol"],
+                side=intent["side"],
+                quantity=intent["quantity"],
+                product=product,
+                tag="group_exit",
+                check_risk=False,
+                intent="REDUCE",
+                signal_id=signal,
+                strategy_name=f"linked_{parent['structure'].lower()}_flatten",
+                trade_lifecycle_id=key,
+                bracket_id=key,
+                instrument_token=leg["instrument_token"],
+                contract_expiry=leg["expiry"],
+                resolved_lot_size=leg["lot_size"],
+            )
+            if not order_id:
+                raise RuntimeError("linked_group_exit_ack_missing")
+            positions.bind_linked_group_exit_order(key, role, str(order_id))
+            result = positions.linked_portfolio_recovery_plan(key)
+            if result.get("state") not in allowed_states:
+                raise RuntimeError("linked_group_exit_broker_fill_unverified")
+            if positions.linked_portfolio_broker_flat_confirmed(key):
+                closed = positions.mark_linked_portfolio_broker_flat(key)
+                return {
+                    "parent_id": key,
+                    "state": closed["state"],
+                    "broker_flat_confirmed": True,
+                    "live_execution_allowed": False,
+                }
+        except Exception:
+            # The durable exit hold is intentionally not cleared here; a
+            # missing ACK may still represent a broker-confirmed exit.
+            raise
+        return {
+            "parent_id": key,
+            "role": role,
+            "broker_order_id": str(order_id),
+            "state": "BROKER_EXIT_FILL_OBSERVED",
+            "broker_flat_confirmed": False,
+            "next_exit_roles": [
+                item["role"] for item in result.get("group_exit_intents") or ()
+            ],
+            "live_execution_allowed": False,
+        }
 
     def eod_flatten_all(
         self,
