@@ -16,7 +16,9 @@ explicit broker observations; local registration never certifies fill or LIVE en
 Linked portfolio parent intentions are write-ahead persisted and read-only:
 no capital or LIVE permission follows from registering a parent.
 A read-only recovery plan uses broker truth, recommends wing-first ordering
-and short-first exits but never submits/cancels orders itself. Each proposed
+and short-first exits but never submits/cancels orders itself. Group exit
+submissions have separate durable write-ahead holds and broker-order IDs.
+Each proposed
 broker child is write-ahead held before dispatch; an ambiguous attempt cannot
 be retried or forgotten on restart without broker reconciliation.
 """
@@ -4034,6 +4036,16 @@ class PositionManager:
         ):
             result["reason"] = "linked_parent_corrupt"
             return result
+        group_exits = parent.get("group_exit_attempts", {})
+        if not isinstance(group_exits, Mapping):
+            result["reason"] = "linked_group_exit_corrupt"
+            return result
+        if any(
+            not isinstance(a, Mapping) or a.get("state") == "UNRESOLVED"
+            for a in group_exits.values()
+        ):
+            result["reason"] = "linked_group_exit_submission_ambiguous"
+            return result
         attempts = parent.get("child_attempts", {})
         if not isinstance(attempts, Mapping):
             result["reason"] = "linked_child_attempt_state_invalid"
@@ -4139,6 +4151,21 @@ class PositionManager:
             for leg in legs.values()
             if leg.get("order_id")
         }
+        for role, attempt in group_exits.items():
+            oid = str(attempt.get("broker_order_id") or "")
+            row = orderbook.get(oid)
+            if (
+                not oid
+                or row is None
+                or row.get("symbol") != attempt.get("symbol")
+                or row.get("side") != attempt.get("side")
+                or row.get("quantity") != attempt.get("quantity")
+                or row.get("status") != "FILLED"
+                or row.get("filled_quantity") != attempt.get("quantity")
+            ):
+                result["reason"] = "linked_group_exit_fill_unverified"
+                return result
+            parent_order_ids.add(oid)
         reserved_symbols = {str(leg["symbol"]) for leg in legs.values()}
         for oid, row in orderbook.items():
             if oid in parent_order_ids or row.get("symbol") not in reserved_symbols:
@@ -4153,14 +4180,13 @@ class PositionManager:
                 result["group_exit_intents"] = []
                 return result
 
-        if recovering:
-            result["state"] = "PARTIAL_EXPOSURE_RECOVERY_REQUIRED"
-            result["reason"] = "linked_parent_abort_hold"
-            return result
         if result["cancel_order_ids"]:
             result["state"] = "CANCEL_THEN_RECONCILE"
             result["reason"] = "inflight_child_may_still_fill"
             return result
+        # Even aborted parents must expose current signed exposure for
+        # protective reductions. Entry progression remains permanently held.
+        # Exit intents are constructed below before abort entry gates.
 
         exit_order = (
             ("short_put", "short_call", "long_put", "long_call")
@@ -4180,6 +4206,13 @@ class PositionManager:
                         "broker_submission_allowed": False,
                     }
                 )
+        if recovering or group_exits:
+            result["state"] = "PARTIAL_EXPOSURE_RECOVERY_REQUIRED"
+            result["reason"] = (
+                "linked_parent_abort_hold"
+                if recovering else "linked_group_exit_in_progress"
+            )
+            return result
         if any(value in {"PARTIAL_OR_MISMATCH", "TERMINAL_ZERO"} for value in role_state.values()):
             result["state"] = "PARTIAL_EXPOSURE_RECOVERY_REQUIRED"
             result["reason"] = "linked_child_not_fully_filled"
@@ -4210,6 +4243,228 @@ class PositionManager:
             return result
         result["reason"] = "linked_parent_state_unclassified"
         return result
+
+    def reserve_linked_group_exit_attempt(
+        self, parent_id: str, role: str, correlation_tag: str
+    ) -> dict[str, Any]:
+        """Durably reserve one broker-verified reduce-only group exit."""
+        key = str(parent_id or "").strip()
+        tag = str(correlation_tag or "").strip()
+        if (
+            not key
+            or not tag
+            or len(tag) > 20
+            or any(not (c.isascii() and (c.isalnum() or c in "_-")) for c in tag)
+        ):
+            raise ValueError("linked_group_exit_identity_invalid")
+        plan = self.linked_portfolio_recovery_plan(key)
+        intents = plan.get("group_exit_intents") or ()
+        if (
+            plan.get("state") not in {
+                "BROKER_PORTFOLIO_OBSERVED",
+                "PARTIAL_EXPOSURE_RECOVERY_REQUIRED",
+            }
+            or plan.get("cancel_order_ids")
+            or not intents
+            or intents[0].get("role") != role
+        ):
+            raise ValueError("linked_group_exit_broker_gate_closed")
+        selected = intents[0]
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if parent is None:
+                raise ValueError("linked_parent_missing")
+            exits = parent.setdefault("group_exit_attempts", {})
+            if not isinstance(exits, dict) or role in exits:
+                raise ValueError("linked_group_exit_attempt_unresolved")
+            if any(
+                isinstance(attempt, Mapping)
+                and attempt.get("state") == "UNRESOLVED"
+                for attempt in exits.values()
+            ):
+                raise ValueError("linked_group_exit_other_attempt_unresolved")
+            attempt = {
+                "role": role,
+                "symbol": selected["symbol"],
+                "side": selected["side"],
+                "quantity": selected["quantity"],
+                "correlation_tag": tag,
+                "state": "UNRESOLVED",
+                "broker_order_id": None,
+                "reserved_at": _now().isoformat(),
+            }
+            exits[role] = attempt
+            parent["state"] = "GROUP_EXIT_UNVERIFIED"
+            self.save_state()
+            try:
+                disk = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if disk["linked_portfolio_reservations"][key][
+                    "group_exit_attempts"
+                ][role] != attempt:
+                    raise OSError("linked_group_exit_write_unverified")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    "linked_group_exit_persistence_unverified"
+                ) from exc
+            return copy.deepcopy(attempt)
+
+    def bind_linked_group_exit_order(
+        self, parent_id: str, role: str, broker_order_id: str
+    ) -> dict[str, Any]:
+        """Bind a known reducing broker order without releasing exit holds."""
+        key = str(parent_id or "").strip()
+        oid = str(broker_order_id or "").strip()
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            exits = parent.get("group_exit_attempts", {}) if parent else {}
+            attempt = exits.get(role) if isinstance(exits, Mapping) else None
+            if not isinstance(attempt, dict) or not oid:
+                raise ValueError("linked_group_exit_binding_invalid")
+            if attempt["broker_order_id"] not in (None, oid):
+                raise ValueError("linked_group_exit_order_conflict")
+            record = self._orders.get(oid) or self._terminal_orders.get(oid)
+            if (
+                record is None
+                or record.trade_lifecycle_id != key
+                or record.symbol != attempt["symbol"]
+                or record.side != attempt["side"]
+                or self._orders.get(oid) is not None
+                and self._orders[oid].quantity != attempt["quantity"]
+            ):
+                raise ValueError("linked_group_exit_order_identity_invalid")
+            if attempt["broker_order_id"] == oid:
+                return copy.deepcopy(attempt)
+            attempt["broker_order_id"] = oid
+            attempt["state"] = "BOUND_UNVERIFIED"
+            self.save_state()
+            try:
+                disk = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if disk["linked_portfolio_reservations"][key][
+                    "group_exit_attempts"
+                ][role]["broker_order_id"] != oid:
+                    raise OSError("linked_group_exit_bind_unverified")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError("linked_group_exit_bind_persistence_failed") from exc
+            return copy.deepcopy(attempt)
+
+    def linked_portfolio_broker_flat_confirmed(self, parent_id: str) -> bool:
+        """Require actual offsetting broker fills and zero net per contract."""
+        parent = self.get_linked_portfolio_reservation(parent_id)
+        if parent is None or not isinstance(parent.get("legs"), Mapping):
+            return False
+        legs = parent["legs"]
+        exits = parent.get("group_exit_attempts")
+        if not isinstance(exits, Mapping) or not exits:
+            return False
+        positions_fn = self._resolve_broker_position_fetcher()
+        orders_fn = self._resolve_broker_order_fetcher()
+        if not callable(positions_fn) or not callable(orders_fn):
+            return False
+        try:
+            net_raw = positions_fn()
+            orders_raw = orders_fn()
+            if (
+                inspect.isawaitable(net_raw)
+                or inspect.isawaitable(orders_raw)
+                or not isinstance(orders_raw, (list, tuple))
+            ):
+                return False
+            net = decode_position_snapshot(net_raw)
+            book: dict[str, dict[str, Any]] = {}
+            for raw in orders_raw:
+                if not isinstance(raw, Mapping):
+                    return False
+                if not any(
+                    name in raw and raw[name] is not None
+                    for name in (
+                        "filled_quantity", "filled", "filled_qty", "filledQuantity"
+                    )
+                ):
+                    return False
+                row = _broker_order_payload(raw)
+                oid = str(row.get("order_id") or "")
+                if not oid or oid in book:
+                    return False
+                book[oid] = row
+        except Exception:  # noqa: BLE001 - broker provenance required
+            return False
+        known: set[str] = set()
+        for role, leg in legs.items():
+            symbol = leg.get("symbol")
+            if not isinstance(symbol, str) or net.quantity_for(symbol) != 0:
+                return False
+            entry_id = leg.get("order_id")
+            if entry_id:
+                entry = book.get(str(entry_id))
+                if (
+                    entry is None
+                    or entry.get("symbol") != symbol
+                    or entry.get("side") != leg.get("side")
+                    or entry.get("quantity") != leg.get("quantity")
+                ):
+                    return False
+                entry_filled = entry.get("filled_quantity")
+                if type(entry_filled) is not int or not 0 <= entry_filled <= leg["quantity"]:
+                    return False
+                known.add(str(entry_id))
+            else:
+                entry_filled = 0
+            if not entry_filled:
+                if role in exits:
+                    return False
+                continue
+            attempt = exits.get(role)
+            if not isinstance(attempt, Mapping):
+                return False
+            oid = str(attempt.get("broker_order_id") or "")
+            row = book.get(oid)
+            if (
+                not oid
+                or row is None
+                or row.get("symbol") != symbol
+                or row.get("side") != (
+                    "SELL" if leg["side"] == "BUY" else "BUY"
+                )
+                or row.get("status") != "FILLED"
+                or row.get("quantity") != entry_filled
+                or row.get("filled_quantity") != entry_filled
+            ):
+                return False
+            known.add(oid)
+        symbols = {leg["symbol"] for leg in legs.values()}
+        for oid, row in book.items():
+            if oid in known or row.get("symbol") not in symbols:
+                continue
+            if (
+                row.get("filled_quantity", 0) > 0
+                or row.get("status") not in {"CANCELLED", "REJECTED", "EXPIRED"}
+            ):
+                return False
+        return True
+
+    def mark_linked_portfolio_broker_flat(self, parent_id: str) -> dict[str, Any]:
+        """Persist closed state only after fresh broker-backed zero exposure."""
+        if not self.linked_portfolio_broker_flat_confirmed(parent_id):
+            raise ValueError("linked_group_exit_not_broker_flat")
+        key = str(parent_id or "").strip()
+        with self._lock:
+            parent = self._linked_portfolio_reservations.get(key)
+            if not parent:
+                raise ValueError("linked_parent_missing")
+            parent["state"] = "CLOSED_BROKER_CONFIRMED"
+            parent["closed_at"] = _now().isoformat()
+            self.save_state()
+            try:
+                disk = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if disk["linked_portfolio_reservations"][key]["state"] != (
+                    "CLOSED_BROKER_CONFIRMED"
+                ):
+                    raise OSError("linked_group_close_write_unverified")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError(
+                    "linked_group_close_persistence_unverified"
+                ) from exc
+            return copy.deepcopy(parent)
 
     def get_linked_portfolio_reservation(self, parent_id: str) -> dict[str, Any] | None:
         """Return a detached persisted parent; none is not a trading approval."""
