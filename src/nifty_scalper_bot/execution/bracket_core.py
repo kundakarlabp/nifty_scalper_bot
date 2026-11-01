@@ -29,7 +29,7 @@ Safe-edit notes:
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
 - Linked-portfolio group flattening stages one protective reduction via
   the canonical OrderManager and durable PositionManager exit-attempt hold.
-  PAPER/SIMULATION only; broker exit fills and zero net are mandatory for
+  SIMULATION only; broker exit fills and zero net are mandatory for
   convergence, with no blind retry after timeout/restart.
 """
 
@@ -2512,9 +2512,7 @@ class BracketManager:
         PAPER/SIMULATION path never bypasses canonical exit placement.
         """
         owner = self.order_manager
-        if owner.is_live_mode() or owner.execution_mode not in {
-            "PAPER", "SIMULATION"
-        }:
+        if owner.is_live_mode() or owner.execution_mode != "SIMULATION":
             raise RuntimeError("linked_group_live_execution_not_supported")
         key = str(parent_id or "").strip()
         signal = str(correlation_id or "").strip()
