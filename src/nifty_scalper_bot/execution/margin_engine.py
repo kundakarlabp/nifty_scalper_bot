@@ -1,10 +1,17 @@
-"""Margin planning helpers for order execution."""
+"""Responsibility: Margin planning for single orders and linked baskets.
+
+Ownership: MarginEngine reads broker margin and cash; OrderManager owns orders,
+RiskManager owns account loss limits, and PositionManager owns parent intent.
+Safety: Linked basket inspection requires fresh broker authority and never
+authorizes multi-leg LIVE submissions or bypasses existing single-leg gates.
+"""
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, replace
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Any, Literal, Mapping
 
 import nifty_scalper_bot.config.settings as app_settings
@@ -58,6 +65,21 @@ class SizingResult:
     reason: str | None = None
     needed: float | None = None
     available: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LinkedPortfolioMarginDecision:
+    """Broker-observed initial and final margins with conservative reserves."""
+
+    ok: bool
+    reason: str
+    initial_margin: float | None
+    final_margin: float | None
+    available_cash: float | None
+    required_cash_with_reserves: float | None
+    stressed_loss_with_costs: float | None
+    observed_at_utc: str | None
+    live_eligible: bool = False
 
 
 class _BrokerMarginUnavailable(RuntimeError):
@@ -237,6 +259,157 @@ class MarginEngine:
             sizing=sizing,
         )
 
+    def screen_linked_portfolio(
+        self,
+        *,
+        legs: Mapping[str, Mapping[str, Any]],
+        product: str,
+        gross_loss_bound: float,
+        remaining_trade_risk: float,
+        remaining_daily_risk: float,
+        entry_fee_reserve: float,
+        exit_fee_reserve: float,
+        stressed_slippage_reserve: float,
+    ) -> LinkedPortfolioMarginDecision:
+        """Broker-only basket quote and funds; not a capital reservation."""
+
+        def blocked(reason: str) -> LinkedPortfolioMarginDecision:
+            return LinkedPortfolioMarginDecision(
+                ok=False,
+                reason=reason,
+                initial_margin=None,
+                final_margin=None,
+                available_cash=None,
+                required_cash_with_reserves=None,
+                stressed_loss_with_costs=None,
+                observed_at_utc=None,
+            )
+
+        amounts = (
+            gross_loss_bound,
+            remaining_trade_risk,
+            remaining_daily_risk,
+            entry_fee_reserve,
+            exit_fee_reserve,
+            stressed_slippage_reserve,
+        )
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+                for value in amounts
+            )
+            or gross_loss_bound <= 0
+            or remaining_trade_risk <= 0
+            or remaining_daily_risk <= 0
+            or exit_fee_reserve <= 0
+            or stressed_slippage_reserve <= 0
+        ):
+            return blocked("linked_margin_risk_inputs_invalid")
+        if product not in {"MIS", "NRML"}:
+            return blocked("linked_margin_product_invalid")
+        if set(legs) not in (
+            {"long_call", "long_put"},
+            {"long_call", "long_put", "short_call", "short_put"},
+        ):
+            return blocked("linked_margin_contract_set_invalid")
+
+        order_params: list[dict[str, Any]] = []
+        for role in ("long_put", "long_call", "short_put", "short_call"):
+            if role not in legs:
+                continue
+            leg = legs[role]
+            symbol = str(leg.get("symbol") or "")
+            quantity = leg.get("quantity")
+            side = "BUY" if role.startswith("long") else "SELL"
+            if (
+                not symbol.startswith("NFO:NIFTY")
+                or not symbol.endswith(("CE", "PE"))
+                or leg.get("side") != side
+                or type(quantity) is not int
+                or quantity <= 0
+            ):
+                return blocked("linked_margin_contract_invalid")
+            order_params.append(
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": symbol.split(":", 1)[1],
+                    "transaction_type": side,
+                    "variety": "regular",
+                    "product": product,
+                    "order_type": "MARKET",
+                    "quantity": quantity,
+                    "price": 0,
+                    "trigger_price": 0,
+                }
+            )
+        basket = getattr(self._broker, "basket_order_margins", None)
+        funds = getattr(self._broker, "margins", None)
+        if not callable(funds):
+            funds = getattr(self._broker, "get_margins", None)
+        if not callable(basket) or not callable(funds):
+            return blocked("linked_margin_broker_authority_missing")
+        try:
+            quote = basket(order_params, consider_positions=True)
+            funding = funds()
+            if not isinstance(quote, Mapping):
+                return blocked("linked_margin_basket_invalid")
+            initial = quote.get("initial")
+            final = quote.get("final")
+            if not isinstance(initial, Mapping) or not isinstance(final, Mapping):
+                return blocked("linked_margin_basket_invalid")
+            if initial.get("total") is None or final.get("total") is None:
+                return blocked("linked_margin_basket_invalid")
+            initial_total = float(initial["total"])
+            final_total = float(final["total"])
+            if not isinstance(funding, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            equity = funding.get("equity")
+            if not isinstance(equity, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            cash = equity.get("available")
+            if not isinstance(cash, Mapping):
+                return blocked("linked_margin_broker_funds_invalid")
+            available_raw = cash.get("live_balance")
+            if available_raw is None:
+                available_raw = cash.get("available_cash")
+            if available_raw is None:
+                return blocked("linked_margin_broker_funds_invalid")
+            available = float(available_raw)
+        except Exception:  # noqa: BLE001 - broker read boundary must fail closed
+            return blocked("linked_margin_broker_read_failed")
+        if available is None:
+            return blocked("linked_margin_broker_values_invalid")
+        broker_values = (initial_total, final_total, available)
+        if (
+            any(not math.isfinite(value) or value < 0 for value in broker_values)
+            or max(initial_total, final_total) <= 0
+        ):
+            return blocked("linked_margin_broker_values_invalid")
+
+        reserves = entry_fee_reserve + exit_fee_reserve + stressed_slippage_reserve
+        required_cash = max(initial_total, final_total) + reserves
+        required_risk = gross_loss_bound + reserves
+        reason = "linked_margin_authority_observed"
+        if required_cash > available:
+            reason = "linked_margin_cash_insufficient"
+        elif required_risk > remaining_trade_risk:
+            reason = "linked_margin_trade_risk_exceeded"
+        elif required_risk > remaining_daily_risk:
+            reason = "linked_margin_daily_risk_exceeded"
+        return LinkedPortfolioMarginDecision(
+            ok=reason == "linked_margin_authority_observed",
+            reason=reason,
+            initial_margin=initial_total,
+            final_margin=final_total,
+            available_cash=available,
+            required_cash_with_reserves=required_cash,
+            stressed_loss_with_costs=required_risk,
+            observed_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+
     def _resolve_available_margin(self, fallback: float, *, force: bool = False) -> float:
         """Prefer a positive DataHub balance, otherwise use the supplied balance."""
         hub = self._data_hub
@@ -395,6 +568,7 @@ class MarginEngine:
 __all__ = [
     "MarginEngine",
     "MarginDecision",
+    "LinkedPortfolioMarginDecision",
     "MarginInputs",
     "MIS_CUTOFF",
     "estimate_fallback_cash_required",
