@@ -4374,6 +4374,13 @@ class PositionManager:
             for raw in orders_raw:
                 if not isinstance(raw, Mapping):
                     return False
+                if not any(
+                    name in raw and raw[name] is not None
+                    for name in (
+                        "filled_quantity", "filled", "filled_qty", "filledQuantity"
+                    )
+                ):
+                    return False
                 row = _broker_order_payload(raw)
                 oid = str(row.get("order_id") or "")
                 if not oid or oid in book:
