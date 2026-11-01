@@ -150,7 +150,9 @@ def test_partial_fill_triggers_abort_and_no_other_child(tmp_path):
     owner, positions, broker = setup(tmp_path)
     broker.fill_qty = 25
     broker.status = "PARTIALLY FILLED"
-    with pytest.raises(OrderPlacementError, match="linked_child_fill_not_broker_confirmed"):
+    with pytest.raises(
+        OrderPlacementError, match="linked_child_fill_not_broker_confirmed"
+    ):
         step(owner, "long_put", "partial")
     assert positions.get_linked_portfolio_reservation(PARENT)["state"] == (
         "ABORT_RECOVERY_REQUIRED"
@@ -181,7 +183,9 @@ def test_acknowledged_order_does_not_prove_full_fill(tmp_path):
     owner, positions, broker = setup(tmp_path)
     broker.fill_qty = 0
     broker.status = "OPEN"
-    with pytest.raises(OrderPlacementError, match="linked_child_fill_not_broker_confirmed"):
+    with pytest.raises(
+        OrderPlacementError, match="linked_child_fill_not_broker_confirmed"
+    ):
         step(owner, "long_put", "open")
     assert positions.get_linked_portfolio_reservation(PARENT)["state"] == (
         "ABORT_RECOVERY_REQUIRED"
@@ -191,6 +195,8 @@ def test_acknowledged_order_does_not_prove_full_fill(tmp_path):
 def test_simulation_is_never_live_broker_enabled(tmp_path):
     owner, positions, broker = setup(tmp_path)
     owner.is_live_mode = lambda: True
-    with pytest.raises(OrderPlacementError, match="linked_child_live_execution_not_supported"):
+    with pytest.raises(
+        OrderPlacementError, match="linked_child_live_execution_not_supported"
+    ):
         step(owner, "long_put", "live")
     assert broker.submitted == []
