@@ -99,7 +99,7 @@ def setup(tmp_path):
         ],
     )
     manager = SimpleNamespace(
-        execution_mode="PAPER",
+        execution_mode="SIMULATION",
         is_live_mode=lambda: False,
         _positions=positions,
         screen_linked_portfolio_entry=lambda *a, **k: {"risk_screen_passed": True},
