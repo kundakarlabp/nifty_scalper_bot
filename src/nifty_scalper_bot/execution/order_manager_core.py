@@ -8384,13 +8384,13 @@ class OrderManager:
         exit_fee_reserve: float,
         stressed_slippage_reserve: float,
     ) -> dict[str, Any]:
-        """Submit one paper/sim child through canonical place_order exactly once.
+        """Submit one simulation child through canonical place_order exactly once.
 
         Broker orderbook and signed positions must prove the completed child
         before the next stage. Any exception, timeout, partial fill or missing
         ack permanently holds this parent pending explicit reconciliation.
         """
-        if self.is_live_mode() or self.execution_mode not in {"PAPER", "SIMULATION"}:
+        if self.is_live_mode() or self.execution_mode != "SIMULATION":
             raise OrderPlacementError("linked_child_live_execution_not_supported")
         key = str(parent_id or "").strip()
         signal = str(correlation_id or "").strip()
