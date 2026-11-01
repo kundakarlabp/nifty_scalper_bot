@@ -99,9 +99,7 @@ def setup(tmp_path):
         execution_mode="PAPER",
         is_live_mode=lambda: False,
         _positions=positions,
-        screen_linked_portfolio_entry=lambda *a, **k: {
-            "risk_screen_passed": True
-        },
+        screen_linked_portfolio_entry=lambda *a, **k: {"risk_screen_passed": True},
         place_order=lambda **kw: broker.place_child(positions, **kw),
     )
     return manager, positions, broker
@@ -123,20 +121,17 @@ def step(owner, role, nonce):
 
 def test_verified_hedge_first_progression_and_four_full_broker_fills(tmp_path):
     owner, positions, broker = setup(tmp_path)
-    for idx, role in enumerate(
-        ("long_put", "long_call", "short_put", "short_call"), 1
-    ):
+    for idx, role in enumerate(("long_put", "long_call", "short_put", "short_call"), 1):
         result = step(owner, role, str(idx))
         assert result["broker_order_id"] == f"broker-{idx}"
         assert result["state"] == "BROKER_FILLED_OBSERVED"
         assert result["live_entry_allowed"] is False
     assert len(broker.submitted) == 4
-    assert [x["side"] for x in broker.submitted] == [
-        "BUY", "BUY", "SELL", "SELL"
-    ]
-    assert positions.linked_portfolio_broker_state(PARENT)[
-        "broker_portfolio_confirmed"
-    ] is True
+    assert [x["side"] for x in broker.submitted] == ["BUY", "BUY", "SELL", "SELL"]
+    assert (
+        positions.linked_portfolio_broker_state(PARENT)["broker_portfolio_confirmed"]
+        is True
+    )
 
 
 def test_short_before_protective_wings_never_reaches_broker(tmp_path):
