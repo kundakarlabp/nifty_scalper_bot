@@ -8397,9 +8397,9 @@ class OrderManager:
         if not key or not signal or len(signal) > 20 or not signal.isascii():
             raise ValueError("linked_child_signal_identity_invalid")
         plan = self._positions.linked_portfolio_recovery_plan(key)
-        if plan.get("state") != "RESEARCH_NEXT_LEG_ONLY" or plan.get(
-            "next_roles"
-        ) != [role]:
+        stage_ready = plan.get("state") == "RESEARCH_NEXT_LEG_ONLY"
+        role_ready = plan.get("next_roles") == [role]
+        if not stage_ready or not role_ready:
             raise OrderPlacementError(
                 str(plan.get("reason") or "linked_child_broker_gate_closed")
             )
