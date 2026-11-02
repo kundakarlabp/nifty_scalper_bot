@@ -1737,6 +1737,7 @@ class MarketDataManager:
         stage_started = time.perf_counter()
         self._push_bar_to_pipeline(bar)
         duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("closed_bar_pipeline_push", duration_ms)
         if duration_ms >= 50.0:
             self._log_slow_tick_stage(
                 stage="closed_bar_pipeline_push",
@@ -1751,6 +1752,9 @@ class MarketDataManager:
                     cb(dict(bar))
                 finally:
                     duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                    self._record_tick_latency(
+                        "closed_bar_subscriber_callback", duration_ms
+                    )
                     if duration_ms >= 50.0:
                         self._log_slow_tick_stage(
                             stage="closed_bar_subscriber_callback",
@@ -7775,6 +7779,9 @@ class MarketDataManager:
             "one_tick",
             "normalize",
             "candle_engine_on_tick",
+            "bar_projection",
+            "closed_bar_pipeline_push",
+            "closed_bar_subscriber_callback",
             "cache_store",
             "replay_capture",
             "bus_publish",
@@ -9376,7 +9383,17 @@ class MarketDataManager:
                     ),
                     "source": "ws_candle",
                 }
+                stage_started = time.perf_counter()
                 self._refresh_candle_projection(symbol, live_append=True)
+                duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                self._record_tick_latency("bar_projection", duration_ms)
+                if duration_ms >= 50.0:
+                    self._log_slow_tick_stage(
+                        stage="bar_projection",
+                        symbol=symbol,
+                        duration_ms=duration_ms,
+                        source=source_for_timing,
+                    )
                 self._publish_closed_bar(bar)
                 verbose_candles = str(
                     os.getenv("LOG_VERBOSE_CANDLES", "false")
