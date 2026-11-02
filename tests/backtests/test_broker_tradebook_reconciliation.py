@@ -108,6 +108,10 @@ def test_broker_order_reconciliation_excludes_nonterminal_legacy_entries():
         ],
     )
     assert report["completed_ledger_rows"] == 1
+    assert report["incomplete_closed_ledger_rows"] == 1
+    assert report["all_closed_ledger_rows"] == 2
+    assert report["unverified_closed_trade_count"] == 1
+    assert {"trade_id": "incomplete", "fill_verification": "ledger_incomplete"} in report["trades"]
     assert report["fills_verified_trade_count"] == 1
 
 
