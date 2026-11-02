@@ -139,13 +139,19 @@ def summarize_broker_tradebook_reconciliation(
     status_counts: dict[str, int] = defaultdict(int)
     referenced_order_ids: set[str] = set()
     complete_rows = 0
+    incomplete_closed_rows = 0
     for ledger in ledger_rows:
-        if str(ledger.get("state") or "").upper() != "CLOSED" or (
-            ledger.get("ledger_complete") not in (1, True)
-        ):
+        if str(ledger.get("state") or "").upper() != "CLOSED":
+            continue
+        trade_id = str(ledger.get("trade_id") or "")
+        if ledger.get("ledger_complete") not in (1, True):
+            # Do not silently exclude CLOSED historical rows with missing
+            # broker evidence: they remain explicitly unverified, never P&L.
+            incomplete_closed_rows += 1
+            status_counts["ledger_incomplete"] += 1
+            results.append({"trade_id": trade_id, "fill_verification": "ledger_incomplete"})
             continue
         complete_rows += 1
-        trade_id = str(ledger.get("trade_id") or "")
         entry_order_id = str(ledger.get("entry_order_id") or "").strip()
         exit_order_id = str(ledger.get("exit_order_id") or "").strip()
         quantity_value = _valid_number(ledger.get("quantity"))
@@ -198,8 +204,11 @@ def summarize_broker_tradebook_reconciliation(
         "source": "explicit_user_supplied_broker_tradebook_csv",
         "broker_tradebook_fill_rows": len(broker_fills),
         "completed_ledger_rows": complete_rows,
+        "incomplete_closed_ledger_rows": incomplete_closed_rows,
+        "all_closed_ledger_rows": complete_rows + incomplete_closed_rows,
         "fills_verified_trade_count": matched,
         "unverified_completed_trade_count": complete_rows - matched,
+        "unverified_closed_trade_count": complete_rows + incomplete_closed_rows - matched,
         "statuses": dict(sorted(status_counts.items())),
         "trades": results,
         "unreferenced_broker_order_count": len(
