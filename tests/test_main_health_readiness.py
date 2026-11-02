@@ -1148,3 +1148,36 @@ def test_armed_trading_status_does_not_misreport_no_signal_as_order(
         "stage": "SIGNAL_WAITING",
         "reason": "no_valid_strategy_trigger_since_start",
     }
+
+
+def test_trading_status_exposes_last_execution_rejection_without_changing_readiness(
+    monkeypatch,
+):
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rejection = {
+        "timestamp": "2026-11-02T06:30:00+00:00",
+        "symbol": "NFO:NIFTY2681124700CE",
+        "reason": "candidate_basket_generation_changed",
+        "trace_id": "trace-7",
+        "broker_attempted": False,
+    }
+
+    class Runner:
+        def get_status(self):
+            return {"latest_execution_rejection": rejection}
+
+    ctx = _ctx(
+        strategy_runner=Runner(),
+        live_orders_armed=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+    )
+    ctx.live_orders_armed = True
+    ctx.readiness_decision.live_orders_armed = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+    status = main.trading_status()
+
+    assert status["latest_execution_rejection"] == rejection
+    assert status["can_place_live_order_now"] is True
+    assert main._signal_observability(ctx)["latest_execution_rejection"] == rejection

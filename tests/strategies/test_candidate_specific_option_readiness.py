@@ -267,9 +267,8 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
             False, reason, details=dict(details or {})
         )
     )
-    runner._current_active_contract_selection = lambda: SimpleNamespace(
-        selected_ce="NFO:CE", selected_pe="NFO:PE"
-    )
+    # Exercise the real canonical basket contract rather than a partial
+    # selected-only mock that omits generation/token identity.
     snap = _snap(ce_ok, pe_ok)
     runner._option_side_readiness_snapshot = lambda **kwargs: snap
     calls = {"gate": 0}
@@ -783,11 +782,20 @@ def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) 
     assert retry.details["broker_attempted"] is False
 
 
-def test_final_contract_gate_accepts_only_runner_approved_replacement() -> None:
+def test_final_contract_gate_checks_canonical_basket_membership_and_token() -> None:
     runner = object.__new__(StrategyRunner)
     selected_ce = "NFO:NIFTY2681124650CE"
     selected_pe = "NFO:NIFTY2681124650PE"
     replacement = "NFO:NIFTY2681124700CE"
+    runner._logger = _Logger()
+    runner._compute_eval_option_whitelist = lambda *args: set()
+    runner._active_contract_basket = {
+        "selected_ce": selected_ce,
+        "selected_pe": selected_pe,
+        "option_symbols": [selected_ce, selected_pe, replacement],
+        "token_by_symbol": {selected_ce: 1, selected_pe: 2, replacement: 3},
+        "basket_version": "generation-7",
+    }
     runner._market_data = SimpleNamespace(
         _token_by_symbol={selected_ce: 1, selected_pe: 2, replacement: 3}
     )
@@ -800,25 +808,48 @@ def test_final_contract_gate_accepts_only_runner_approved_replacement() -> None:
         ),
     }
 
+    # Near-ATM candidates drawn from the same authoritative generation are
+    # eligible without a replacement-bypass flag.
     assert (
         runner._candidate_contract_mismatch_details(replacement, snapshot=snapshot)
-        is not None
-    )
-    assert (
-        runner._candidate_contract_mismatch_details(
-            replacement,
-            snapshot=snapshot,
-            approved_replacement_symbol=replacement,
-        )
         is None
     )
+    # Even an approved replacement outside the basket must fail closed.
+    outside = "NFO:NIFTY2681124750CE"
     assert (
         runner._candidate_contract_mismatch_details(
-            "NFO:NIFTY2681124750CE",
-            snapshot=snapshot,
-            approved_replacement_symbol=replacement,
+            outside, snapshot=snapshot, approved_replacement_symbol=outside
         )
         is not None
+    )
+    # Token drift after selection is an identity failure, not a quote fallback.
+    runner._market_data._token_by_symbol[replacement] = 99
+    mismatch = runner._candidate_contract_mismatch_details(
+        replacement, snapshot=snapshot, approved_replacement_symbol=replacement
+    )
+    assert mismatch is not None
+    assert mismatch["reason"] == "active_basket_contract_identity_mismatch"
+    assert mismatch["basket_version"] == "generation-7"
+    runner._market_data._token_by_symbol[replacement] = 3
+    runner._active_contract_basket["token_by_symbol"].pop(replacement)
+    assert (
+        runner._candidate_contract_mismatch_details(
+            replacement, snapshot=snapshot, approved_replacement_symbol=replacement
+        )
+        is not None
+    )
+
+
+def test_contract_generation_guard_precedes_order_plan_dispatch() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
+    handler = source[source.index("    def _handle_entry_signal_inner(") :]
+    assert "candidate_contract_generation = (" in handler
+    assert "current_generation != candidate_contract_generation" in handler
+    assert 'reason="candidate_basket_generation_changed"' in handler
+    assert handler.index("current_generation != candidate_contract_generation") < (
+        handler.index("plan = TradePlan(")
     )
 
 
@@ -984,3 +1015,32 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
             "depth_imbalance": 0.28,
         }
     ]
+
+
+def test_latest_terminal_execution_rejection_survives_later_acceptance() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+
+    rejected = runner._emit_signal_execution_result(
+        symbol="NFO:NIFTY2681124700CE",
+        trace_id="trace-rejected",
+        result=SignalExecutionResult(
+            False, "candidate_basket_generation_changed", details={"secret": "omit"}
+        ),
+        broker_attempted=False,
+    )
+    assert rejected is True
+    latest = runner._latest_execution_rejection
+    assert latest["reason"] == "candidate_basket_generation_changed"
+    assert latest["broker_attempted"] is False
+    assert latest["trace_id"] == "trace-rejected"
+    assert "secret" not in latest
+
+    accepted = runner._emit_signal_execution_result(
+        symbol="NFO:NIFTY2681124700CE",
+        trace_id="trace-accepted",
+        result=SignalExecutionResult(True, "submitted", order_id="oid"),
+        broker_attempted=True,
+    )
+    assert accepted is True
+    assert runner._latest_execution_rejection == latest

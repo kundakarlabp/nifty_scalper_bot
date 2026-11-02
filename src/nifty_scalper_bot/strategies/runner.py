@@ -19,6 +19,8 @@ Runtime role:
   _strict_replacement_expiry_block_reason helper before a strict substitution.
 - Rejects changed-contract premium plans whose materialized stop widens beyond
   the selected candidate or lacks finite, same-contract entry/exit geometry.
+- Pins each live candidate decision to one active basket generation and reports
+  the last terminal execution rejection without relaxing quote or risk checks.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -5414,6 +5416,14 @@ class StrategyRunner:
             else bool(details.get("broker_attempted", result.accepted))
         )
         details["broker_attempted"] = attempted
+        if not result.accepted:
+            self._latest_execution_rejection = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": str(symbol),
+                "reason": str(result.reason),
+                "trace_id": str(trace_id) if trace_id else None,
+                "broker_attempted": attempted,
+            }
         self._logger.info(
             "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s "
             "trace_id=%s broker_attempted=%s",
@@ -5783,6 +5793,9 @@ class StrategyRunner:
                 ),
                 "setup_lifecycle": lifecycle,
                 "last_trigger_qualified_age_sec": last_trigger_age,
+                "latest_execution_rejection": getattr(
+                    self, "_latest_execution_rejection", None
+                ),
                 "completed_strategy_evaluations_window": manager_observability.get(
                     "completed_strategy_evaluations_window", {}
                 ),
@@ -10516,14 +10529,61 @@ class StrategyRunner:
     ) -> dict[str, Any] | None:
         if not candidate_symbol or not is_nifty_option_symbol(str(candidate_symbol)):
             return None
-        if approved_replacement_symbol and self._symbol_match_keys(
-            candidate_symbol
-        ) & self._symbol_match_keys(approved_replacement_symbol):
-            return None
+        # An approved replacement is still subject to the current canonical
+        # basket. Approval cannot waive contract membership or token identity.
+        selection = self._current_active_contract_selection()
+        candidate_norm = normalize_symbol(str(candidate_symbol))
+        active_options = {
+            normalize_symbol(str(symbol))
+            for symbol in (
+                *(getattr(selection, "option_symbols", ()) or ()),
+                getattr(selection, "selected_ce", None),
+                getattr(selection, "selected_pe", None),
+            )
+            if symbol
+        }
         snap = snapshot or self._option_side_readiness_snapshot()
         selected = {"CE": snap["CE"], "PE": snap["PE"]}
         candidate_norms = self._symbol_match_keys(candidate_symbol)
         candidate_token = self._candidate_token_for_symbol(candidate_symbol)
+        token_map = {
+            normalize_symbol(str(symbol)): raw
+            for symbol, raw in (getattr(selection, "token_by_symbol", None) or {}).items()
+        }
+        raw_expected_token = token_map.get(candidate_norm)
+        if raw_expected_token is None and candidate_norm == normalize_symbol(
+            str(getattr(selection, "selected_ce", None) or "")
+        ):
+            raw_expected_token = getattr(selection, "selected_ce_token", None)
+        if raw_expected_token is None and candidate_norm == normalize_symbol(
+            str(getattr(selection, "selected_pe", None) or "")
+        ):
+            raw_expected_token = getattr(selection, "selected_pe_token", None)
+        try:
+            expected_token = int(raw_expected_token)
+        except (TypeError, ValueError):
+            expected_token = 0
+        # Option universe entries require a positive canonical token; a missing
+        # or conflicting MDM token is not permission to execute a replacement.
+        if active_options:
+            if (
+                candidate_norm not in active_options
+                or expected_token <= 0
+                or (
+                    candidate_token is not None
+                    and candidate_token != expected_token
+                )
+            ):
+                return {
+                    "candidate_symbol": candidate_symbol,
+                    "reason": "active_basket_contract_identity_mismatch",
+                    "basket_version": getattr(selection, "basket_version", None),
+                    "candidate_token": candidate_token,
+                    "basket_token": expected_token or None,
+                    "selected_ce": getattr(selection, "selected_ce", None),
+                    "selected_pe": getattr(selection, "selected_pe", None),
+                }
+            return None
         for readiness in selected.values():
             if readiness.symbol and candidate_norms & self._symbol_match_keys(
                 readiness.symbol
@@ -18034,6 +18094,14 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
+            # Candidate ranking and final order validation must observe one
+            # immutable active-contract generation, including symbol/token
+            # bindings, not a mix of pre/post-rotation legacy fields.
+            candidate_contract_generation = (
+                self._current_active_contract_selection()
+                if is_live_mode and is_directional_option
+                else None
+            )
             if signal.action == "BUY" and is_directional_option:
                 expiry_blocked, expiry_reason = expiry_theta_block()
                 if expiry_blocked:
@@ -18319,6 +18387,22 @@ class StrategyRunner:
                 valid_snapshots = [
                     snap for snap in candidate_snapshots_obj if isinstance(snap, dict)
                 ]
+                if candidate_contract_generation is not None:
+                    generation_symbols = {
+                        normalize_symbol(str(symbol))
+                        for symbol in (
+                            *candidate_contract_generation.option_symbols,
+                            candidate_contract_generation.selected_ce,
+                            candidate_contract_generation.selected_pe,
+                        )
+                        if symbol
+                    }
+                    valid_snapshots = [
+                        snap
+                        for snap in valid_snapshots
+                        if normalize_symbol(str(snap.get("symbol") or ""))
+                        in generation_symbols
+                    ]
                 if (
                     is_live_mode
                     and is_directional_option
@@ -19592,6 +19676,20 @@ class StrategyRunner:
                 os.getenv("ALLOW_MARKET_ENTRY", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}
             order_symbol = trade_symbol or signal.symbol or base_symbol
+            if candidate_contract_generation is not None:
+                current_generation = self._current_active_contract_selection()
+                if current_generation != candidate_contract_generation:
+                    return _reject_after_dedup(
+                        reason="candidate_basket_generation_changed",
+                        details={
+                            "candidate_basket_version": candidate_contract_generation.basket_version,
+                            "current_basket_version": current_generation.basket_version,
+                            "candidate_selected_ce": candidate_contract_generation.selected_ce,
+                            "candidate_selected_pe": candidate_contract_generation.selected_pe,
+                            "current_selected_ce": current_generation.selected_ce,
+                            "current_selected_pe": current_generation.selected_pe,
+                        },
+                    )
             readiness_snapshot = self._option_side_readiness_snapshot()
             contract_mismatch = self._candidate_contract_mismatch_details(
                 order_symbol,
@@ -19672,9 +19770,10 @@ class StrategyRunner:
             except Exception:
                 _resolved_lot_size = 0
             _basket = getattr(self, "_active_contract_basket", None) or {}
-            _selection = None
-            with suppress(Exception):
-                _selection = active_contract_selection_from_basket(_basket)
+            _selection = candidate_contract_generation
+            if _selection is None:
+                with suppress(Exception):
+                    _selection = active_contract_selection_from_basket(_basket)
             if _selection is not None:
                 _basket_version = getattr(_selection, "basket_version", None)
                 _contract_expiry = getattr(_selection, "expiry", None)
@@ -19875,6 +19974,21 @@ class StrategyRunner:
                 mode_snapshot.paper_enabled,
                 mode_snapshot.shadow_mode_enabled,
             )
+            # The basket may rotate while the plan is being materialized.
+            # Recheck immediately before handing the request to OrderManager;
+            # broker-time contract validation still remains authoritative.
+            if candidate_contract_generation is not None:
+                before_submit_generation = self._current_active_contract_selection()
+                if before_submit_generation != candidate_contract_generation:
+                    return _reject_after_dedup(
+                        reason="candidate_basket_generation_changed",
+                        details={
+                            "stage": "before_submit",
+                            "candidate_basket_version": candidate_contract_generation.basket_version,
+                            "current_basket_version": before_submit_generation.basket_version,
+                            "order_symbol": order_symbol,
+                        },
+                    )
             submit_result_fn = getattr(
                 self._order_manager, "submit_trade_plan_result", None
             )
