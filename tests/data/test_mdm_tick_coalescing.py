@@ -2381,3 +2381,33 @@ def test_tick_latency_percentiles_include_fast_ticks_and_are_bounded():
     assert measurements["max_ms"] == 599.0
     mdm._record_tick_latency("one_tick", float("nan"))
     assert mdm._tick_latency_percentiles()["one_tick"] == measurements
+
+
+def test_ws_recovery_missing_required_subscription_is_not_false_success(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    future = "NFO:NIFTY26JUNFUT"
+    selected_ce = "NFO:NIFTY26JUN24000CE"
+    mdm._ws_restart_inflight = True
+    mdm._ws_restart_state = "waiting_for_first_ticks"
+    mdm._ws_restart_started_at = now - 1
+    mdm._ws_restart_deadline_mono = now + 4
+    mdm._ws_restart_diagnostics = {
+        "required_symbols": [future, selected_ce]
+    }
+    mdm._ws_restart_affected = {future: 4}
+    mdm._ws_restart_unresolved_tokens = set()
+    mdm._desired_tokens = {4}
+    mdm._dispatched_subscriptions = {4}
+    mdm._confirmed_subscriptions = {4}
+    mdm._symbol_subscription_generation[future] = 7
+    mdm._symbol_first_tick_generation[future] = 7
+    mdm._last_valid_live_tick_mono[future] = now
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+
+    result = mdm.verify_websocket_recovery(now_mono=now)
+
+    assert result["ok"] is False
+    assert result["missing_current_generation_ticks"] == [selected_ce]
+    assert result["state"] == "waiting_for_first_ticks"
