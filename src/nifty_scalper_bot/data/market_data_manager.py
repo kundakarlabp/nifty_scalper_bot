@@ -7721,7 +7721,11 @@ class MarketDataManager:
 
     def _record_tick_latency(self, stage: str, duration_ms: float) -> None:
         """Capture bounded all-tick stage durations; slow warnings remain separate."""
-        if not math.isfinite(duration_ms) or duration_ms < 0:
+        if (
+            not math.isfinite(duration_ms)
+            or duration_ms < 0
+            or not hasattr(self, "_tick_latency_lock")
+        ):
             return
         with self._tick_latency_lock:
             samples = self._tick_latency_samples.setdefault(
@@ -7731,6 +7735,8 @@ class MarketDataManager:
 
     def _tick_latency_percentiles(self) -> dict[str, dict[str, float | int]]:
         """Return nearest-rank p50/p95/p99 over bounded recent observations."""
+        if not hasattr(self, "_tick_latency_lock"):
+            return {}
         with self._tick_latency_lock:
             snapshots = {
                 stage: sorted(samples)
