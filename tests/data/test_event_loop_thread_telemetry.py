@@ -182,7 +182,7 @@ def test_periodic_tick_latency_summary_uses_real_all_tick_samples(caplog) -> Non
     mdm = _mdm()
     for count in range(29):
         mdm._record_tick_latency("worker_await", float(count + 1))
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
         mdm._log_tick_latency_summary()
     assert not any(
         getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
@@ -193,8 +193,9 @@ def test_periodic_tick_latency_summary_uses_real_all_tick_samples(caplog) -> Non
     mdm._record_tick_latency("one_tick", 11.0)
     mdm._record_tick_latency("candle_engine_on_tick", 3.0)
     mdm._record_tick_latency("tick_publication", 7.0)
+    assert mdm._tick_latency_percentiles()["worker_await"]["samples"] == 30
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
         mdm._log_tick_latency_summary()
     records = [
         record
