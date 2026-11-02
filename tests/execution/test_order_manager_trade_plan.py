@@ -915,7 +915,8 @@ def test_entry_gate_pre_broker_telemetry_does_not_claim_attempt(monkeypatch) -> 
 
 
 def test_gate_to_created_order_to_partial_fill_uses_effective_quantity(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ) -> None:
     """END-TO-END PR1 PROOF: 130 requested -> gate approves 65 -> the REAL
     managed-order path creates the operative OrderDetails with 65 -> the REAL
