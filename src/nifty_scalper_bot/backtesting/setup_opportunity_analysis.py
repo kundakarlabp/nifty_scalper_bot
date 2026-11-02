@@ -244,9 +244,11 @@ def summarize_contextual_label_coverage(
     groups: dict[tuple[str, str], list[CanonicalSetupOpportunity]] = defaultdict(list)
     for item in opportunities:
         context = item.research_context
-        hour = datetime.fromtimestamp(
-            item.first_seen_ts, timezone.utc
-        ).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H")
+        hour = (
+            datetime.fromtimestamp(item.first_seen_ts, timezone.utc)
+            .astimezone(ZoneInfo("Asia/Kolkata"))
+            .strftime("%H")
+        )
         fields = {
             "strategy": item.strategy,
             "regime": item.regime or "UNKNOWN",
@@ -272,26 +274,31 @@ def summarize_contextual_label_coverage(
             if math.isfinite(observation):
                 labelled.append((item, observation))
         enough = len(labelled) >= min_labelled
-        results.append({
-            "dimension": dimension,
-            "value": value,
-            "unique_setups": len(items),
-            "labelled_setups": len(labelled),
-            "unlabelled_setups": len(items) - len(labelled),
-            "approved_labelled": sum(item.approved for item, _ in labelled),
-            "blocked_labelled": sum(not item.approved for item, _ in labelled),
-            "label_coverage_fraction": round(
-                len(labelled) / len(items), 4
-            ) if items else 0.0,
-            "mean_post_cost_r": round(
-                sum(label for _, label in labelled) / len(labelled), 6
-            ) if enough else None,
-            "descriptive_only": True,
-            "reason": (
-                "descriptive_only_no_causal_gate_effect_claim"
-                if enough else "insufficient_independent_post_cost_labels"
-            ),
-        })
+        results.append(
+            {
+                "dimension": dimension,
+                "value": value,
+                "unique_setups": len(items),
+                "labelled_setups": len(labelled),
+                "unlabelled_setups": len(items) - len(labelled),
+                "approved_labelled": sum(item.approved for item, _ in labelled),
+                "blocked_labelled": sum(not item.approved for item, _ in labelled),
+                "label_coverage_fraction": (
+                    round(len(labelled) / len(items), 4) if items else 0.0
+                ),
+                "mean_post_cost_r": (
+                    round(sum(label for _, label in labelled) / len(labelled), 6)
+                    if enough
+                    else None
+                ),
+                "descriptive_only": True,
+                "reason": (
+                    "descriptive_only_no_causal_gate_effect_claim"
+                    if enough
+                    else "insufficient_independent_post_cost_labels"
+                ),
+            }
+        )
     return {
         "basis": "unique_setup_identity_not_repeated_votes",
         "source": "independently_supplied_post_cost_labels",
