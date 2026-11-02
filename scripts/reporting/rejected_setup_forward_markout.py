@@ -70,9 +70,7 @@ def observed_markout(
             "mfe_markout_pct": round(100 * (high_bid / entry_ask - 1), 5),
             "mae_markout_pct": round(100 * (low_bid / entry_ask - 1), 5),
             "forward_quote_count": len(forward),
-            "entry_quote_age_seconds": round(
-                decision_ts - timestamps[previous], 3
-            ),
+            "entry_quote_age_seconds": round(decision_ts - timestamps[previous], 3),
             "terminal_quote_age_seconds": round(
                 decision_ts + horizon_s - terminal_at, 3
             ),
@@ -193,9 +191,7 @@ def summarize_groups(
                 "independent_setups": len(observations),
                 "labelled": len(valid),
                 "unlabelled": len(observations) - len(valid),
-                "label_coverage_fraction": round(
-                    len(valid) / len(observations), 4
-                ),
+                "label_coverage_fraction": round(len(valid) / len(observations), 4),
                 "mean_gross_markout_pct": (
                     round(statistics.mean(valid), 5) if sufficient else None
                 ),
