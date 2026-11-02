@@ -11,6 +11,12 @@ CE = "NFO:NIFTY26AUG25000CE"
 PE = "NFO:NIFTY26AUG25000PE"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_release_control_path(monkeypatch, tmp_path) -> None:
+    """Never inspect production release-hold files in readiness unit tests."""
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
+
+
 class _MDM:
     _subscribed_tokens = {11, 12}
     _confirmed_subscriptions = {11, 12}
