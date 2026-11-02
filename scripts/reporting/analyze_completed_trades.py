@@ -449,9 +449,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         gate_report = summarize_gate_effectiveness(gate_rows)
         report["contextual_counterfactual_coverage"] = (
-            summarize_contextual_label_coverage(
-                setup_opportunities, outcome_labels
-            )
+            summarize_contextual_label_coverage(setup_opportunities, outcome_labels)
         )
         report["gate_effectiveness"] = {
             **asdict(gate_report),
