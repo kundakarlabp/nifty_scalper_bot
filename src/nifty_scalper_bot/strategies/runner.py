@@ -3935,8 +3935,8 @@ class StrategyRunner:
         self, selection: ActiveContractSelection
     ) -> None:
         """Synchronize legacy runner selected fields only from active basket SSOT."""
-        new_ce = normalize_symbol(str(getattr(selection, "selected_ce", None) or "")) or None
-        new_pe = normalize_symbol(str(getattr(selection, "selected_pe", None) or "")) or None
+        new_ce = normalize_symbol(str(selection.selected_ce or "")) or None
+        new_pe = normalize_symbol(str(selection.selected_pe or "")) or None
         if not (new_ce or new_pe):
             return
         old_ce = getattr(self, "_active_selected_ce", None)
@@ -10552,11 +10552,11 @@ class StrategyRunner:
         }
         raw_expected_token = token_map.get(candidate_norm)
         if raw_expected_token is None and candidate_norm == normalize_symbol(
-            str(selection.selected_ce or "")
+            str(getattr(selection, "selected_ce", None) or "")
         ):
             raw_expected_token = getattr(selection, "selected_ce_token", None)
         if raw_expected_token is None and candidate_norm == normalize_symbol(
-            str(selection.selected_pe or "")
+            str(getattr(selection, "selected_pe", None) or "")
         ):
             raw_expected_token = getattr(selection, "selected_pe_token", None)
         try:
