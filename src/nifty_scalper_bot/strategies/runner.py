@@ -3935,8 +3935,8 @@ class StrategyRunner:
         self, selection: ActiveContractSelection
     ) -> None:
         """Synchronize legacy runner selected fields only from active basket SSOT."""
-        new_ce = normalize_symbol(str(selection.selected_ce or "")) or None
-        new_pe = normalize_symbol(str(selection.selected_pe or "")) or None
+        new_ce = normalize_symbol(str(getattr(selection, "selected_ce", None) or "")) or None
+        new_pe = normalize_symbol(str(getattr(selection, "selected_pe", None) or "")) or None
         if not (new_ce or new_pe):
             return
         old_ce = getattr(self, "_active_selected_ce", None)
@@ -10536,9 +10536,9 @@ class StrategyRunner:
         active_options = {
             normalize_symbol(str(symbol))
             for symbol in (
-                *selection.option_symbols,
-                selection.selected_ce,
-                selection.selected_pe,
+                *(getattr(selection, "option_symbols", ()) or ()),
+                getattr(selection, "selected_ce", None),
+                getattr(selection, "selected_pe", None),
             )
             if symbol
         }
@@ -10548,17 +10548,17 @@ class StrategyRunner:
         candidate_token = self._candidate_token_for_symbol(candidate_symbol)
         token_map = {
             normalize_symbol(str(symbol)): raw
-            for symbol, raw in (selection.token_by_symbol or {}).items()
+            for symbol, raw in (getattr(selection, "token_by_symbol", None) or {}).items()
         }
         raw_expected_token = token_map.get(candidate_norm)
         if raw_expected_token is None and candidate_norm == normalize_symbol(
             str(selection.selected_ce or "")
         ):
-            raw_expected_token = selection.selected_ce_token
+            raw_expected_token = getattr(selection, "selected_ce_token", None)
         if raw_expected_token is None and candidate_norm == normalize_symbol(
             str(selection.selected_pe or "")
         ):
-            raw_expected_token = selection.selected_pe_token
+            raw_expected_token = getattr(selection, "selected_pe_token", None)
         try:
             expected_token = int(raw_expected_token)
         except (TypeError, ValueError):
@@ -10577,11 +10577,11 @@ class StrategyRunner:
                 return {
                     "candidate_symbol": candidate_symbol,
                     "reason": "active_basket_contract_identity_mismatch",
-                    "basket_version": selection.basket_version,
+                    "basket_version": getattr(selection, "basket_version", None),
                     "candidate_token": candidate_token,
                     "basket_token": expected_token or None,
-                    "selected_ce": selection.selected_ce,
-                    "selected_pe": selection.selected_pe,
+                    "selected_ce": getattr(selection, "selected_ce", None),
+                    "selected_pe": getattr(selection, "selected_pe", None),
                 }
             return None
         for readiness in selected.values():
