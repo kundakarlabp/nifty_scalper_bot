@@ -152,7 +152,9 @@ def summarize_broker_tradebook_reconciliation(
             # broker evidence: they remain explicitly unverified, never P&L.
             incomplete_closed_rows += 1
             status_counts["ledger_incomplete"] += 1
-            results.append({"trade_id": trade_id, "fill_verification": "ledger_incomplete"})
+            results.append(
+                {"trade_id": trade_id, "fill_verification": "ledger_incomplete"}
+            )
             continue
         complete_rows += 1
         entry_order_id = str(ledger.get("entry_order_id") or "").strip()
@@ -211,7 +213,9 @@ def summarize_broker_tradebook_reconciliation(
         "all_closed_ledger_rows": complete_rows + incomplete_closed_rows,
         "fills_verified_trade_count": matched,
         "unverified_completed_trade_count": complete_rows - matched,
-        "unverified_closed_trade_count": complete_rows + incomplete_closed_rows - matched,
+        "unverified_closed_trade_count": (
+            complete_rows + incomplete_closed_rows - matched
+        ),
         "statuses": dict(sorted(status_counts.items())),
         "trades": results,
         "unreferenced_broker_order_count": len(
