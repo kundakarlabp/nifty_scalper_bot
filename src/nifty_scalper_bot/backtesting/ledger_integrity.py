@@ -2,6 +2,8 @@
 
 This report does not reconcile against broker orders, balances or contract notes;
 non-terminal historical rows are never interpreted as current open positions.
+Names and evidence deficits of bounded incomplete CLOSED trade samples are
+reported without inventing net P&L or broker positions.
 """
 
 from __future__ import annotations
