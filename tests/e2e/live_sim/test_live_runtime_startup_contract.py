@@ -653,15 +653,25 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             "all_tokens": list(basket.all_tokens),
             "token_by_symbol": dict(basket.token_by_symbol),
         }
-        selected_ce, selected_pe = (
-            core_app._commit_active_dynamic_basket(  # noqa: SLF001 - production app commit helper
+
+        # The live application commits a basket on its owning running loop.
+        # Do the same in the simulation: context history hydration can spawn
+        # asynchronous tasks, which must not bind MDM to another loop.
+        async def _commit_basket_on_runtime_loop() -> tuple[str | None, str | None]:
+            assert asyncio.get_running_loop() is loop
+            return core_app._commit_active_dynamic_basket(  # noqa: SLF001
                 ctx,
                 basket=basket_dict,
                 option_symbols=list(basket.option_symbols),
                 symbols=list(basket.all_symbols),
                 atm_strike=basket.atm_strike,
             )
+
+        selected_ce, selected_pe = loop.run_until_complete(
+            _commit_basket_on_runtime_loop()
         )
+        history_owner = ctx.market_data_manager._canonical_history_event_loop
+        assert history_owner is None or history_owner is loop
         assert selected_ce == basket.selected_ce
         assert selected_pe == basket.selected_pe
 
