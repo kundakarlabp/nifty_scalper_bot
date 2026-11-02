@@ -15,7 +15,6 @@ import bisect
 import json
 import math
 import statistics
-import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
