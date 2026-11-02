@@ -3,6 +3,8 @@
 Accept an explicitly exported Kite tradebook CSV. This is not a live broker
 connection, account-position check, or final contract-note charge authority.
 Only exact entry/exit order-ID matches are eligible for fill verification.
+Historical CLOSED rows with incomplete ledger evidence are counted explicitly as
+unverified and cannot become broker-reconciled P&L.
 """
 
 from __future__ import annotations
