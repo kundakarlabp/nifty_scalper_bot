@@ -19974,6 +19974,21 @@ class StrategyRunner:
                 mode_snapshot.paper_enabled,
                 mode_snapshot.shadow_mode_enabled,
             )
+            # The basket may rotate while the plan is being materialized.
+            # Recheck immediately before handing the request to OrderManager;
+            # broker-time contract validation still remains authoritative.
+            if candidate_contract_generation is not None:
+                before_submit_generation = self._current_active_contract_selection()
+                if before_submit_generation != candidate_contract_generation:
+                    return _reject_after_dedup(
+                        reason="candidate_basket_generation_changed",
+                        details={
+                            "stage": "before_submit",
+                            "candidate_basket_version": candidate_contract_generation.basket_version,
+                            "current_basket_version": before_submit_generation.basket_version,
+                            "order_symbol": order_symbol,
+                        },
+                    )
             submit_result_fn = getattr(
                 self._order_manager, "submit_trade_plan_result", None
             )
