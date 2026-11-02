@@ -7776,6 +7776,7 @@ class MarketDataManager:
             return
         stages = (
             "worker_await",
+            "worker_dispatch_wait",
             "one_tick",
             "normalize",
             "candle_engine_on_tick",
@@ -7920,6 +7921,23 @@ class MarketDataManager:
         drain_started = time.monotonic()
         awaited_worker_s = 0.0
         processed_in_invocation = 0
+
+        def _run_tick_on_worker(
+            tick_payload: dict[str, Any], scheduled_at: float
+        ) -> None:
+            # Worker-await wall time also includes default-executor queueing.
+            # This measurement starts on the actual worker thread, before the
+            # indivisible tick is processed; order and ownership are unchanged.
+            dispatch_wait_ms = (time.perf_counter() - scheduled_at) * 1000.0
+            self._record_tick_latency("worker_dispatch_wait", dispatch_wait_ms)
+            if dispatch_wait_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="worker_dispatch_wait",
+                    symbol=str(tick_payload.get("symbol") or "") or None,
+                    duration_ms=dispatch_wait_ms,
+                    source=str(tick_payload.get("source") or "ws"),
+                )
+            self._process_queued_tick(tick_payload)
         with self._pending_tick_lock:
             self._tick_active_drains += 1
             self._tick_max_active_drains = max(
@@ -7937,8 +7955,11 @@ class MarketDataManager:
                         # out through DataHub/Runner. Keep strict serial order,
                         # but move that indivisible work off the asyncio owner.
                         worker_started = time.monotonic()
+                        worker_scheduled_at = time.perf_counter()
                         try:
-                            await asyncio.to_thread(self._process_queued_tick, raw)
+                            await asyncio.to_thread(
+                                _run_tick_on_worker, raw, worker_scheduled_at
+                            )
                         finally:
                             # This is time suspended awaiting a worker, NOT
                             # proof that the owner event loop was blocked.
