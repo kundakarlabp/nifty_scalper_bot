@@ -7,6 +7,8 @@ and provide explicit startup/shutdown management.
 Health also reports effective, read-only canonical risk settings and a safe
 allowlisted summary of the actual loaded runtime strategy profile.
 Health labels separate execution permission from observed signal pipeline activity.
+Read-only status unifies source-owned per-symbol feed proof, tick percentiles,
+strategy evidence, risk readiness, and last historical execution rejection.
 Key interfaces: lifespan, livez, readyz and trading/status handlers.
 Boundaries: This HTTP shell does not own market direction, risk or order policy;
 core/app.py orchestrates the trading components.
@@ -1101,6 +1103,12 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     mdm = getattr(ctx, "market_data_manager", None)
     stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
     tick_pressure = stats_fn() if callable(stats_fn) else {}
+    feed_health_fn = getattr(mdm, "trading_feed_health", None)
+    try:
+        feed_health = feed_health_fn() if callable(feed_health_fn) else {}
+    except Exception as exc:
+        LOG.warning("Trading feed-health status unavailable: %s", type(exc).__name__)
+        feed_health = {"diagnostic_error": "feed_health_unavailable"}
     history = {
         "required_execution_bars": required,
         "ce": _symbol_bar_counts(ctx, selected_ce),
@@ -1144,8 +1152,69 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         **broker_status,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
         "tick_pressure": tick_pressure,
+        "trading_feed_health": feed_health,
         "install_proof": build_runtime_install_proof(ctx),
         "build_sha": STARTUP_BUILD_SHA,
+    }
+
+
+def _readiness_rejection_timeline(
+    structured: dict[str, Any],
+    signals: dict[str, Any],
+    *,
+    live_orders_armed: bool,
+) -> dict[str, Any]:
+    """As-of snapshot of canonical stages plus last terminal execution rejection.
+
+    Entries are not a simulated event history. The terminal rejection has
+    its own occurrence time and must never override CURRENT readiness.
+    """
+    from datetime import datetime, timezone
+
+    feed = structured.get("trading_feed_health") or {}
+    state = structured.get("state") or {}
+    risk = structured.get("effective_risk_policy") or {}
+    rejection = signals.get("latest_execution_rejection")
+    return {
+        "basis": "current_stage_snapshot_plus_historical_last_rejection",
+        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "stages": [
+            {
+                "stage": "data",
+                "ready": feed.get("trading_feed_healthy"),
+                "symbol_evidence": feed.get("required_symbol_readiness") or {},
+                "stale_required_symbols": feed.get("stale_required_symbols") or [],
+                "recovery_active": feed.get("required_symbol_recovery_active"),
+                "latency_percentiles_ms": (
+                    (structured.get("tick_pressure") or {}).get(
+                        "tick_latency_percentiles", {}
+                    )
+                ),
+            },
+            {
+                "stage": "strategy",
+                "last_eval_age_sec": signals.get("last_eval_age_sec"),
+                "candidate_generated_since_start": signals.get(
+                    "candidate_generated_count"
+                ),
+                "approved_since_start": signals.get("approved_candidate_count"),
+                "setup_lifecycle": signals.get("setup_lifecycle") or {},
+            },
+            {
+                "stage": "risk",
+                "capacity_ready": state.get("execution_capacity_ready"),
+                "policy_known": risk.get("known"),
+                "minimum_lot_affordability": (
+                    structured.get("minimum_lot_affordability") or {}
+                ),
+            },
+            {
+                "stage": "execution",
+                "live_orders_armed": bool(live_orders_armed),
+                "latest_rejection": rejection,
+                "latest_rejection_is_historical": True,
+            },
+        ],
     }
 
 
@@ -1311,6 +1380,11 @@ def health_trading():
                 ),
             },
             "signal_observability": signal_observability,
+            "readiness_rejection_timeline": _readiness_rejection_timeline(
+                structured_status,
+                signal_observability,
+                live_orders_armed=live_orders_armed and not blockers,
+            ),
             "no_trade_diagnostics": no_trade_diagnostics,
             "trade_pipeline_state": trade_pipeline_state,
             "live_order_readiness": live_order_readiness,
@@ -1439,6 +1513,11 @@ def trading_status():
         "will_trade": can_place_live_order_now,
         "will_trade_semantics": "execution_permission_only_not_signal_or_order",
         "trade_pipeline_state": trade_pipeline_state,
+        "readiness_rejection_timeline": _readiness_rejection_timeline(
+            structured,
+            signal_observability,
+            live_orders_armed=can_place_live_order_now,
+        ),
         # Historical terminal rejection evidence, not a current readiness veto.
         "latest_execution_rejection": signal_observability.get(
             "latest_execution_rejection"

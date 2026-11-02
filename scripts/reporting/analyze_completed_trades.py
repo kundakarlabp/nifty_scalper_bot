@@ -34,6 +34,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
 )
 from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (  # noqa: E402
     canonicalize_setup_opportunities,
+    summarize_contextual_label_coverage,
 )
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
@@ -447,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
             if item.opportunity_id in outcome_labels
         ]
         gate_report = summarize_gate_effectiveness(gate_rows)
+        report["contextual_counterfactual_coverage"] = (
+            summarize_contextual_label_coverage(setup_opportunities, outcome_labels)
+        )
         report["gate_effectiveness"] = {
             **asdict(gate_report),
             "label_coverage_fraction": (

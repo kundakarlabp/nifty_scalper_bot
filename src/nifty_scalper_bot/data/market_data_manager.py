@@ -7,6 +7,8 @@ Runtime role:
 - Fans ticks out to subscribers via the message bus.
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
+- Verifies reconnect from fresh current-generation required-symbol WS receipts;
+  exports bounded tick processing latency percentiles without changing ordering.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -649,6 +651,10 @@ class MarketDataManager:
         self._tick_processed_total = 0
         self._tick_dropped_total = 0
         self._slow_tick_stage_stats: dict[str, dict[str, Any]] = {}
+        # Sample every processed tick, not just >50/100ms warnings; bounded,
+        # thread-safe telemetry from the existing serial tick worker.
+        self._tick_latency_lock = threading.Lock()
+        self._tick_latency_samples: dict[str, deque[float]] = {}
         self._tick_coalesced_by_priority: dict[str, int] = defaultdict(int)
         self._tick_dropped_by_reason: dict[str, int] = defaultdict(int)
         self._tick_dropped_by_priority: dict[str, int] = defaultdict(int)
@@ -7713,6 +7719,39 @@ class MarketDataManager:
             return f"{module}.{cls_name}.{leaf}"
         return f"{module}.{name}"
 
+    def _record_tick_latency(self, stage: str, duration_ms: float) -> None:
+        """Capture bounded all-tick stage durations; slow warnings remain separate."""
+        if (
+            not math.isfinite(duration_ms)
+            or duration_ms < 0
+            or not hasattr(self, "_tick_latency_lock")
+        ):
+            return
+        with self._tick_latency_lock:
+            samples = self._tick_latency_samples.setdefault(stage, deque(maxlen=512))
+            samples.append(float(duration_ms))
+
+    def _tick_latency_percentiles(self) -> dict[str, dict[str, float | int]]:
+        """Return nearest-rank p50/p95/p99 over bounded recent observations."""
+        if not hasattr(self, "_tick_latency_lock"):
+            return {}
+        with self._tick_latency_lock:
+            snapshots = {
+                stage: sorted(samples)
+                for stage, samples in self._tick_latency_samples.items()
+                if samples
+            }
+        return {
+            stage: {
+                "samples": len(values),
+                "p50_ms": round(values[math.ceil(0.50 * len(values)) - 1], 3),
+                "p95_ms": round(values[math.ceil(0.95 * len(values)) - 1], 3),
+                "p99_ms": round(values[math.ceil(0.99 * len(values)) - 1], 3),
+                "max_ms": round(values[-1], 3),
+            }
+            for stage, values in snapshots.items()
+        }
+
     def _log_slow_tick_stage(
         self,
         *,
@@ -7848,7 +7887,9 @@ class MarketDataManager:
                         finally:
                             # This is time suspended awaiting a worker, NOT
                             # proof that the owner event loop was blocked.
-                            awaited_worker_s += time.monotonic() - worker_started
+                            worker_ms = (time.monotonic() - worker_started) * 1000.0
+                            awaited_worker_s += worker_ms / 1000.0
+                            self._record_tick_latency("worker_await", worker_ms)
                         self._tick_processed_total += 1
                         processed_in_invocation += 1
                     except asyncio.CancelledError:
@@ -8067,6 +8108,7 @@ class MarketDataManager:
                 "coalesced_by_priority": dict(self._tick_coalesced_by_priority),
                 "dropped_by_reason": dict(self._tick_dropped_by_reason),
                 "dropped_by_priority": dict(self._tick_dropped_by_priority),
+                "tick_latency_percentiles": self._tick_latency_percentiles(),
                 "slow_tick_stages": {
                     key: dict(value)
                     for key, value in self._slow_tick_stage_stats.items()
@@ -8980,6 +9022,7 @@ class MarketDataManager:
             stage_started = time.perf_counter()
             raw = self._normalize_ws_tick(raw)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            self._record_tick_latency("normalize", duration_ms)
             if duration_ms >= 50.0:
                 self._log_slow_tick_stage(
                     stage="normalize",
@@ -9114,6 +9157,7 @@ class MarketDataManager:
             else:
                 candle = engine.on_tick(tick)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            self._record_tick_latency("candle_engine_on_tick", duration_ms)
             if duration_ms >= 50.0:
                 self._log_slow_tick_stage(
                     stage="candle_engine_on_tick",
@@ -9191,6 +9235,7 @@ class MarketDataManager:
             stage_started = time.perf_counter()
             self._ingest_normalized_tick(normalized_live)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
+            self._record_tick_latency("tick_publication", duration_ms)
             if duration_ms >= 50.0:
                 self._log_slow_tick_stage(
                     stage="tick_publication",
@@ -9307,6 +9352,7 @@ class MarketDataManager:
         finally:
             try:
                 tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
+                self._record_tick_latency("one_tick", tick_duration_ms)
                 if tick_duration_ms >= 100.0:
                     self._log_slow_tick_stage(
                         stage="one_tick",
@@ -11194,6 +11240,13 @@ class MarketDataManager:
             self._ws_restart_fail_reason = None
             self._ws_restart_diagnostics = {
                 "restart_generation": self._ws_restart_generation,
+                # A required symbol absent from desired subscriptions is
+                # unresolved, not silently omitted from the recovery proof.
+                "required_symbols": sorted(
+                    self._required_live_symbols()
+                    if getattr(self, "_active_contract_basket", None)
+                    else set(affected)
+                ),
                 "initiator": "mdm_zombie_watchdog",
                 "reason": "transport_failure",
                 "started_at": now,
@@ -11307,6 +11360,8 @@ class MarketDataManager:
             state = self._ws_restart_state
             inflight = self._ws_restart_inflight
             fail_reason = self._ws_restart_fail_reason
+            restart_diagnostics = getattr(self, "_ws_restart_diagnostics", {})
+            required_proof = tuple(restart_diagnostics.get("required_symbols", ()))
             if state == "failed":
                 return {
                     "ok": False,
@@ -11321,7 +11376,9 @@ class MarketDataManager:
                     "dispatch_attempted": False,
                     "affected_symbols": sorted(affected),
                     "unresolved_tokens": sorted(unresolved),
-                    "missing_current_generation_ticks": sorted(affected),
+                    "missing_current_generation_ticks": sorted(
+                        required_proof or affected
+                    ),
                 }
             with self._lock:
                 desired = set(self._desired_tokens)
@@ -11330,19 +11387,33 @@ class MarketDataManager:
                 sub_generations = dict(self._symbol_subscription_generation)
                 tick_generations = dict(self._symbol_first_tick_generation)
                 tick_monos = dict(self._last_valid_live_tick_mono)
+                token_reader = self._current_symbol_token_locked
+                current_tokens = {symbol: token_reader(symbol) for symbol in affected}
         dispatch_attempted = desired <= dispatched if desired else True
         affected_ready = True
         missing_ticks: list[str] = []
-        for symbol, token in affected.items():
+        required_set = set(required_proof or affected)
+        for symbol in sorted(required_set):
+            token = affected.get(symbol)
             sub_gen = sub_generations.get(symbol)
             tick_gen = tick_generations.get(symbol)
+            receipt_mono = tick_monos.get(symbol)
+            started_mono = float(self._ws_restart_started_at or 0.0)
+            timeout_seconds = float(self._ws_recovery_timeout_sec or 15.0)
+            receipt_fresh = (
+                receipt_mono is not None
+                and receipt_mono >= started_mono
+                and 0.0 <= now_value - receipt_mono <= timeout_seconds
+            )
             has_tick = (
-                token in desired
+                token is not None
+                and token in desired
                 and token in confirmed
                 and sub_gen is not None
                 and tick_gen is not None
-                and tick_gen >= sub_gen
-                and tick_monos.get(symbol) is not None
+                and tick_gen == sub_gen
+                and current_tokens.get(symbol) == token
+                and receipt_fresh
             )
             if not has_tick:
                 affected_ready = False
@@ -11402,6 +11473,7 @@ class MarketDataManager:
             "affected_symbols": sorted(affected),
             "unresolved_tokens": sorted(unresolved),
             "missing_current_generation_ticks": missing_ticks,
+            "required_symbols_proof": sorted(required_set),
         }
 
     def _start_rest_poll(self) -> None:

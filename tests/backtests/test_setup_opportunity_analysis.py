@@ -364,3 +364,39 @@ def test_unattributed_strategy_or_side_is_not_assigned_fake_setup() -> None:
     missing_side["direction"] = ""
     missing_side["meta"]["research_context"].pop("contract_side")
     assert canonicalize_setup_opportunities([missing_strategy, missing_side]) == ()
+
+
+def test_contextual_counterfactual_strata_count_unique_setup_not_repeated_votes():
+    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        summarize_contextual_label_coverage,
+    )
+
+    repeated = [
+        _decision("2026-11-02T04:10:00Z", setup_id="setup-1"),
+        _decision("2026-11-02T04:10:05Z", setup_id="setup-1"),
+        _decision("2026-11-02T04:11:00Z", setup_id="setup-2"),
+    ]
+    repeated[2]["meta"]["research_context"]["volatility_regime"] = "HIGH"
+    opportunities = canonicalize_setup_opportunities(repeated)
+    assert len(opportunities) == 2
+    labels = {item.opportunity_id: float(n + 1) for n, item in enumerate(opportunities)}
+    report = summarize_contextual_label_coverage(opportunities, labels, min_labelled=2)
+    strategy = next(
+        item for item in report["strata"] if item["dimension"] == "strategy"
+    )
+    assert strategy["unique_setups"] == 2
+    assert strategy["labelled_setups"] == 2
+    assert strategy["mean_post_cost_r"] == 1.5
+    assert report["causal_gate_effect_verified"] is False
+
+    missing = summarize_contextual_label_coverage(
+        opportunities,
+        {opportunities[0].opportunity_id: -0.2},
+        min_labelled=2,
+    )
+    partial = next(
+        item for item in missing["strata"] if item["dimension"] == "strategy"
+    )
+    assert partial["labelled_setups"] == 1
+    assert partial["unlabelled_setups"] == 1
+    assert partial["mean_post_cost_r"] is None

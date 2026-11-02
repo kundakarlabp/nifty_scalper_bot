@@ -2292,3 +2292,118 @@ def test_missing_required_option_first_tick_reasserts_ws_once(monkeypatch) -> No
     mdm._check_zombie_ticks()
     assert sent == [missing]
     assert fallback == [missing, missing]
+
+
+def test_ws_recovery_requires_all_critical_generation_receipts_not_unrelated_options(
+    monkeypatch,
+):
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    now = time.monotonic()
+    mdm._ws_restart_generation = 7
+    mdm._ws_restart_state = "waiting_for_first_ticks"
+    mdm._ws_restart_inflight = True
+    mdm._ws_restart_started_at = now - 2.0
+    mdm._ws_restart_deadline_mono = now + 4.0
+    mdm._ws_recovery_timeout_sec = 15.0
+    mdm._ws_restart_affected = {symbol: token for token, symbol in mapping.items()}
+    mdm._ws_restart_unresolved_tokens = set()
+    critical = mdm._required_live_symbols()
+    mdm._ws_restart_diagnostics = {"required_symbols": sorted(critical)}
+    mdm._desired_tokens = set(mapping)
+    mdm._dispatched_subscriptions = set(mapping)
+    mdm._confirmed_subscriptions = set(mapping)
+    mdm._symbol_subscription_generation.update(
+        {symbol: 7 for symbol in mdm._ws_restart_affected}
+    )
+    mdm._symbol_first_tick_generation.update(
+        {symbol: 7 for symbol in mdm._ws_restart_affected}
+    )
+    mdm._last_valid_live_tick_mono.update(
+        {symbol: now - 0.2 for symbol in mdm._ws_restart_affected}
+    )
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+
+    selected_pe = "NFO:NIFTY26JUN24000PE"
+    mdm._symbol_first_tick_generation[selected_pe] = 6
+    pending = mdm.verify_websocket_recovery(now_mono=now)
+    assert pending["ok"] is False
+    assert pending["state"] == "waiting_for_first_ticks"
+    assert pending["missing_current_generation_ticks"] == [selected_pe]
+
+    mdm._symbol_first_tick_generation[selected_pe] = 7
+    noncritical = "NFO:NIFTY26JUN25000CE"
+    mdm._symbol_first_tick_generation.pop(noncritical)
+    verified = mdm.verify_websocket_recovery(now_mono=now)
+    assert verified["ok"] is True
+    assert verified["state"] == "recovered"
+    assert noncritical not in verified["required_symbols_proof"]
+
+
+def test_ws_recovery_rejects_stale_or_wrong_token_critical_receipt(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    symbol = "NFO:NIFTY26JUNFUT"
+    now = time.monotonic()
+    mdm._ws_restart_state = "waiting_for_first_ticks"
+    mdm._ws_restart_inflight = True
+    mdm._ws_restart_started_at = now - 2
+    mdm._ws_restart_deadline_mono = now + 10
+    mdm._ws_restart_affected = {symbol: 4}
+    mdm._ws_restart_unresolved_tokens = set()
+    mdm._ws_restart_diagnostics = {"required_symbols": [symbol]}
+    mdm._desired_tokens = {4}
+    mdm._dispatched_subscriptions = {4}
+    mdm._confirmed_subscriptions = {4}
+    mdm._symbol_subscription_generation[symbol] = 7
+    mdm._symbol_first_tick_generation[symbol] = 7
+    mdm._last_valid_live_tick_mono[symbol] = now - 60
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+
+    assert mdm.verify_websocket_recovery(now_mono=now)["ok"] is False
+    mdm._last_valid_live_tick_mono[symbol] = now
+    mdm._symbol_to_token[symbol] = 999
+    mdm._token_by_symbol[symbol] = 999
+    assert mdm.verify_websocket_recovery(now_mono=now)["ok"] is False
+
+
+def test_tick_latency_percentiles_include_fast_ticks_and_are_bounded():
+    mdm = MarketDataManager(kite=None)
+    for n in range(600):
+        mdm._record_tick_latency("one_tick", float(n))
+    measurements = mdm.get_tick_pressure_stats()["tick_latency_percentiles"]["one_tick"]
+    assert measurements["samples"] == 512
+    assert measurements["p50_ms"] == 343.0
+    assert measurements["p95_ms"] == 574.0
+    assert measurements["p99_ms"] == 594.0
+    assert measurements["max_ms"] == 599.0
+    mdm._record_tick_latency("one_tick", float("nan"))
+    assert mdm._tick_latency_percentiles()["one_tick"] == measurements
+
+
+def test_ws_recovery_missing_required_subscription_is_not_false_success(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    future = "NFO:NIFTY26JUNFUT"
+    selected_ce = "NFO:NIFTY26JUN24000CE"
+    mdm._ws_restart_inflight = True
+    mdm._ws_restart_state = "waiting_for_first_ticks"
+    mdm._ws_restart_started_at = now - 1
+    mdm._ws_restart_deadline_mono = now + 4
+    mdm._ws_restart_diagnostics = {"required_symbols": [future, selected_ce]}
+    mdm._ws_restart_affected = {future: 4}
+    mdm._ws_restart_unresolved_tokens = set()
+    mdm._desired_tokens = {4}
+    mdm._dispatched_subscriptions = {4}
+    mdm._confirmed_subscriptions = {4}
+    mdm._symbol_subscription_generation[future] = 7
+    mdm._symbol_first_tick_generation[future] = 7
+    mdm._last_valid_live_tick_mono[future] = now
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+
+    result = mdm.verify_websocket_recovery(now_mono=now)
+
+    assert result["ok"] is False
+    assert result["missing_current_generation_ticks"] == [selected_ce]
+    assert result["state"] == "waiting_for_first_ticks"

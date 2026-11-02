@@ -29,7 +29,7 @@ def test_gap_repair_skips_small_option_gap() -> None:
     assert repaired == []
 
 
-def test_gap_repair_generates_for_large_gap() -> None:
+def test_gap_repair_does_not_fabricate_underlying_minutes_without_source() -> None:
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._main_loop = None
     runner._gap_repair_inflight = set()
@@ -38,8 +38,7 @@ def test_gap_repair_generates_for_large_gap() -> None:
     prev_bar = _bar(datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc), 100.0)
     incoming = _bar(datetime(2026, 1, 1, 9, 20, tzinfo=timezone.utc), 101.0)
     repaired = runner._repair_candle_gap('NSE:NIFTY', prev_bar, incoming)
-    assert len(repaired) == 4
-    assert all(bar.synthetic for bar in repaired)
+    assert repaired == []
 
 
 def test_gap_repair_does_not_create_synthetic_option_bars() -> None:
@@ -120,3 +119,31 @@ def test_overlapping_historical_backfill_cannot_duplicate_live_runner_minute() -
 
     assert runner._symbol_history[symbol] == [recent]
     assert runner._last_bar_ts[symbol] == minute
+
+
+def test_gap_repair_accepts_only_observed_historical_minute() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._main_loop = None
+    runner._gap_repair_inflight = set()
+    runner._should_log_throttled = lambda *_a, **_k: False
+    runner._logger = type("L", (), {"info": lambda *a, **k: None})()
+    prev = _bar(datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc), 100)
+    incoming = _bar(datetime(2026, 1, 1, 9, 20, tzinfo=timezone.utc), 102)
+    confirmed = prev.timestamp + timedelta(minutes=2)
+    runner._load_history_cache = lambda _s: [
+        {
+            "timestamp": confirmed,
+            "open": 100.5,
+            "high": 101.5,
+            "low": 100,
+            "close": 101,
+            "volume": 25,
+        }
+    ]
+
+    repaired = runner._repair_candle_gap("NFO:NIFTY26JUNFUT", prev, incoming)
+
+    assert len(repaired) == 1
+    assert repaired[0].timestamp == confirmed
+    assert repaired[0].synthetic is False
+    assert repaired[0].volume == 25
