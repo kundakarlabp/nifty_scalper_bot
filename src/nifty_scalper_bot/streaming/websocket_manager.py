@@ -805,6 +805,8 @@ class WebSocketManager:
         """Args: ws/response; Returns: none; Raises: none."""
 
         try:
+            if self._ticker is not None and ws is not self._ticker:
+                return
             del response
             self._last_pong_mono = time.monotonic()
             self._state = ConnectionState.CONNECTING
@@ -831,7 +833,8 @@ class WebSocketManager:
 
     def _on_ticks(self, ws: Any, ticks: Any) -> None:
         """Route each WebSocket batch through exactly one market-data ingress."""
-        del ws
+        if self._ticker is not None and ws is not self._ticker:
+            return
         if not ticks:
             return
         if not isinstance(ticks, list):
@@ -917,6 +920,8 @@ class WebSocketManager:
         """Args: ws/payload; Returns: none; Raises: none."""
 
         try:
+            if self._ticker is not None and _ws is not self._ticker:
+                return
             self._last_pong_mono = time.monotonic()
             if not self._connected.is_set():
                 self._connected.set()
@@ -928,6 +933,8 @@ class WebSocketManager:
         """Args: ws/code/reason; Returns: none; Raises: none."""
 
         try:
+            if self._ticker is not None and _ws is not self._ticker:
+                return
             self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
@@ -954,6 +961,8 @@ class WebSocketManager:
         """Args: ws/code/reason; Returns: none; Raises: none."""
 
         try:
+            if self._ticker is not None and _ws is not self._ticker:
+                return
             self._logger.info(
                 "Condition met: websocket_closed code=%s reason=%s", code, reason
             )
