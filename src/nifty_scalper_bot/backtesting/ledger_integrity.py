@@ -39,6 +39,8 @@ def summarize_ledger_integrity(
     arithmetic_unverifiable = 0
     closed_incomplete = 0
     incomplete_ids: list[str] = []
+    closed_incomplete_ids: list[str] = []
+    closed_incomplete_reasons: Counter[str] = Counter()
     for row in rows:
         state = str(row.get("state") or "UNKNOWN").upper()
         states[state] += 1
@@ -46,6 +48,19 @@ def summarize_ledger_integrity(
         if not complete:
             if state == "CLOSED":
                 closed_incomplete += 1
+                if len(closed_incomplete_ids) < 20:
+                    closed_incomplete_ids.append(str(row.get("trade_id") or ""))
+                for name in (
+                    "entry_order_id",
+                    "exit_order_id",
+                    "entry_price",
+                    "exit_price",
+                    "net_pnl",
+                ):
+                    if row.get(name) is None:
+                        closed_incomplete_reasons["missing_" + name] += 1
+                if row.get("ledger_complete") not in (1, True):
+                    closed_incomplete_reasons["ledger_not_finalized"] += 1
             elif len(incomplete_ids) < 20:
                 incomplete_ids.append(str(row.get("trade_id") or ""))
             continue
@@ -87,6 +102,8 @@ def summarize_ledger_integrity(
         "state_counts": dict(sorted(states.items())),
         "completed_closed_rows": complete_count,
         "closed_incomplete_rows": closed_incomplete,
+        "closed_incomplete_sample_ids": closed_incomplete_ids,
+        "closed_incomplete_reasons": dict(sorted(closed_incomplete_reasons.items())),
         "nonclosed_historical_rows": len(rows) - complete_count - closed_incomplete,
         "completed_missing": dict(sorted(missing.items())),
         "completed_cost_source_counts": dict(sorted(sources.items())),
