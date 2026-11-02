@@ -11379,7 +11379,9 @@ class MarketDataManager:
                     "dispatch_attempted": False,
                     "affected_symbols": sorted(affected),
                     "unresolved_tokens": sorted(unresolved),
-                    "missing_current_generation_ticks": sorted(required_proof or affected),
+                    "missing_current_generation_ticks": sorted(
+                        required_proof or affected
+                    ),
                 }
             with self._lock:
                 desired = set(self._desired_tokens)
