@@ -8,7 +8,8 @@ Runtime role:
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
-  exports and periodically journals bounded tick latency percentiles without changing ordering.
+  exports and journals bounded tick latency percentiles without
+  changing tick ordering.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
