@@ -1178,4 +1178,4 @@ def test_trading_status_exposes_last_execution_rejection_without_changing_readin
 
     assert status["latest_execution_rejection"] == rejection
     assert status["can_place_live_order_now"] is True
-    assert status["signal_observability"]["latest_execution_rejection"] == rejection
+    assert main._signal_observability(ctx)["latest_execution_rejection"] == rejection
