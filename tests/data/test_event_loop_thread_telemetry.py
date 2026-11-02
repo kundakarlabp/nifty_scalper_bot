@@ -220,6 +220,7 @@ def test_latency_summary_exposes_cache_replay_and_bus_percentiles(caplog) -> Non
     mdm = _mdm()
     for i in range(30):
         mdm._record_tick_latency("worker_await", float(i + 1))
+        mdm._record_tick_latency("worker_dispatch_wait", 0.5)
         mdm._record_tick_latency("cache_store", 1.0)
         mdm._record_tick_latency("replay_capture", 2.0)
         mdm._record_tick_latency("bus_publish", 3.0)
@@ -234,6 +235,7 @@ def test_latency_summary_exposes_cache_replay_and_bus_percentiles(caplog) -> Non
         if getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
     ]
     assert len(summaries) == 1
+    assert summaries[0].stage_percentiles["worker_dispatch_wait"]["p99_ms"] == 0.5
     assert summaries[0].stage_percentiles["cache_store"]["p99_ms"] == 1.0
     assert summaries[0].stage_percentiles["replay_capture"]["p99_ms"] == 2.0
     assert summaries[0].stage_percentiles["bus_publish"]["p99_ms"] == 3.0
