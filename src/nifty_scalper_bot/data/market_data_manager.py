@@ -11396,6 +11396,14 @@ class MarketDataManager:
             token = affected.get(symbol)
             sub_gen = sub_generations.get(symbol)
             tick_gen = tick_generations.get(symbol)
+            receipt_mono = tick_monos.get(symbol)
+            started_mono = float(self._ws_restart_started_at or 0.0)
+            timeout_seconds = float(self._ws_recovery_timeout_sec or 15.0)
+            receipt_fresh = (
+                receipt_mono is not None
+                and receipt_mono >= started_mono
+                and 0.0 <= now_value - receipt_mono <= timeout_seconds
+            )
             has_tick = (
                 token is not None
                 and token in desired
