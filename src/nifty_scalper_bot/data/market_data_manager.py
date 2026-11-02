@@ -11358,11 +11358,8 @@ class MarketDataManager:
             state = self._ws_restart_state
             inflight = self._ws_restart_inflight
             fail_reason = self._ws_restart_fail_reason
-            required_proof = tuple(
-                getattr(self, "_ws_restart_diagnostics", {}).get(
-                    "required_symbols", ()
-                )
-            )
+            restart_diagnostics = getattr(self, "_ws_restart_diagnostics", {})
+            required_proof = tuple(restart_diagnostics.get("required_symbols", ()))
             if state == "failed":
                 return {
                     "ok": False,
