@@ -1183,7 +1183,6 @@ def test_trading_status_exposes_last_execution_rejection_without_changing_readin
     assert main._signal_observability(ctx)["latest_execution_rejection"] == rejection
 
 
-
 def test_readiness_rejection_timeline_reuses_canonical_stage_evidence():
     rejection = {
         "timestamp": "2026-11-02T07:30:00Z",
@@ -1199,9 +1198,7 @@ def test_readiness_rejection_timeline_reuses_canonical_stage_evidence():
             "stale_required_symbols": ["NFO:NIFTY26NOVFUT"],
             "required_symbol_recovery_active": True,
         },
-        "tick_pressure": {
-            "tick_latency_percentiles": {"one_tick": {"p95_ms": 26.0}}
-        },
+        "tick_pressure": {"tick_latency_percentiles": {"one_tick": {"p95_ms": 26.0}}},
         "state": {"execution_capacity_ready": True},
         "effective_risk_policy": {"known": True},
         "minimum_lot_affordability": {},
@@ -1215,7 +1212,10 @@ def test_readiness_rejection_timeline_reuses_canonical_stage_evidence():
         structured, signals, live_orders_armed=False
     )
     assert [item["stage"] for item in result["stages"]] == [
-        "data", "strategy", "risk", "execution"
+        "data",
+        "strategy",
+        "risk",
+        "execution",
     ]
     assert result["stages"][0]["symbol_evidence"]["NFO:NIFTY26NOVFUT"]["ready"] is False
     assert result["stages"][0]["latency_percentiles_ms"]["one_tick"]["p95_ms"] == 26.0
