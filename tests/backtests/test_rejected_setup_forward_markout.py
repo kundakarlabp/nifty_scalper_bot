@@ -101,3 +101,36 @@ def test_summary_keeps_unlabelled_independent_setups_in_denominator() -> None:
     assert groups[0]["label_coverage_fraction"] == 0.5
     assert groups[0]["mean_gross_markout_pct"] is None
     assert groups[0]["causal_or_profitability_inference_ready"] is False
+
+
+def test_markout_uses_decision_time_not_first_seen_or_later_rejection() -> None:
+    contract = "NFO:NIFTY26N0322750CE"
+    opportunity = SimpleNamespace(
+        opportunity_id="smc:CE:1",
+        strategy="smc",
+        side="CE",
+        symbol=contract,
+        observed_symbols=(contract,),
+        first_seen_ts=100.0,
+        decision_ts=110.0,
+        approved=True,
+        final_reason="order_submitted",
+        blocked_reasons=("later_contract_rotated",),
+    )
+    quotes = {
+        contract: [
+            (99.0, 99.0, 100.0),
+            (109.0, 198.0, 200.0),
+            (111.0, 201.0, 203.0),
+            (113.0, 210.0, 212.0),
+            (115.0, 220.0, 222.0),
+        ]
+    }
+
+    outcome = evaluate_opportunities([opportunity], quotes, (5,))[0]
+
+    assert outcome["first_seen_timestamp"] == 100.0
+    assert outcome["decision_timestamp"] == 110.0
+    assert outcome["status"] == "observed_bid_path_not_broker_fill"
+    assert outcome["markout"]["entry_ask"] == 200.0
+    assert outcome["markout"]["gross_spread_adjusted_markout_pct"] == 10.0

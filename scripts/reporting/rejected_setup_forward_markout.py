@@ -131,6 +131,7 @@ def evaluate_opportunities(
     results = []
     for opportunity in opportunities:
         contract = normalize_symbol(opportunity.symbol)
+        decision_ts = getattr(opportunity, "decision_ts", opportunity.first_seen_ts)
         same_contract = (
             len(opportunity.observed_symbols) == 1
             and normalize_symbol(opportunity.observed_symbols[0]) == contract
@@ -141,7 +142,7 @@ def evaluate_opportunities(
             markout, status = (
                 observed_markout(
                     quotes.get(contract, ()),
-                    decision_ts=opportunity.first_seen_ts,
+                    decision_ts=decision_ts,
                     horizon_s=horizon,
                 )
                 if same_contract
@@ -157,6 +158,7 @@ def evaluate_opportunities(
                     "reason": opportunity.final_reason,
                     "blocked_reasons": list(opportunity.blocked_reasons),
                     "first_seen_timestamp": opportunity.first_seen_ts,
+                    "decision_timestamp": decision_ts,
                     "horizon_seconds": horizon,
                     "status": status,
                     "markout": markout,

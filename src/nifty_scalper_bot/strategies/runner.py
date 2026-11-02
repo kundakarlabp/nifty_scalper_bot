@@ -18131,8 +18131,10 @@ class StrategyRunner:
                         reason=reason_key,
                     )
                 self._reset_execution_state(base_symbol)
-                rejection_details = details if dedup_reserved else dict(details or {})
-                if not dedup_reserved and decision_research_context:
+                rejection_details = dict(details or {})
+                rejection_details.setdefault("selected_candidate", selected_candidate_trace)
+                rejection_details.setdefault("direction", option_side)
+                if decision_research_context:
                     rejection_details.setdefault(
                         "research_context",
                         {
@@ -18156,7 +18158,8 @@ class StrategyRunner:
             basket_pending = False
             _basket_source = "existing"
             atm_seed = (
-                metadata.get("atm_strike")
+                (candidate_contract_generation.atm_strike if candidate_contract_generation else None)
+                or metadata.get("atm_strike")
                 or self._extract_strike_from_symbol(signal.symbol)
                 or self._active_atm_strike
             )
@@ -18369,7 +18372,7 @@ class StrategyRunner:
                         reason="missing_candidate_snapshots",
                     )
             if isinstance(candidate_snapshots_obj, list):
-                atm_strike = int(metadata.get("atm_strike") or 0)
+                atm_strike = int(atm_seed or 0)
                 if atm_strike <= 0:
                     for snap in candidate_snapshots_obj:
                         if isinstance(snap, dict) and snap.get("atm_strike"):
@@ -18602,6 +18605,18 @@ class StrategyRunner:
                             gross_rr=float(metadata.get("premium_target_rr") or 2.0),
                         )
                     )
+                    if candidate_contract_generation is not None:
+                        selected_live = normalize_symbol(
+                            candidate_contract_generation.selected_ce
+                            if option_side == "CE"
+                            else candidate_contract_generation.selected_pe
+                        )
+                        if normalize_symbol(signal.symbol) != selected_live:
+                            # A rotated setup must requalify on the current selection.
+                            ranked_candidates = [
+                                item for item in ranked_candidates
+                                if normalize_symbol(item.symbol) == selected_live
+                            ]
                     candidate, candidate_capacity_decisions = (
                         self._select_capital_eligible_candidate(
                             ranked_candidates=ranked_candidates,

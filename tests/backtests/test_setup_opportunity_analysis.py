@@ -54,6 +54,7 @@ def test_opportunity_canonicalization_deduplicates_repeated_setup_evaluations() 
     assert opportunities[0].decision_count == 3
     assert opportunities[0].approved is True
     assert opportunities[0].final_reason == "order_submitted"
+    assert opportunities[0].decision_ts == opportunities[0].last_seen_ts
     assert opportunities[0].setup_id == "vwap:CE:anchor"
 
 
@@ -299,6 +300,8 @@ def test_later_rejection_does_not_erase_prior_approved_setup() -> None:
     assert opportunity.decision_count == 2
     assert opportunity.approved is True
     assert opportunity.final_reason == "order_submitted"
+    assert opportunity.decision_ts == opportunity.first_seen_ts
+    assert opportunity.last_seen_ts > opportunity.decision_ts
     assert opportunity.observed_stages == ("order_manager", "order_submitted")
     assert opportunity.blocked_reasons == ("later_option_candidate_rejected",)
 

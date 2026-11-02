@@ -32,6 +32,7 @@ class CanonicalSetupOpportunity:
     side: str
     first_seen_ts: float
     last_seen_ts: float
+    decision_ts: float
     decision_count: int
     approved: bool
     final_reason: str
@@ -177,7 +178,7 @@ def canonicalize_setup_opportunities(
         ]
         # Keep the latest approval's contract/context together with its outcome;
         # a later rejection on a rotated contract is not the approved trade.
-        _, outcome_row, outcome_context = (
+        outcome_ts, outcome_row, outcome_context = (
             approved_rows[-1] if approved_rows else sample[-1]
         )
         setup_id = str(
@@ -216,6 +217,7 @@ def canonicalize_setup_opportunities(
                 side=next(iter(sides)),
                 first_seen_ts=sample[0][0],
                 last_seen_ts=last_ts,
+                decision_ts=outcome_ts,
                 decision_count=len(sample),
                 approved=bool(approved_rows),
                 final_reason=final_reason,

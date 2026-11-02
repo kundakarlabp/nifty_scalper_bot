@@ -516,7 +516,9 @@ def test_reserved_structural_rejection_rolls_back_before_reset(monkeypatch):
         trace_id="characterize",
     )
     assert result.reason == "direction_contract_not_passed", result
-    assert "research_context" not in result.details
+    assert result.details["research_context"]["marker"] == "research"
+    assert result.details["research_context"]["rejection_stage"] == "execution"
+    assert result.details["selected_candidate"] == "NFO:CE"
     assert events == [
         ("rollback", {"underlying": "NIFTY", "option_side": "CE", "reason": "test"}),
         ("reset", "NSE:NIFTY"),
