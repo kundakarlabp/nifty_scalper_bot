@@ -182,18 +182,19 @@ def test_missing_initial_build_is_backfilled_from_first_known_revision() -> None
         )
 
 
-
 def test_incomplete_closed_trade_is_named_and_missing_evidence_is_explicit():
-    report = summarize_ledger_integrity([
-        {
-            "trade_id": "TRD-20261030-SMC",
-            "state": "CLOSED",
-            "ledger_complete": False,
-            "entry_order_id": "b-entry",
-            "exit_order_id": None,
-            "net_pnl": None,
-        }
-    ])
+    report = summarize_ledger_integrity(
+        [
+            {
+                "trade_id": "TRD-20261030-SMC",
+                "state": "CLOSED",
+                "ledger_complete": False,
+                "entry_order_id": "b-entry",
+                "exit_order_id": None,
+                "net_pnl": None,
+            }
+        ]
+    )
     assert report["closed_incomplete_sample_ids"] == ["TRD-20261030-SMC"]
     assert report["closed_incomplete_reasons"] == {
         "ledger_not_finalized": 1,
