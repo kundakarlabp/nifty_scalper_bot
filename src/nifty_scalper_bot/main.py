@@ -716,6 +716,7 @@ def _signal_observability(ctx: Any) -> dict[str, Any]:
         ),
         "last_trigger_qualified_age_sec": status.get("last_trigger_qualified_age_sec"),
         "setup_lifecycle": status.get("setup_lifecycle", {}),
+        "latest_execution_rejection": status.get("latest_execution_rejection"),
     }
 
 
@@ -1438,6 +1439,10 @@ def trading_status():
         "will_trade": can_place_live_order_now,
         "will_trade_semantics": "execution_permission_only_not_signal_or_order",
         "trade_pipeline_state": trade_pipeline_state,
+        # Historical terminal rejection evidence, not a current readiness veto.
+        "latest_execution_rejection": signal_observability.get(
+            "latest_execution_rejection"
+        ),
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
