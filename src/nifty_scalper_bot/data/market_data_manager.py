@@ -8,7 +8,8 @@ Runtime role:
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
-  exports bounded tick processing latency percentiles without changing ordering.
+  exports and journals bounded tick latency percentiles without
+  changing tick ordering.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -7752,6 +7753,39 @@ class MarketDataManager:
             for stage, values in snapshots.items()
         }
 
+    def _log_tick_latency_summary(self) -> None:
+        """Archive existing bounded percentiles through the periodic health log."""
+        stats = self._tick_latency_percentiles()
+        worker = stats.get("worker_await", {})
+        if int(worker.get("samples", 0)) < 30:
+            return
+        stages = (
+            "worker_await",
+            "one_tick",
+            "normalize",
+            "candle_engine_on_tick",
+            "tick_publication",
+        )
+        details = " ".join(
+            (
+                f"{stage}:n={stats[stage]['samples']}"
+                f",p50_ms={stats[stage]['p50_ms']}"
+                f",p95_ms={stats[stage]['p95_ms']}"
+                f",p99_ms={stats[stage]['p99_ms']}"
+            )
+            for stage in stages
+            if stage in stats
+        )
+        self._logger.info(
+            "TICK_LATENCY_SUMMARY %s",
+            details,
+            extra={
+                "event": "TICK_LATENCY_SUMMARY",
+                "sample_window": "last_512_per_stage",
+                "stage_percentiles": stats,
+            },
+        )
+
     def _log_slow_tick_stage(
         self,
         *,
@@ -10415,6 +10449,9 @@ class MarketDataManager:
                     "stale_symbols": stale_symbols,
                 },
             )
+            # The 120-second health cadence is outside the tick hot path.
+            # Reuse existing percentile samples and the normal log archiver.
+            self._log_tick_latency_summary()
             now_epoch = time.time()
             last_detail_emit = float(
                 getattr(self, "_last_stale_detail_emit_epoch", 0.0) or 0.0

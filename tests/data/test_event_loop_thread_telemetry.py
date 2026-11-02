@@ -174,3 +174,40 @@ def test_message_renders_unknown_rather_than_none(caplog) -> None:
 
     assert "event_loop_thread=unknown" in caplog.text
     assert "event_loop_thread=None" not in caplog.text
+
+
+def test_periodic_tick_latency_summary_uses_real_all_tick_samples(caplog) -> None:
+    import logging
+
+    mdm = _mdm()
+    for count in range(29):
+        mdm._record_tick_latency("worker_await", float(count + 1))
+    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+        mdm._log_tick_latency_summary()
+    assert not any(
+        getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
+        for record in caplog.records
+    )
+
+    mdm._record_tick_latency("worker_await", 30.0)
+    mdm._record_tick_latency("one_tick", 11.0)
+    mdm._record_tick_latency("candle_engine_on_tick", 3.0)
+    mdm._record_tick_latency("tick_publication", 7.0)
+    assert mdm._tick_latency_percentiles()["worker_await"]["samples"] == 30
+
+    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+        mdm._log_tick_latency_summary()
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.sample_window == "last_512_per_stage"
+    assert record.stage_percentiles["worker_await"]["samples"] == 30
+    assert record.stage_percentiles["worker_await"]["p95_ms"] == 29.0
+    assert record.stage_percentiles["worker_await"]["p99_ms"] == 30.0
+    assert "worker_await:n=30" in record.getMessage()
+    assert "one_tick:n=1" in record.getMessage()
+    assert "tick_publication:n=1" in record.getMessage()
