@@ -7757,13 +7757,27 @@ class MarketDataManager:
         """Archive existing bounded percentiles through the periodic health log."""
         stats = self._tick_latency_percentiles()
         worker = stats.get("worker_await", {})
-        if int(worker.get("samples", 0)) < 30:
+        worker_samples = int(worker.get("samples", 0))
+        if worker_samples < 30:
+            # This is an incomplete percentile window, not a telemetry outage.
+            self._logger.info(
+                "TICK_LATENCY_WARMUP worker_samples=%d required_samples=30",
+                worker_samples,
+                extra={
+                    "event": "TICK_LATENCY_WARMUP",
+                    "worker_samples": worker_samples,
+                    "required_samples": 30,
+                },
+            )
             return
         stages = (
             "worker_await",
             "one_tick",
             "normalize",
             "candle_engine_on_tick",
+            "cache_store",
+            "replay_capture",
+            "bus_publish",
             "tick_publication",
         )
         details = " ".join(
@@ -10216,7 +10230,17 @@ class MarketDataManager:
                     )
             except Exception:
                 pass
+        stage_started = time.perf_counter()
         stored = self._store_tick(symbol, tick)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("cache_store", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="cache_store",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         # Current-generation WS ticks must still reach DataHub/Runner even when
         # the cache writer rejects the payload as not-newer. Readiness uses
         # _last_valid_live_tick_mono (updated above), so a synthetic/future
@@ -10247,13 +10271,24 @@ class MarketDataManager:
         tick_payload["received_at"] = float(
             tick_payload.get("received_at") or time.time()
         )
+        stage_started = time.perf_counter()
         self._capture_replay_tick({**tick_payload, "symbol": symbol, "source": source})
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("replay_capture", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="replay_capture",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         with self._lock:
             self._last_tick_source[canonical_emit_symbol] = source
             callbacks = list(self._subscribers.get(canonical_emit_symbol, ()))
             if not callbacks:
                 callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
+        stage_started = time.perf_counter()
         self._publish_tick_to_bus_safe(
             {
                 **dict(tick_payload),
@@ -10263,6 +10298,15 @@ class MarketDataManager:
                 or f"{symbol}-{time.monotonic_ns()}",
             }
         )
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("bus_publish", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="bus_publish",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         subscriber_count = len(callbacks)
         if subscriber_count == 0 and source == "ws":
             selected_or_active = (
