@@ -854,7 +854,6 @@ def test_contract_generation_guard_precedes_order_plan_dispatch() -> None:
     )
 
 
-
 def test_live_candidate_selection_prefers_signal_contract_when_affordable() -> None:
     """Do not replace an executable affordable strategy contract just for rank."""
     runner = object.__new__(StrategyRunner)
