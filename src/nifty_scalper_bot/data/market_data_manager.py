@@ -11386,8 +11386,7 @@ class MarketDataManager:
                 tick_generations = dict(self._symbol_first_tick_generation)
                 tick_monos = dict(self._last_valid_live_tick_mono)
                 current_tokens = {
-                    symbol: self._current_symbol_token_locked(symbol)
-                    for symbol in affected
+                    symbol: self._current_symbol_token_locked(symbol) for symbol in affected
                 }
         dispatch_attempted = desired <= dispatched if desired else True
         affected_ready = True
