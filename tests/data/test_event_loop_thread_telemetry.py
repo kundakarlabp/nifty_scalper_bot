@@ -267,7 +267,7 @@ def test_latency_warmup_is_observable_but_not_a_percentile_summary(caplog) -> No
     )
 
 
-def test_closed_bar_callback_stages_are_sampled_in_real_publish_path(monkeypatch) -> None:
+def test_closed_bar_callback_samples_real_publish_path(monkeypatch) -> None:
     """Measure canonical bar fanout without broker calls or second bar owner."""
     mdm = _mdm()
     called = []
