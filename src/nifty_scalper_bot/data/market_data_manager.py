@@ -1737,6 +1737,7 @@ class MarketDataManager:
         stage_started = time.perf_counter()
         self._push_bar_to_pipeline(bar)
         duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("closed_bar_pipeline_push", duration_ms)
         if duration_ms >= 50.0:
             self._log_slow_tick_stage(
                 stage="closed_bar_pipeline_push",
@@ -1751,6 +1752,9 @@ class MarketDataManager:
                     cb(dict(bar))
                 finally:
                     duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                    self._record_tick_latency(
+                        "closed_bar_subscriber_callback", duration_ms
+                    )
                     if duration_ms >= 50.0:
                         self._log_slow_tick_stage(
                             stage="closed_bar_subscriber_callback",
@@ -7755,15 +7759,36 @@ class MarketDataManager:
 
     def _log_tick_latency_summary(self) -> None:
         """Archive existing bounded percentiles through the periodic health log."""
+        # LOG_LEVEL_DATA defaults to WARNING; ordinary MDM INFO records are
+        # suppressed. Archive only this bounded operational summary at INFO.
+        telemetry_logger = get_logger("nifty_scalper_bot.operational.tick_latency")
         stats = self._tick_latency_percentiles()
         worker = stats.get("worker_await", {})
-        if int(worker.get("samples", 0)) < 30:
+        worker_samples = int(worker.get("samples", 0))
+        if worker_samples < 30:
+            # This is an incomplete percentile window, not a telemetry outage.
+            telemetry_logger.info(
+                "TICK_LATENCY_WARMUP worker_samples=%d required_samples=30",
+                worker_samples,
+                extra={
+                    "event": "TICK_LATENCY_WARMUP",
+                    "worker_samples": worker_samples,
+                    "required_samples": 30,
+                },
+            )
             return
         stages = (
             "worker_await",
+            "worker_dispatch_wait",
             "one_tick",
             "normalize",
             "candle_engine_on_tick",
+            "bar_projection",
+            "closed_bar_pipeline_push",
+            "closed_bar_subscriber_callback",
+            "cache_store",
+            "replay_capture",
+            "bus_publish",
             "tick_publication",
         )
         details = " ".join(
@@ -7776,7 +7801,7 @@ class MarketDataManager:
             for stage in stages
             if stage in stats
         )
-        self._logger.info(
+        telemetry_logger.info(
             "TICK_LATENCY_SUMMARY %s",
             details,
             extra={
@@ -7899,6 +7924,23 @@ class MarketDataManager:
         drain_started = time.monotonic()
         awaited_worker_s = 0.0
         processed_in_invocation = 0
+
+        def _run_tick_on_worker(
+            tick_payload: dict[str, Any], scheduled_at: float
+        ) -> None:
+            # Worker-await wall time also includes default-executor queueing.
+            # This measurement starts on the actual worker thread, before the
+            # indivisible tick is processed; order and ownership are unchanged.
+            dispatch_wait_ms = (time.perf_counter() - scheduled_at) * 1000.0
+            self._record_tick_latency("worker_dispatch_wait", dispatch_wait_ms)
+            if dispatch_wait_ms >= 50.0:
+                self._log_slow_tick_stage(
+                    stage="worker_dispatch_wait",
+                    symbol=str(tick_payload.get("symbol") or "") or None,
+                    duration_ms=dispatch_wait_ms,
+                    source=str(tick_payload.get("source") or "ws"),
+                )
+            self._process_queued_tick(tick_payload)
         with self._pending_tick_lock:
             self._tick_active_drains += 1
             self._tick_max_active_drains = max(
@@ -7916,8 +7958,11 @@ class MarketDataManager:
                         # out through DataHub/Runner. Keep strict serial order,
                         # but move that indivisible work off the asyncio owner.
                         worker_started = time.monotonic()
+                        worker_scheduled_at = time.perf_counter()
                         try:
-                            await asyncio.to_thread(self._process_queued_tick, raw)
+                            await asyncio.to_thread(
+                                _run_tick_on_worker, raw, worker_scheduled_at
+                            )
                         finally:
                             # This is time suspended awaiting a worker, NOT
                             # proof that the owner event loop was blocked.
@@ -9362,7 +9407,17 @@ class MarketDataManager:
                     ),
                     "source": "ws_candle",
                 }
+                stage_started = time.perf_counter()
                 self._refresh_candle_projection(symbol, live_append=True)
+                duration_ms = (time.perf_counter() - stage_started) * 1000.0
+                self._record_tick_latency("bar_projection", duration_ms)
+                if duration_ms >= 50.0:
+                    self._log_slow_tick_stage(
+                        stage="bar_projection",
+                        symbol=symbol,
+                        duration_ms=duration_ms,
+                        source=source_for_timing,
+                    )
                 self._publish_closed_bar(bar)
                 verbose_candles = str(
                     os.getenv("LOG_VERBOSE_CANDLES", "false")
@@ -10216,7 +10271,17 @@ class MarketDataManager:
                     )
             except Exception:
                 pass
+        stage_started = time.perf_counter()
         stored = self._store_tick(symbol, tick)
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("cache_store", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="cache_store",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         # Current-generation WS ticks must still reach DataHub/Runner even when
         # the cache writer rejects the payload as not-newer. Readiness uses
         # _last_valid_live_tick_mono (updated above), so a synthetic/future
@@ -10247,13 +10312,24 @@ class MarketDataManager:
         tick_payload["received_at"] = float(
             tick_payload.get("received_at") or time.time()
         )
+        stage_started = time.perf_counter()
         self._capture_replay_tick({**tick_payload, "symbol": symbol, "source": source})
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("replay_capture", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="replay_capture",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         with self._lock:
             self._last_tick_source[canonical_emit_symbol] = source
             callbacks = list(self._subscribers.get(canonical_emit_symbol, ()))
             if not callbacks:
                 callbacks = list(self._subscribers.get(symbol, ()))
             self._tick_counter += 1
+        stage_started = time.perf_counter()
         self._publish_tick_to_bus_safe(
             {
                 **dict(tick_payload),
@@ -10263,6 +10339,15 @@ class MarketDataManager:
                 or f"{symbol}-{time.monotonic_ns()}",
             }
         )
+        duration_ms = (time.perf_counter() - stage_started) * 1000.0
+        self._record_tick_latency("bus_publish", duration_ms)
+        if duration_ms >= 50.0:
+            self._log_slow_tick_stage(
+                stage="bus_publish",
+                symbol=symbol,
+                duration_ms=duration_ms,
+                source=source,
+            )
         subscriber_count = len(callbacks)
         if subscriber_count == 0 and source == "ws":
             selected_or_active = (
