@@ -3,6 +3,8 @@
 Responsibilities: Deduplicate structural decisions and preserve the approved
 contract, decision context, and chronological forward-path provenance.
 Boundaries: Consumes persisted decisions and observed quotes; never places orders.
+Counterfactual stratification uses one row per unique setup and never promotes
+unlabelled or thinly labelled strata into profitability claims.
 Safety: Later blocked candidates cannot overwrite an approved setup identity;
 mixed or unverifiable option-contract quote paths cannot imply trade outcomes.
 """
@@ -225,6 +227,78 @@ def canonicalize_setup_opportunities(
         )
     opportunities.sort(key=lambda item: (item.first_seen_ts, item.opportunity_id))
     return tuple(opportunities)
+
+
+def summarize_contextual_label_coverage(
+    opportunities: Sequence[CanonicalSetupOpportunity],
+    post_cost_labels: Mapping[str, float],
+    *,
+    min_labelled: int = 5,
+) -> dict[str, Any]:
+    """Stratify only independent setups; unresolved labels remain explicit."""
+    from collections import defaultdict
+    from zoneinfo import ZoneInfo
+
+    if min_labelled < 1:
+        raise ValueError("min_labelled must be positive")
+    groups: dict[tuple[str, str], list[CanonicalSetupOpportunity]] = defaultdict(list)
+    for item in opportunities:
+        context = item.research_context
+        hour = datetime.fromtimestamp(
+            item.first_seen_ts, timezone.utc
+        ).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H")
+        fields = {
+            "strategy": item.strategy,
+            "regime": item.regime or "UNKNOWN",
+            "entry_hour_ist": hour,
+            "volatility_regime": str(
+                context.get("volatility_regime") or "UNKNOWN"
+            ).upper(),
+        }
+        for key, value in fields.items():
+            groups[(key, value)].append(item)
+
+    results: list[dict[str, Any]] = []
+    for (dimension, value), items in sorted(groups.items()):
+        labelled: list[tuple[CanonicalSetupOpportunity, float]] = []
+        for item in items:
+            raw = post_cost_labels.get(item.opportunity_id)
+            if raw is None or isinstance(raw, bool):
+                continue
+            try:
+                observation = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(observation):
+                labelled.append((item, observation))
+        enough = len(labelled) >= min_labelled
+        results.append({
+            "dimension": dimension,
+            "value": value,
+            "unique_setups": len(items),
+            "labelled_setups": len(labelled),
+            "unlabelled_setups": len(items) - len(labelled),
+            "approved_labelled": sum(item.approved for item, _ in labelled),
+            "blocked_labelled": sum(not item.approved for item, _ in labelled),
+            "label_coverage_fraction": round(
+                len(labelled) / len(items), 4
+            ) if items else 0.0,
+            "mean_post_cost_r": round(
+                sum(label for _, label in labelled) / len(labelled), 6
+            ) if enough else None,
+            "descriptive_only": True,
+            "reason": (
+                "descriptive_only_no_causal_gate_effect_claim"
+                if enough else "insufficient_independent_post_cost_labels"
+            ),
+        })
+    return {
+        "basis": "unique_setup_identity_not_repeated_votes",
+        "source": "independently_supplied_post_cost_labels",
+        "minimum_labels_for_descriptive_mean": min_labelled,
+        "strata": results,
+        "causal_gate_effect_verified": False,
+    }
 
 
 def label_forward_option_buy_path(
