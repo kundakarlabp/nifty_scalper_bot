@@ -11243,7 +11243,9 @@ class MarketDataManager:
                 # A required symbol absent from desired subscriptions is
                 # unresolved, not silently omitted from the recovery proof.
                 "required_symbols": sorted(
-                    self._required_live_symbols() or set(affected)
+                    self._required_live_symbols()
+                    if getattr(self, "_active_contract_basket", None)
+                    else set(affected)
                 ),
                 "initiator": "mdm_zombie_watchdog",
                 "reason": "transport_failure",
