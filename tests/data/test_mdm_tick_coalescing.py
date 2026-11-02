@@ -2306,9 +2306,7 @@ def test_ws_recovery_requires_all_critical_generation_receipts_not_unrelated_opt
     mdm._ws_restart_started_at = now - 2.0
     mdm._ws_restart_deadline_mono = now + 4.0
     mdm._ws_recovery_timeout_sec = 15.0
-    mdm._ws_restart_affected = {
-        symbol: token for token, symbol in mapping.items()
-    }
+    mdm._ws_restart_affected = {symbol: token for token, symbol in mapping.items()}
     mdm._ws_restart_unresolved_tokens = set()
     critical = mdm._required_live_symbols()
     mdm._ws_restart_diagnostics = {"required_symbols": sorted(critical)}
@@ -2393,9 +2391,7 @@ def test_ws_recovery_missing_required_subscription_is_not_false_success(monkeypa
     mdm._ws_restart_state = "waiting_for_first_ticks"
     mdm._ws_restart_started_at = now - 1
     mdm._ws_restart_deadline_mono = now + 4
-    mdm._ws_restart_diagnostics = {
-        "required_symbols": [future, selected_ce]
-    }
+    mdm._ws_restart_diagnostics = {"required_symbols": [future, selected_ce]}
     mdm._ws_restart_affected = {future: 4}
     mdm._ws_restart_unresolved_tokens = set()
     mdm._desired_tokens = {4}
