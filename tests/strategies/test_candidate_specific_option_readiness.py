@@ -1017,3 +1017,32 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
             "depth_imbalance": 0.28,
         }
     ]
+
+
+def test_latest_terminal_execution_rejection_survives_later_acceptance() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+
+    rejected = runner._emit_signal_execution_result(
+        symbol="NFO:NIFTY2681124700CE",
+        trace_id="trace-rejected",
+        result=SignalExecutionResult(
+            False, "candidate_basket_generation_changed", details={"secret": "omit"}
+        ),
+        broker_attempted=False,
+    )
+    assert rejected is True
+    latest = runner._latest_execution_rejection
+    assert latest["reason"] == "candidate_basket_generation_changed"
+    assert latest["broker_attempted"] is False
+    assert latest["trace_id"] == "trace-rejected"
+    assert "secret" not in latest
+
+    accepted = runner._emit_signal_execution_result(
+        symbol="NFO:NIFTY2681124700CE",
+        trace_id="trace-accepted",
+        result=SignalExecutionResult(True, "submitted", order_id="oid"),
+        broker_attempted=True,
+    )
+    assert accepted is True
+    assert runner._latest_execution_rejection == latest
