@@ -2344,7 +2344,7 @@ def test_ws_recovery_requires_all_critical_generation_receipts_not_unrelated_opt
 
 def test_ws_recovery_rejects_stale_or_wrong_token_critical_receipt(monkeypatch):
     mdm = MarketDataManager(kite=None)
-    mapping = _wire_symbols(mdm)
+    _wire_symbols(mdm)
     symbol = "NFO:NIFTY26JUNFUT"
     now = time.monotonic()
     mdm._ws_restart_state = "waiting_for_first_ticks"
