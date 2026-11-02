@@ -267,9 +267,8 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
             False, reason, details=dict(details or {})
         )
     )
-    runner._current_active_contract_selection = lambda: SimpleNamespace(
-        selected_ce="NFO:CE", selected_pe="NFO:PE"
-    )
+    # Exercise the real canonical basket contract rather than a partial
+    # selected-only mock that omits generation/token identity.
     snap = _snap(ce_ok, pe_ok)
     runner._option_side_readiness_snapshot = lambda **kwargs: snap
     calls = {"gate": 0}
