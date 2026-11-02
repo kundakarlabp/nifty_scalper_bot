@@ -653,6 +653,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             "all_tokens": list(basket.all_tokens),
             "token_by_symbol": dict(basket.token_by_symbol),
         }
+
         # The live application commits a basket on its owning running loop.
         # Do the same in the simulation: context history hydration can spawn
         # asynchronous tasks, which must not bind MDM to another loop.
