@@ -1173,6 +1173,7 @@ def test_trading_status_exposes_last_execution_rejection_without_changing_readin
         broker_balance_valid=True,
         position_reconciliation_completed=True,
     )
+    ctx.live_orders_armed = True
     ctx.readiness_decision.live_orders_armed = True
     main.app.state.bot = SimpleNamespace(_ctx=ctx)
     status = main.trading_status()
