@@ -18606,16 +18606,17 @@ class StrategyRunner:
                         )
                     )
                     if candidate_contract_generation is not None:
-                        # Only the current selected contract can pass final live preflight.
                         selected_live = normalize_symbol(
                             candidate_contract_generation.selected_ce
                             if option_side == "CE"
                             else candidate_contract_generation.selected_pe
                         )
-                        ranked_candidates = [
-                            item for item in ranked_candidates
-                            if normalize_symbol(item.symbol) == selected_live
-                        ]
+                        if normalize_symbol(signal.symbol) != selected_live:
+                            # A rotated setup must requalify on the current selection.
+                            ranked_candidates = [
+                                item for item in ranked_candidates
+                                if normalize_symbol(item.symbol) == selected_live
+                            ]
                     candidate, candidate_capacity_decisions = (
                         self._select_capital_eligible_candidate(
                             ranked_candidates=ranked_candidates,
