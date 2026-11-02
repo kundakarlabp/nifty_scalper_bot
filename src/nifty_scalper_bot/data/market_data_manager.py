@@ -11242,9 +11242,10 @@ class MarketDataManager:
             self._ws_restart_fail_reason = None
             self._ws_restart_diagnostics = {
                 "restart_generation": self._ws_restart_generation,
+                # A required symbol absent from desired subscriptions is
+                # unresolved, not silently omitted from the recovery proof.
                 "required_symbols": sorted(
-                    set(affected).intersection(self._required_live_symbols())
-                    or set(affected)
+                    self._required_live_symbols() or set(affected)
                 ),
                 "initiator": "mdm_zombie_watchdog",
                 "reason": "transport_failure",
@@ -11395,13 +11396,13 @@ class MarketDataManager:
         affected_ready = True
         missing_ticks: list[str] = []
         required_set = set(required_proof or affected)
-        for symbol, token in affected.items():
-            if symbol not in required_set:
-                continue
+        for symbol in sorted(required_set):
+            token = affected.get(symbol)
             sub_gen = sub_generations.get(symbol)
             tick_gen = tick_generations.get(symbol)
             has_tick = (
-                token in desired
+                token is not None
+                and token in desired
                 and token in confirmed
                 and sub_gen is not None
                 and tick_gen is not None
