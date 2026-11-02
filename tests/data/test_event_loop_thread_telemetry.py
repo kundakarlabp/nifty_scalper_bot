@@ -223,6 +223,9 @@ def test_latency_summary_exposes_cache_replay_and_bus_percentiles(caplog) -> Non
         mdm._record_tick_latency("cache_store", 1.0)
         mdm._record_tick_latency("replay_capture", 2.0)
         mdm._record_tick_latency("bus_publish", 3.0)
+        mdm._record_tick_latency("bar_projection", 4.0)
+        mdm._record_tick_latency("closed_bar_pipeline_push", 5.0)
+        mdm._record_tick_latency("closed_bar_subscriber_callback", 6.0)
     with caplog.at_level(logging.INFO, logger=mdm._logger.name):
         mdm._log_tick_latency_summary()
     summaries = [
@@ -234,6 +237,12 @@ def test_latency_summary_exposes_cache_replay_and_bus_percentiles(caplog) -> Non
     assert summaries[0].stage_percentiles["cache_store"]["p99_ms"] == 1.0
     assert summaries[0].stage_percentiles["replay_capture"]["p99_ms"] == 2.0
     assert summaries[0].stage_percentiles["bus_publish"]["p99_ms"] == 3.0
+    assert summaries[0].stage_percentiles["bar_projection"]["p99_ms"] == 4.0
+    assert summaries[0].stage_percentiles["closed_bar_pipeline_push"]["p99_ms"] == 5.0
+    assert (
+        summaries[0].stage_percentiles["closed_bar_subscriber_callback"]["p99_ms"]
+        == 6.0
+    )
     assert "bus_publish:n=30" in summaries[0].getMessage()
 
 
@@ -256,3 +265,20 @@ def test_latency_warmup_is_observable_but_not_a_percentile_summary(caplog) -> No
         getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
         for record in caplog.records
     )
+
+
+def test_closed_bar_callback_stages_are_sampled_in_real_publish_path(monkeypatch) -> None:
+    """Measure canonical bar fanout without broker calls or second bar owner."""
+    mdm = _mdm()
+    called = []
+    monkeypatch.setattr(mdm, "_push_bar_to_pipeline", lambda bar: None)
+    mdm._bar_subscribers = [lambda bar: called.append(bar["symbol"])]
+
+    mdm._publish_closed_bar(
+        {"symbol": "NSE:NIFTY", "source": "ws_candle", "close": 24000.0}
+    )
+
+    assert called == ["NSE:NIFTY"]
+    stages = mdm._tick_latency_percentiles()
+    assert stages["closed_bar_pipeline_push"]["samples"] == 1
+    assert stages["closed_bar_subscriber_callback"]["samples"] == 1
