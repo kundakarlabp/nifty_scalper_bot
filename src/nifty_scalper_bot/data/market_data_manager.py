@@ -11412,13 +11412,7 @@ class MarketDataManager:
                 and tick_gen is not None
                 and tick_gen == sub_gen
                 and current_tokens.get(symbol) == token
-                and tick_monos.get(symbol) is not None
-                and float(tick_monos[symbol]) >= float(
-                    getattr(self, "_ws_restart_started_at", None) or 0.0
-                )
-                and 0.0 <= now_value - float(tick_monos[symbol]) <= float(
-                    getattr(self, "_ws_recovery_timeout_sec", 15.0) or 15.0
-                )
+                and receipt_fresh
             )
             if not has_tick:
                 affected_ready = False
