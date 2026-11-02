@@ -653,6 +653,7 @@ class MarketDataManager:
         self._slow_tick_stage_stats: dict[str, dict[str, Any]] = {}
         # Sample every processed tick, not just >50/100ms warnings; bounded,
         # thread-safe telemetry from the existing serial tick worker.
+        self._tick_latency_lock = threading.Lock()
         self._tick_latency_samples: dict[str, deque[float]] = {}
         self._tick_coalesced_by_priority: dict[str, int] = defaultdict(int)
         self._tick_dropped_by_reason: dict[str, int] = defaultdict(int)
@@ -7722,7 +7723,7 @@ class MarketDataManager:
         """Capture bounded all-tick stage durations; slow warnings remain separate."""
         if not math.isfinite(duration_ms) or duration_ms < 0:
             return
-        with self._pending_tick_lock:
+        with self._tick_latency_lock:
             samples = self._tick_latency_samples.setdefault(
                 stage, deque(maxlen=512)
             )
@@ -7730,7 +7731,7 @@ class MarketDataManager:
 
     def _tick_latency_percentiles(self) -> dict[str, dict[str, float | int]]:
         """Return nearest-rank p50/p95/p99 over bounded recent observations."""
-        with self._pending_tick_lock:
+        with self._tick_latency_lock:
             snapshots = {
                 stage: sorted(samples)
                 for stage, samples in self._tick_latency_samples.items()
