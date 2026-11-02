@@ -366,7 +366,6 @@ def test_unattributed_strategy_or_side_is_not_assigned_fake_setup() -> None:
     assert canonicalize_setup_opportunities([missing_strategy, missing_side]) == ()
 
 
-
 def test_contextual_counterfactual_strata_count_unique_setup_not_repeated_votes():
     from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
         summarize_contextual_label_coverage,
@@ -381,9 +380,7 @@ def test_contextual_counterfactual_strata_count_unique_setup_not_repeated_votes(
     opportunities = canonicalize_setup_opportunities(repeated)
     assert len(opportunities) == 2
     labels = {item.opportunity_id: float(n + 1) for n, item in enumerate(opportunities)}
-    report = summarize_contextual_label_coverage(
-        opportunities, labels, min_labelled=2
-    )
+    report = summarize_contextual_label_coverage(opportunities, labels, min_labelled=2)
     strategy = next(
         item for item in report["strata"] if item["dimension"] == "strategy"
     )
@@ -393,7 +390,8 @@ def test_contextual_counterfactual_strata_count_unique_setup_not_repeated_votes(
     assert report["causal_gate_effect_verified"] is False
 
     missing = summarize_contextual_label_coverage(
-        opportunities, {opportunities[0].opportunity_id: -0.2},
+        opportunities,
+        {opportunities[0].opportunity_id: -0.2},
         min_labelled=2,
     )
     partial = next(
