@@ -7759,12 +7759,15 @@ class MarketDataManager:
 
     def _log_tick_latency_summary(self) -> None:
         """Archive existing bounded percentiles through the periodic health log."""
+        # LOG_LEVEL_DATA defaults to WARNING; ordinary MDM INFO records are
+        # suppressed. Archive only this bounded operational summary at INFO.
+        telemetry_logger = get_logger("nifty_scalper_bot.operational.tick_latency")
         stats = self._tick_latency_percentiles()
         worker = stats.get("worker_await", {})
         worker_samples = int(worker.get("samples", 0))
         if worker_samples < 30:
             # This is an incomplete percentile window, not a telemetry outage.
-            self._logger.info(
+            telemetry_logger.info(
                 "TICK_LATENCY_WARMUP worker_samples=%d required_samples=30",
                 worker_samples,
                 extra={
@@ -7798,7 +7801,7 @@ class MarketDataManager:
             for stage in stages
             if stage in stats
         )
-        self._logger.info(
+        telemetry_logger.info(
             "TICK_LATENCY_SUMMARY %s",
             details,
             extra={
