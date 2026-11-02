@@ -182,7 +182,9 @@ def test_periodic_tick_latency_summary_uses_real_all_tick_samples(caplog) -> Non
     mdm = _mdm()
     for count in range(29):
         mdm._record_tick_latency("worker_await", float(count + 1))
-    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.operational.tick_latency"
+    ):
         mdm._log_tick_latency_summary()
     assert not any(
         getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
@@ -195,7 +197,9 @@ def test_periodic_tick_latency_summary_uses_real_all_tick_samples(caplog) -> Non
     mdm._record_tick_latency("tick_publication", 7.0)
     assert mdm._tick_latency_percentiles()["worker_await"]["samples"] == 30
 
-    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.operational.tick_latency"
+    ):
         mdm._log_tick_latency_summary()
     records = [
         record
@@ -227,7 +231,9 @@ def test_latency_summary_exposes_cache_replay_and_bus_percentiles(caplog) -> Non
         mdm._record_tick_latency("bar_projection", 4.0)
         mdm._record_tick_latency("closed_bar_pipeline_push", 5.0)
         mdm._record_tick_latency("closed_bar_subscriber_callback", 6.0)
-    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.operational.tick_latency"
+    ):
         mdm._log_tick_latency_summary()
     summaries = [
         record
@@ -254,7 +260,9 @@ def test_latency_warmup_is_observable_but_not_a_percentile_summary(caplog) -> No
 
     mdm = _mdm()
     mdm._record_tick_latency("worker_await", 10.0)
-    with caplog.at_level(logging.INFO, logger=mdm._logger.name):
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.operational.tick_latency"
+    ):
         mdm._log_tick_latency_summary()
     warmup = [
         record
@@ -284,3 +292,26 @@ def test_closed_bar_callback_samples_real_publish_path(monkeypatch) -> None:
     stages = mdm._tick_latency_percentiles()
     assert stages["closed_bar_pipeline_push"]["samples"] == 1
     assert stages["closed_bar_subscriber_callback"]["samples"] == 1
+
+
+def test_operational_latency_logger_survives_data_warning_override(
+    caplog, monkeypatch
+) -> None:
+    """Production data WARNING defaults must not suppress bounded summaries."""
+    import logging
+
+    mdm = _mdm()
+    data_logger = logging.getLogger("nifty_scalper_bot.data.market_data_manager")
+    monkeypatch.setattr(data_logger, "level", logging.WARNING)
+    for _ in range(30):
+        mdm._record_tick_latency("worker_await", 1.0)
+
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.operational.tick_latency"
+    ):
+        mdm._log_tick_latency_summary()
+
+    assert any(
+        getattr(record, "event", None) == "TICK_LATENCY_SUMMARY"
+        for record in caplog.records
+    )
