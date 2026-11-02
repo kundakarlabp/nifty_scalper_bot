@@ -21,6 +21,8 @@ Runtime role:
   the selected candidate or lacks finite, same-contract entry/exit geometry.
 - Pins each live candidate decision to one active basket generation and reports
   the last terminal execution rejection without relaxing quote or risk checks.
+- Gap repair imports observed cached bars only; never invents missing
+  futures/spot minutes from a prior close.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -6516,18 +6518,10 @@ class StrategyRunner:
                     end=expected + timedelta(seconds=59),
                     synthetic=False,
                 )
-            elif not is_option_symbol:
-                repaired_bar = OneMinuteBar(
-                    open=prev_close,
-                    high=prev_close,
-                    low=prev_close,
-                    close=prev_close,
-                    volume=0,
-                    start=expected,
-                    end=expected + timedelta(seconds=59),
-                    synthetic=True,
-                )
             else:
+                # A missing minute is not proof of a missing trade. Only
+                # historical bars actually captured in the canonical cache
+                # may repair the gap, including futures and spot.
                 expected += timedelta(minutes=1)
                 continue
             repaired.append(repaired_bar)
@@ -6864,6 +6858,11 @@ class StrategyRunner:
                         "gaps": gap_count,
                         "age_s": tick_age_s,
                         "grace_s": gap_grace_s,
+                        "gap_classification": (
+                            "option_sparse_interval_unverified"
+                            if is_option else "underlying_gap_unverified"
+                        ),
+                        "backfill_policy": "verified_bars_only",
                     },
                 )
                 gap_summary = getattr(self, "_candle_gap_summary", None)
