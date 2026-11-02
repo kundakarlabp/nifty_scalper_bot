@@ -915,7 +915,7 @@ def test_entry_gate_pre_broker_telemetry_does_not_claim_attempt(monkeypatch) -> 
 
 
 def test_gate_to_created_order_to_partial_fill_uses_effective_quantity(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     """END-TO-END PR1 PROOF: 130 requested -> gate approves 65 -> the REAL
     managed-order path creates the operative OrderDetails with 65 -> the REAL
@@ -930,6 +930,8 @@ def test_gate_to_created_order_to_partial_fill_uses_effective_quantity(
     from nifty_scalper_bot.execution.position_manager import PositionManager
     from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
+    # Use a test-owned release lock directory; retain real shared-lock logic.
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     broker_calls: list[dict[str, Any]] = []
 
     class _Broker:
