@@ -7728,9 +7728,7 @@ class MarketDataManager:
         ):
             return
         with self._tick_latency_lock:
-            samples = self._tick_latency_samples.setdefault(
-                stage, deque(maxlen=512)
-            )
+            samples = self._tick_latency_samples.setdefault(stage, deque(maxlen=512))
             samples.append(float(duration_ms))
 
     def _tick_latency_percentiles(self) -> dict[str, dict[str, float | int]]:
