@@ -380,6 +380,49 @@ def _sampled_markouts(
     return outcomes, strata
 
 
+def _attach_structural_costs(
+    outcomes: list[dict[str, Any]],
+    quotes: Mapping[str, list[tuple[float, float, float]]],
+) -> None:
+    """Cost-label original setup decisions only if their full book path is dense."""
+    quote_times = {
+        contract: [item[0] for item in books]
+        for contract, books in quotes.items()
+    }
+    for outcome in outcomes:
+        markout = outcome.get("markout")
+        at = outcome.get("decision_timestamp")
+        try:
+            decision_ts = float(at)
+            horizon = int(outcome["horizon_seconds"])
+            contract = str(outcome["contract"])
+        except (ValueError, TypeError, KeyError):
+            outcome["cost_adjusted"] = None
+            outcome["cost_label_status"] = "invalid_original_decision"
+            continue
+        supported = (
+            isinstance(markout, Mapping)
+            and _quote_path_dense(
+                quote_times.get(contract, ()),
+                decision_ts=decision_ts,
+                horizon_s=horizon,
+            )
+        )
+        outcome["cost_adjusted"] = (
+            _cost_model(
+                markout,
+                quantity=_MODELED_QUANTITY_DEFAULT,
+                adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
+            )
+            if supported
+            else None
+        )
+        outcome["cost_label_status"] = (
+            "modelled_not_filled" if supported else "missing_or_gapped_quote_path"
+        )
+        outcome["cost_quantity_provenance"] = "unverified_default_nifty_lot_assumption"
+
+
 def build_session_research_report(
     *,
     session_date: date,
@@ -461,6 +504,7 @@ def build_session_research_report(
                 )
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
+                _attach_structural_costs(events, quotes)
                 report["structural_outcomes"] = events
                 report["structural_strata"] = summarize_groups(
                     events, min_labelled=_MIN_LABELLED
