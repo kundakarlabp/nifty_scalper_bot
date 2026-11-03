@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 
+from scripts.reporting.rejected_setup_forward_markout import load_archive_quotes
+
 from nifty_scalper_bot.infra.market_research_report import (
     _parity_summary,
     build_session_research_report,
     research_report_log_lines,
 )
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
-from scripts.reporting.rejected_setup_forward_markout import load_archive_quotes
 
 CONTRACT = "NFO:NIFTY26N0323700CE"
 OTHER = "NFO:NIFTY26N0323700PE"
