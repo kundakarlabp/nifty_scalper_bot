@@ -552,8 +552,8 @@ def build_session_research_report(
                     for row in all_decisions
                     if _candidate_session_date_ist(row) == session_date
                 ]
-                report["historical_decision_rows_excluded"] = (
-                    len(all_decisions) - len(session_decisions)
+                report["historical_decision_rows_excluded"] = len(all_decisions) - len(
+                    session_decisions
                 )
                 structural = canonicalize_setup_opportunities(session_decisions)
                 report["independent_setup_count"] = len(structural)
