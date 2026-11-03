@@ -255,15 +255,16 @@ def build_session_research_report(
     Only file-system and CPU work after trading hours. No market/broker/network
     access; atomic persisted output remains inspectable across process restarts.
     """
-    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
-        canonicalize_setup_opportunities,
-    )
-    from nifty_scalper_bot.journal.trade_ledger import load_candidate_decision_rows
     from scripts.reporting.rejected_setup_forward_markout import (
         evaluate_opportunities,
         load_archive_quotes,
         summarize_groups,
     )
+
+    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_setup_opportunities,
+    )
+    from nifty_scalper_bot.journal.trade_ledger import load_candidate_decision_rows
 
     parity = _parity_summary(
         _parse_records(journal, "OPTION_COMPLETED_VOLUME_PARITY", session_date)
