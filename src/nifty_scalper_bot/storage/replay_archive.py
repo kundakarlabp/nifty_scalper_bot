@@ -321,6 +321,12 @@ def iter_session(path: Path) -> Iterator[dict[str, Any]]:
             or integrity.get("written_by_day", {}).get(path.stem) != counts[run]
         ):
             raise ValueError("replay_capture_incomplete")
+        initial = integrity.get("upstream_start")
+        ending = integrity.get("upstream_latest")
+        if isinstance(initial, dict) and isinstance(ending, dict):
+            for key in ("dropped", "coalesced", "legacy_queue_dropped"):
+                if key in initial and key in ending and ending[key] > initial[key]:
+                    raise ValueError("replay_capture_upstream_loss")
     if not event_count:
         raise ValueError("replay_initial_snapshot_missing")
 
