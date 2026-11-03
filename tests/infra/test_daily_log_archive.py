@@ -113,7 +113,7 @@ def test_archive_includes_bounded_startup_audit_without_protection_claim() -> No
     assert "DO_NOT_REPLICATE" not in str(audit)
 
 
-def test_research_runs_only_after_quote_capture_settles_and_replicates_summary() -> None:
+def test_research_waits_for_settle_and_replicates_summary() -> None:
     calls = []
     research_calls = []
 
