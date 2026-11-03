@@ -9,10 +9,9 @@ replicated through the existing Supabase daily log archive. Never broker orders.
 from __future__ import annotations
 
 import json
-import math
 import statistics
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -249,8 +248,8 @@ def build_session_research_report(
     return report
 
 
-def log_research_report(report: Mapping[str, Any]) -> None:
-    """Ship compact non-sensitive results via existing journald/Supabase path."""
+def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
+    """Serialize bounded, non-secret results for the existing archive text."""
     base = {
         "v": 1,
         "date": report["date_ist"],
@@ -262,23 +261,23 @@ def log_research_report(report: Mapping[str, Any]) -> None:
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
     }
-    LOGGER.info(
-        "RESEARCH_SESSION_EVIDENCE %s",
-        json.dumps(base, separators=(",", ":"), allow_nan=False),
-    )
+    encoded = lambda row: json.dumps(row, separators=(",", ":"), allow_nan=False)
+    lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
     ):
         for row in strata:
-            LOGGER.info(
-                "RESEARCH_MARKOUT_STRATUM %s",
-                json.dumps(
-                    {"v": 1, "kind": kind, **row},
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ),
+            lines.append(
+                "RESEARCH_MARKOUT_STRATUM " + encoded({"v": 1, "kind": kind, **row})
             )
+    return lines
+
+
+def log_research_report(report: Mapping[str, Any]) -> None:
+    """Local operator telemetry; archiver appends these records to its snapshot."""
+    for line in research_report_log_lines(report):
+        LOGGER.info("%s", line)
 
 
 def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
