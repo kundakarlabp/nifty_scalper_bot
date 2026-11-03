@@ -93,6 +93,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         raise ValueError("replay_audit_missing_selected_contracts")
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     minutes: dict[str, set[str]] = defaultdict(set)
+    seconds_observed: dict[str, set[str]] = defaultdict(set)
+    first_market: dict[str, datetime] = {}
+    last_market: dict[str, datetime] = {}
     previous: dict[str, datetime] = {}
     max_gap: dict[str, float] = defaultdict(float)
     basket_versions: set[tuple[str, str, str]] = set()
@@ -140,6 +143,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         if 9 * 60 + 15 <= t.hour * 60 + t.minute < 15 * 60 + 30:
             c["market_session_ticks"] += 1
             minutes[role].add(t.strftime("%H:%M"))
+            seconds_observed[role].add(t.strftime("%H:%M:%S"))
+            first_market.setdefault(role, t)
+            last_market[role] = t
         if str(tick.get("source") or "").lower() in ("ws", "websocket"):
             c["websocket_ticks"] += 1
             if current_segment is not None:
@@ -170,6 +176,18 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         n = c["ticks"]
         roles[role] = {
             "observed_ticks": n,
+            "first_market_tick_ist": (
+                first_market[role].isoformat() if role in first_market else None
+            ),
+            "last_market_tick_ist": (
+                last_market[role].isoformat() if role in last_market else None
+            ),
+            "distinct_seconds_with_updates": len(seconds_observed[role]),
+            "total_market_session_seconds": 22500,
+            "seconds_without_observed_updates": (
+                22500 - len(seconds_observed[role])
+            ),
+            "missing_market_minutes": 375 - len(minutes[role]),
             "market_session_ticks": c["market_session_ticks"],
             "observed_market_minutes": len(minutes[role]),
             "websocket_ticks": c["websocket_ticks"],
@@ -227,6 +245,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         "unselected_ticks": unmatched,
         "missing_symbol_ticks": missing_symbol,
         "gap_threshold_seconds": gap_seconds,
+        "quote_update_coverage_is_not_exchange_completeness": True,
+        "full_session_selected_coverage_proven": False,
         "roles": roles,
         "archive_integrity_verified": True,
         "observed_selected_context_available": usable_context,
