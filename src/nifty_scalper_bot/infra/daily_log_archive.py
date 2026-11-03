@@ -138,9 +138,14 @@ class DailyLogArchiver:
                     "RESEARCH_POSTMARKET_UNAVAILABLE error_type=%s",
                     type(exc).__name__,
                 )
+                fallback = {
+                    "v": 1,
+                    "status": "unavailable",
+                    "blocker": "postmarket_runner_failed",
+                }
                 lines_for_archive = [
                     "RESEARCH_SESSION_EVIDENCE "
-                    + '{"v":1,"status":"unavailable","blocker":"postmarket_runner_failed"}'
+                    + json.dumps(fallback, separators=(",", ":"))
                 ]
             if lines_for_archive:
                 prefix = f"[{current.strftime('%Y-%m-%d %H:%M:%S')} IST] "
