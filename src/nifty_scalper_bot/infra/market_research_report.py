@@ -276,7 +276,9 @@ def _sampled_markouts(
                 if verified_lot_size
                 else _MODELED_QUANTITY_DEFAULT
             )
-            selected_side_key = "selected_ce" if contract.endswith("CE") else "selected_pe"
+            selected_side_key = (
+                "selected_ce" if contract.endswith("CE") else "selected_pe"
+            )
             selected = str(context.get(selected_side_key) or "")
             if selected and normalize_symbol(selected) != contract:
                 observation, status = None, "contract_not_selected_at_decision"
