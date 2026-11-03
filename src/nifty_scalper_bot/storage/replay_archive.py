@@ -15,6 +15,7 @@ observations. No broker actions, credentials or remote uploads occur here.
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 import json
 import os
 import queue
@@ -152,9 +153,15 @@ class ReplayArchive:
         """Enqueue without JSON encoding or filesystem access on the tick path."""
         if available_at.tzinfo is None:
             raise ValueError("replay_archive_requires_timezone")
-        # The caller owns an independent canonical tick mapping. Preserve
-        # nested normalized quote fields unchanged; never mutate them here.
-        shallow_payload = dict(payload)
+        # The queue owns its snapshot: depth/OHLC and other nested broker
+        # fields must not change if the bus later mutates the caller's tick.
+        # Avoid the expensive JSON conversion and filesystem I/O here.
+        shallow_payload = {
+            key: deepcopy(value)
+            if isinstance(value, (dict, list, tuple))
+            else value
+            for key, value in payload.items()
+        }
         with self._lock:
             if self._closed:
                 return
