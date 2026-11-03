@@ -578,6 +578,10 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         return json.dumps(row, separators=(",", ":"), allow_nan=False)
 
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
+    if isinstance(report.get("capture_fidelity"), Mapping):
+        lines.append(
+            "REPLAY_SESSION_FIDELITY " + encoded(report["capture_fidelity"])
+        )
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
@@ -596,16 +600,67 @@ def log_research_report(report: Mapping[str, Any]) -> None:
 
 
 def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
-    """Run once after session close using only existing host-local evidence."""
+    """Run post-close markouts and strict capture-fidelity preflight offline."""
+    from nifty_scalper_bot.backtesting.replay_fidelity import audit_session
     from nifty_scalper_bot.config.paths import get_data_dir
 
     data_dir = get_data_dir()
+    path = data_dir / "replay_archive" / f"{session_date}.jsonl"
+    if not path.is_file():
+        compressed = path.with_name(path.name + ".gz")
+        if compressed.is_file():
+            path = compressed
+    output = data_dir / "research" / "markouts" / f"{session_date}.json"
     report = build_session_research_report(
         session_date=session_date,
         journal=journal,
-        replay_path=data_dir / "replay_archive" / f"{session_date}.jsonl",
+        replay_path=path,
         trade_db=data_dir / "trades.db",
-        output_path=data_dir / "research" / "markouts" / f"{session_date}.json",
+        output_path=output,
     )
+    quality_path = data_dir / "research" / "fidelity" / f"{session_date}.json"
+    try:
+        fidelity = audit_session(path, gap_seconds=3)
+        role_coverage = {
+            role: {
+                "observed_ticks": fields["observed_ticks"],
+                "distinct_seconds_with_updates": fields[
+                    "distinct_seconds_with_updates"
+                ],
+                "missing_market_minutes": fields["missing_market_minutes"],
+                "gaps_over_threshold": fields["gaps_over_threshold"],
+            }
+            for role, fields in fidelity["roles"].items()
+        }
+        summary = {
+            "status": "audited",
+            "archive_integrity_verified": True,
+            "observed_selected_context_available": fidelity[
+                "observed_selected_context_available"
+            ],
+            "selected_context_quote_update_coverage": role_coverage,
+            "full_session_selected_coverage_proven": False,
+            "actual_exchange_stream_completeness_proven": False,
+            "replay_sha256": fidelity["capture_sha256"],
+        }
+    except (OSError, ValueError, TypeError) as exc:
+        fidelity = {
+            "status": "unavailable",
+            "blocker": str(exc)[:110]
+            if isinstance(exc, ValueError)
+            else type(exc).__name__,
+            "archive_integrity_verified": False,
+            "full_session_selected_coverage_proven": False,
+            "actual_exchange_stream_completeness_proven": False,
+        }
+        summary = dict(fidelity)
+    quality_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = quality_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(fidelity, allow_nan=False) + "\n")
+    temporary.replace(quality_path)
+    report["capture_fidelity"] = summary
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text(json.dumps(report, allow_nan=False) + "\n")
+    temporary.replace(output)
     log_research_report(report)
     return report
