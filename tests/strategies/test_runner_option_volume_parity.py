@@ -56,9 +56,7 @@ def test_runner_preserves_trusted_large_delta_and_quarantines_untrusted(
     mdm = MarketDataManager(kite=None)
     now = datetime.now(timezone.utc)
     base = {"instrument_token": 123, "timestamp": now - timedelta(seconds=1)}
-    mdm._normalise_tick_volume_delta(
-        SYMBOL, {**base, "volume_traded_today": 1_000}
-    )
+    mdm._normalise_tick_volume_delta(SYMBOL, {**base, "volume_traded_today": 1_000})
     normalized = mdm._normalise_tick_volume_delta(
         SYMBOL,
         {"instrument_token": 123, "timestamp": now, "volume_traded_today": 2_000_000},
