@@ -2,7 +2,8 @@
 
 Responsibilities: validate existing archived tick/quote provenance, separate
 structural setup decisions from minute-sampled strategy rejections, and produce
-60/180/300-second exact-contract ask-to-bid research labels and parity evidence.
+60/180/300/600/900-second exact-contract ask-to-bid research labels, modeled
+execution costs, adverse excursion and volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -11,7 +12,9 @@ observational quotes cannot authorize changing any live entry or risk policy.
 
 from __future__ import annotations
 
+import bisect
 import json
+import math
 import os
 import statistics
 from collections import defaultdict
@@ -20,12 +23,13 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
-_HORIZONS = (60, 180, 300)
+_HORIZONS = (60, 180, 300, 600, 900)
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
@@ -157,6 +161,67 @@ def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _cost_model(
+    markout: Mapping[str, Any],
+    *,
+    quantity: int,
+    adverse_slippage_bps: float,
+) -> dict[str, Any]:
+    """Apply the canonical fee model to crossed ask/bid, never double-pay spread."""
+    ask = float(markout["entry_ask"])
+    slip = adverse_slippage_bps / 10_000
+    paid = ask * (1 + slip)
+
+    def exit_value(bid: float) -> dict[str, float]:
+        sold = bid * (1 - slip)
+        cost = estimate_round_trip_cost(
+            entry_price=paid,
+            exit_price=sold,
+            quantity=quantity,
+            half_spread=0.0,
+        )
+        gross = (sold - paid) * quantity
+        return {
+            "gross_rupees": round(gross, 2),
+            "fees_rupees": round(cost.total, 2),
+            "net_rupees": round(gross - cost.total, 2),
+        }
+
+    low = ask * (1 + float(markout["mae_markout_pct"]) / 100)
+    high = ask * (1 + float(markout["mfe_markout_pct"]) / 100)
+    return {
+        "terminal": exit_value(float(markout["terminal_bid"])),
+        "observed_mae": exit_value(low),
+        "observed_mfe": exit_value(high),
+        "quantity_units_assumed": quantity,
+        "adverse_slippage_bps_per_side": adverse_slippage_bps,
+        "spread_crossed_using_actual_ask_bid": True,
+        "depth_quantity_verified": False,
+        "actual_stop_executed": None,
+    }
+
+
+def _quote_path_dense(
+    quotes: list[tuple[float, float, float]],
+    *,
+    decision_ts: float,
+    horizon_s: int,
+    max_gap_s: float = 10.0,
+) -> bool:
+    """Withhold cost/MAE labels if the interior exact-contract tape has gaps."""
+    if not quotes:
+        return False
+    stamps = [tick[0] for tick in quotes]
+    prior = bisect.bisect_right(stamps, decision_ts) - 1
+    end = bisect.bisect_right(stamps, decision_ts + horizon_s)
+    if prior < 0 or end - prior < 4:
+        return False
+    return all(
+        0 <= right - left <= max_gap_s
+        for left, right in zip(stamps[prior : end - 1], stamps[prior + 1 : end])
+    )
+
+
 def _sampled_markouts(
     records: list[dict[str, Any]],
     quotes: Mapping[str, list[tuple[float, float, float]]],
@@ -196,6 +261,19 @@ def _sampled_markouts(
                 decision_ts=decision_ts,
                 horizon_s=horizon,
             )
+            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            selected_side_key = "selected_ce" if contract.endswith("CE") else "selected_pe"
+            selected = str(context.get(selected_side_key) or "")
+            if selected and normalize_symbol(selected) != contract:
+                observation, status = None, "contract_not_selected_at_decision"
+            continuous = bool(
+                observation is not None
+                and _quote_path_dense(
+                    quotes.get(contract, ()),
+                    decision_ts=decision_ts,
+                    horizon_s=horizon,
+                )
+            )
             result = {
                 "strategy": strategy,
                 "contract": contract,
@@ -206,6 +284,21 @@ def _sampled_markouts(
                 "horizon_seconds": horizon,
                 "markout": observation,
                 "label_status": status,
+                "cost_adjusted": (
+                    _cost_model(
+                        observation,
+                        quantity=65,
+                        adverse_slippage_bps=5.0,
+                    )
+                    if observation is not None and continuous
+                    else None
+                ),
+                "cost_label_status": (
+                    "modelled_not_filled"
+                    if continuous
+                    else "missing_or_gapped_quote_path"
+                ),
+                "decision_context": context,
                 "sampling": "first_no_vote_per_contract_strategy_utc_minute",
                 "independent_structural_setup": False,
             }
@@ -220,6 +313,11 @@ def _sampled_markouts(
             if isinstance(item["markout"], dict)
         ]
         enough = len(labelled) >= _MIN_LABELLED
+        net_labelled = [
+            float(item["cost_adjusted"]["terminal"]["net_rupees"])
+            for item in items
+            if isinstance(item.get("cost_adjusted"), dict)
+        ]
         strata.append(
             {
                 "strategy": strategy,
@@ -240,6 +338,13 @@ def _sampled_markouts(
                     if enough
                     else None
                 ),
+                "cost_adjusted_labelled": len(net_labelled),
+                "mean_modelled_net_rupees": (
+                    round(statistics.mean(net_labelled), 2)
+                    if len(net_labelled) >= _MIN_LABELLED
+                    else None
+                ),
+                "actual_stop_outcomes_verified": False,
                 "minimum_labelled": _MIN_LABELLED,
                 "independent_structural_setup": False,
                 "eligible_for_filter_change": False,
