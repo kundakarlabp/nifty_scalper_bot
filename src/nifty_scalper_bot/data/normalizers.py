@@ -1,4 +1,10 @@
-"""Shared market-data normalization helpers."""
+"""Normalize completed OHLCV rows for runner history and indicators.
+
+Accept finite, nonnegative completed-minute volume without arbitrary option
+ceilings; MDM owns exchange cumulative-to-interval conversion and its trust
+checks. Invalid numeric data remains non-executable or zero volume, never a
+fabricated positive trade.
+"""
 
 from __future__ import annotations
 
