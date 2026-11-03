@@ -269,13 +269,20 @@ def _sampled_markouts(
                 horizon_s=horizon,
                 timestamps=quote_times.get(contract, ()),
             )
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            raw_context = row.get("context")
+            context: dict[str, Any] = (
+                raw_context if isinstance(raw_context, dict) else {}
+            )
             recorded_lot_size = context.get("lot_size")
             verified_lot_size = (
-                type(recorded_lot_size) is int and 0 < recorded_lot_size < 10000
+                isinstance(recorded_lot_size, int)
+                and not isinstance(recorded_lot_size, bool)
+                and 0 < recorded_lot_size < 10000
             )
             quantity = (
-                recorded_lot_size if verified_lot_size else _MODELED_QUANTITY_DEFAULT
+                recorded_lot_size
+                if isinstance(recorded_lot_size, int) and verified_lot_size
+                else _MODELED_QUANTITY_DEFAULT
             )
             selected_side_key = (
                 "selected_ce" if contract.endswith("CE") else "selected_pe"
@@ -387,6 +394,8 @@ def _attach_structural_costs(
         markout = outcome.get("markout")
         at = outcome.get("decision_timestamp")
         try:
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                raise ValueError("invalid_original_decision_timestamp")
             decision_ts = float(at)
             horizon = int(outcome["horizon_seconds"])
             contract = str(outcome["contract"])
@@ -399,15 +408,14 @@ def _attach_structural_costs(
             decision_ts=decision_ts,
             horizon_s=horizon,
         )
-        outcome["cost_adjusted"] = (
-            _cost_model(
+        if isinstance(markout, Mapping) and supported:
+            outcome["cost_adjusted"] = _cost_model(
                 markout,
                 quantity=_MODELED_QUANTITY_DEFAULT,
                 adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
             )
-            if supported
-            else None
-        )
+        else:
+            outcome["cost_adjusted"] = None
         outcome["cost_label_status"] = (
             "modelled_not_filled" if supported else "missing_or_gapped_quote_path"
         )
