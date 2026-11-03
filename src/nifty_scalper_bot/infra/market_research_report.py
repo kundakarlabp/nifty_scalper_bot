@@ -1,0 +1,297 @@
+"""Post-session, broker-free analysis of authoritative replay plus journal samples.
+
+Input: the already-recorded immutable replay tape and the local journald
+snapshot; approved/blocked structural decisions come from the existing SQLite
+trade journal. Output: an atomic local JSON report and bounded journal summaries
+replicated through the existing Supabase daily log archive. Never broker orders.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import statistics
+from collections import defaultdict
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
+from zoneinfo import ZoneInfo
+
+from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+LOGGER = get_logger(__name__)
+_IST = ZoneInfo("Asia/Kolkata")
+_HORIZONS = (60, 180, 300)
+_MIN_LABELLED = 10
+_STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
+
+
+def _parse_records(journal: str, marker: str, session_date: date) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in journal.splitlines():
+        if marker not in line:
+            continue
+        _, _, raw = line.partition(marker + " ")
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw.strip())
+            if not isinstance(payload, dict) or payload.get("v") != 1:
+                continue
+            instant = datetime.fromisoformat(
+                str(payload.get("decision_at") or payload.get("checked_at"))
+            )
+            if instant.tzinfo is None or instant.astimezone(_IST).date() != session_date:
+                continue
+            records.append(payload)
+        except (ValueError, TypeError, KeyError):
+            continue
+    return records
+
+
+def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    # A restarted process can re-observe one completed minute. Last evidence
+    # for the exact contract/minute wins; missing is never converted to match.
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in records:
+        symbol = normalize_symbol(str(row.get("symbol") or ""))
+        minute = str(row.get("indicator_minute") or row.get("checked_at") or "")
+        if symbol.startswith("NFO:") and minute:
+            unique[(symbol, minute)] = row
+    statuses: dict[str, int] = defaultdict(int)
+    by_side: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for (symbol, _minute), row in unique.items():
+        status = str(row.get("status") or "missing")
+        statuses[status] += 1
+        by_side[symbol[-2:]][status] += 1
+    matches = statuses.get("same_minute_volume_match", 0)
+    return {
+        "unit": "distinct_selected_contract_completed_minute",
+        "observations": len(unique),
+        "positive_volume_matches": matches,
+        "verified_fraction_of_observed": (
+            round(matches / len(unique), 4) if unique else 0.0
+        ),
+        "statuses": dict(sorted(statuses.items())),
+        "by_side": {key: dict(sorted(val.items())) for key, val in sorted(by_side.items())},
+        "complete_day_coverage_proven": False,
+    }
+
+
+def _sampled_markouts(
+    records: list[dict[str, Any]],
+    quotes: Mapping[str, list[tuple[float, float, float]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from scripts.reporting.rejected_setup_forward_markout import observed_markout
+
+    # One timestamped no-vote per strategy/contract/UTC minute. This is NOT
+    # deduplication by structural setup ID and cannot justify changing a gate.
+    samples: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in records:
+        strategy = str(row.get("strategy") or "")
+        contract = normalize_symbol(str(row.get("symbol") or ""))
+        minute = str(row.get("evaluation_minute") or "")
+        if (
+            strategy not in _STRATEGIES
+            or not contract.startswith("NFO:")
+            or not contract.endswith(("CE", "PE"))
+            or not minute
+        ):
+            continue
+        samples.setdefault((strategy, contract, minute), row)
+
+    outcomes: list[dict[str, Any]] = []
+    groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for (strategy, contract, minute), row in sorted(samples.items()):
+        try:
+            instant = datetime.fromisoformat(str(row["decision_at"]))
+            if instant.tzinfo is None:
+                continue
+            decision_ts = instant.timestamp()
+        except (ValueError, TypeError, KeyError):
+            continue
+        reason = str(row.get("reason") or "none")[:100]
+        for horizon in _HORIZONS:
+            observation, status = observed_markout(
+                quotes.get(contract, ()),
+                decision_ts=decision_ts,
+                horizon_s=horizon,
+            )
+            result = {
+                "strategy": strategy,
+                "contract": contract,
+                "side": contract[-2:],
+                "minute": minute,
+                "decision_at": instant.isoformat(),
+                "reason": reason,
+                "horizon_seconds": horizon,
+                "markout": observation,
+                "label_status": status,
+                "sampling": "first_no_vote_per_contract_strategy_utc_minute",
+                "independent_structural_setup": False,
+            }
+            outcomes.append(result)
+            groups[(strategy, reason, horizon)].append(result)
+
+    strata: list[dict[str, Any]] = []
+    for (strategy, reason, horizon), items in sorted(groups.items()):
+        labelled = [
+            float(item["markout"]["gross_spread_adjusted_markout_pct"])
+            for item in items
+            if isinstance(item["markout"], dict)
+        ]
+        enough = len(labelled) >= _MIN_LABELLED
+        strata.append(
+            {
+                "strategy": strategy,
+                "reason": reason,
+                "horizon_seconds": horizon,
+                "sampled_minutes": len(items),
+                "labelled": len(labelled),
+                "unlabelled": len(items) - len(labelled),
+                "coverage_fraction": round(len(labelled) / len(items), 4),
+                "mean_ask_to_bid_pct": round(statistics.mean(labelled), 5)
+                if enough else None,
+                "median_ask_to_bid_pct": round(statistics.median(labelled), 5)
+                if enough else None,
+                "positive_fraction": round(
+                    sum(value > 0 for value in labelled) / len(labelled), 4
+                ) if enough else None,
+                "minimum_labelled": _MIN_LABELLED,
+                "independent_structural_setup": False,
+                "eligible_for_filter_change": False,
+            }
+        )
+    return outcomes, strata
+
+
+def build_session_research_report(
+    *,
+    session_date: date,
+    journal: str,
+    replay_path: Path,
+    trade_db: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Build an integrity-checked report; missing inputs fail closed.
+
+    Only file-system and CPU work after trading hours. No market/broker/network
+    access; atomic persisted output remains inspectable across process restarts.
+    """
+    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_setup_opportunities,
+    )
+    from nifty_scalper_bot.journal.trade_ledger import load_candidate_decision_rows
+    from scripts.reporting.rejected_setup_forward_markout import (
+        evaluate_opportunities,
+        load_archive_quotes,
+        summarize_groups,
+    )
+
+    parity = _parity_summary(
+        _parse_records(journal, "OPTION_COMPLETED_VOLUME_PARITY", session_date)
+    )
+    rejection_records = _parse_records(
+        journal, "RESEARCH_STRATEGY_REJECTION", session_date
+    )
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "date_ist": session_date.isoformat(),
+        "horizons_seconds": list(_HORIZONS),
+        "analysis": "observed_exact_contract_ask_to_bid_not_broker_fills",
+        "volume_parity": parity,
+        "sampled_observations": [],
+        "sampled_strata": [],
+        "structural_outcomes": [],
+        "structural_strata": [],
+        "independent_setup_count": 0,
+        "replay_sha256": None,
+        "eligible_for_entry_filter_change": False,
+        "status": "unavailable",
+        "blocker": None,
+    }
+    try:
+        quotes, sha, quote_count = load_archive_quotes(replay_path)
+        report["replay_sha256"] = sha
+        report["tradable_ws_quote_ticks"] = quote_count
+        if not quote_count:
+            report["blocker"] = "no_tradable_depth_ws_quotes"
+        else:
+            sampled, strata = _sampled_markouts(rejection_records, quotes)
+            report["sampled_observations"] = sampled
+            report["sampled_strata"] = strata
+            if trade_db.is_file():
+                structural = canonicalize_setup_opportunities(
+                    load_candidate_decision_rows(trade_db)
+                )
+                report["independent_setup_count"] = len(structural)
+                events = evaluate_opportunities(structural, quotes, _HORIZONS)
+                report["structural_outcomes"] = events
+                report["structural_strata"] = summarize_groups(
+                    events, min_labelled=_MIN_LABELLED
+                )
+            else:
+                report["structural_data_blocker"] = "canonical_trade_db_missing"
+            report["status"] = "analysed"
+    except (OSError, ValueError, TypeError) as exc:
+        report["blocker"] = (
+            str(exc)[:110] if isinstance(exc, ValueError)
+            else f"research_source_{type(exc).__name__}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = output_path.with_suffix(".tmp")
+    temp.write_text(
+        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    temp.replace(output_path)
+    return report
+
+
+def log_research_report(report: Mapping[str, Any]) -> None:
+    """Ship compact non-sensitive results via existing journald/Supabase path."""
+    base = {
+        "v": 1,
+        "date": report["date_ist"],
+        "status": report["status"],
+        "blocker": report.get("blocker"),
+        "replay_sha256": report.get("replay_sha256"),
+        "tradable_ws_quote_ticks": report.get("tradable_ws_quote_ticks"),
+        "independent_setup_count": report["independent_setup_count"],
+        "sampled_observations": len(report["sampled_observations"]),
+        "volume_parity": report["volume_parity"],
+    }
+    LOGGER.info(
+        "RESEARCH_SESSION_EVIDENCE %s",
+        json.dumps(base, separators=(",", ":"), allow_nan=False),
+    )
+    for kind, strata in (
+        ("minute_sample", report["sampled_strata"]),
+        ("structural_setup", report["structural_strata"]),
+    ):
+        for row in strata:
+            LOGGER.info(
+                "RESEARCH_MARKOUT_STRATUM %s",
+                json.dumps(
+                    {"v": 1, "kind": kind, **row},
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+            )
+
+
+def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
+    """Run once after session close using only existing host-local evidence."""
+    from nifty_scalper_bot.config.paths import get_data_dir
+
+    data_dir = get_data_dir()
+    report = build_session_research_report(
+        session_date=session_date,
+        journal=journal,
+        replay_path=data_dir / "replay_archive" / f"{session_date}.jsonl",
+        trade_db=data_dir / "trades.db",
+        output_path=data_dir / "research" / "markouts" / f"{session_date}.json",
+    )
+    log_research_report(report)
+    return report
