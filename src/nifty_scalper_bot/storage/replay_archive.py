@@ -1,11 +1,14 @@
-"""Bounded, asynchronous archive of the observations delivered to the live runner.
+"""Bounded, asynchronous capture of live market observations for replay.
 
-Archive failures never block trading. Sequence gaps and writer failures invalidate
-replay evidence; missing depth is preserved rather than manufactured.
+Responsibilities: Preserve complete normalized WS ticks, active basket snapshots,
+original reception order and verified integrity across process restarts.
+Safety: Capture failures never block trading; dropped records, failed writes and
+sequence gaps invalidate evidence. Completed .jsonl.gz inputs remain read-only.
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -208,7 +211,8 @@ def iter_session(path: Path) -> Iterator[dict[str, Any]]:
     sequences: dict[str, int] = {}
     counts: dict[str, int] = {}
     previous: datetime | None = None
-    with path.open(encoding="utf-8") as handle:
+    reader = gzip.open if path.name.endswith(".jsonl.gz") else Path.open
+    with reader(path, mode="rt", encoding="utf-8") as handle:
         for line in handle:
             try:
                 event = json.loads(line)
@@ -240,6 +244,11 @@ def iter_session(path: Path) -> Iterator[dict[str, Any]]:
                 yield event
             except (ValueError, KeyError, TypeError) as exc:
                 raise ValueError("invalid_replay_event") from exc
+    session_day = (
+        path.name.removesuffix(".jsonl.gz")
+        if path.name.endswith(".jsonl.gz")
+        else path.stem
+    )
     for run in sequences:
         integrity_path = path.parent / f"{run}.integrity.json"
         if not integrity_path.is_file():
@@ -248,7 +257,7 @@ def iter_session(path: Path) -> Iterator[dict[str, Any]]:
         if (
             integrity.get("dropped")
             or integrity.get("failed")
-            or integrity.get("written_by_day", {}).get(path.stem) != counts[run]
+            or integrity.get("written_by_day", {}).get(session_day) != counts[run]
         ):
             raise ValueError("replay_capture_incomplete")
     if not event_count:
