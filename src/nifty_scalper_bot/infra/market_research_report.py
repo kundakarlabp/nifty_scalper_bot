@@ -4,6 +4,7 @@ Responsibilities: validate existing archived tick/quote provenance, separate
 structural setup decisions from minute-sampled strategy rejections, and produce
 60/180/300/600/900-second exact-contract ask-to-bid research labels, modeled
 execution costs, adverse excursion and volume parity evidence.
+Session boundary: Filter journal decisions by IST date before deduplication.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -17,7 +18,7 @@ import json
 import os
 import statistics
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -454,6 +455,21 @@ def _attach_structural_costs(
         outcome["cost_quantity_provenance"] = "unverified_default_nifty_lot_assumption"
 
 
+def _candidate_session_date_ist(row: Mapping[str, Any]) -> date | None:
+    """Resolve event times in IST, using the canonical UTC default."""
+    raw = row.get("timestamp") or row.get("created_at")
+    try:
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            stamp = datetime.fromtimestamp(raw, tz=timezone.utc)
+        else:
+            stamp = datetime.fromisoformat(str(raw or "").replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(_IST).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def build_session_research_report(
     *,
     session_date: date,
@@ -530,9 +546,16 @@ def build_session_research_report(
             report["sampled_observations"] = sampled
             report["sampled_strata"] = strata
             if trade_db.is_file():
-                structural = canonicalize_setup_opportunities(
-                    load_candidate_decision_rows(trade_db)
+                all_decisions = load_candidate_decision_rows(trade_db)
+                session_decisions = [
+                    row
+                    for row in all_decisions
+                    if _candidate_session_date_ist(row) == session_date
+                ]
+                report["historical_decision_rows_excluded"] = len(all_decisions) - len(
+                    session_decisions
                 )
+                structural = canonicalize_setup_opportunities(session_decisions)
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
                 _attach_structural_costs(events, quotes)
@@ -569,6 +592,9 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "replay_sha256": report.get("replay_sha256"),
         "tradable_ws_quote_ticks": report.get("tradable_ws_quote_ticks"),
         "independent_setup_count": report["independent_setup_count"],
+        "historical_decision_rows_excluded": report.get(
+            "historical_decision_rows_excluded", 0
+        ),
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
     }
