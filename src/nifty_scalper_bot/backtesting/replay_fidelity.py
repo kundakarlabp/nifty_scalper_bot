@@ -189,9 +189,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             ),
             "distinct_seconds_with_updates": len(seconds_observed[role]),
             "total_market_session_seconds": 22500,
-            "seconds_without_observed_updates": (
-                22500 - len(seconds_observed[role])
-            ),
+            "seconds_without_observed_updates": (22500 - len(seconds_observed[role])),
             "missing_market_minutes": 375 - len(minutes[role]),
             "market_session_ticks": c["market_session_ticks"],
             "observed_market_minutes": len(minutes[role]),
