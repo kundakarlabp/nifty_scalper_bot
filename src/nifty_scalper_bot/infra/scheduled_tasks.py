@@ -13,7 +13,7 @@ import inspect
 import os
 from pathlib import Path
 from time import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from nifty_scalper_bot.infra.daily_log_archive import (
     archive_interval_seconds,
@@ -151,7 +151,10 @@ def start_replay_compaction_task() -> asyncio.Task[Any] | None:
             compact_prior_sessions,
         )
 
-        reports = compact_prior_sessions(get_data_dir() / "replay_archive")
+        reports = cast(
+            list[dict[str, object]],
+            compact_prior_sessions(get_data_dir() / "replay_archive"),
+        )
         for item in reports:
             if item.get("complete_integrity_verified"):
                 LOGGER.info(
@@ -167,7 +170,7 @@ def start_replay_compaction_task() -> asyncio.Task[Any] | None:
                 )
         return reports
 
-    return safe_task(
+    task: asyncio.Task[Any] = safe_task(
         run_periodic_task(
             task_fn=lambda: asyncio.to_thread(compact),
             interval_sec=3600,
@@ -175,6 +178,7 @@ def start_replay_compaction_task() -> asyncio.Task[Any] | None:
             run_immediately=True,
         )
     )
+    return task
 
 
 def start_runtime_heartbeat_task() -> asyncio.Task[Any] | None:
