@@ -124,11 +124,14 @@ def test_rejections_are_exact_contract_minute_samples_not_fake_setups(caplog) ->
     assert "setup_id" not in a
     assert a["decision_at"] == at.isoformat()
     assert caplog.text.count("RESEARCH_STRATEGY_REJECTION") == 2
-    assert record_strategy_rejection_sample(
-        owner,
-        strategy="SMC",
-        symbol=CE,
-        reason="underlying_no_liquidity_sweep",
-        indicators={},
-        at=at + timedelta(minutes=1),
-    ) is not None
+    assert (
+        record_strategy_rejection_sample(
+            owner,
+            strategy="SMC",
+            symbol=CE,
+            reason="underlying_no_liquidity_sweep",
+            indicators={},
+            at=at + timedelta(minutes=1),
+        )
+        is not None
+    )
