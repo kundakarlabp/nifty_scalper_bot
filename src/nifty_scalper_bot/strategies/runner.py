@@ -11,6 +11,8 @@ Runtime role:
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains active history counts and uses shared direction-context resolution.
+- Preserves MDM-trusted option interval volumes in runner candle/indicator history;
+  untrusted cumulative observations remain excluded.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
@@ -14262,29 +14264,10 @@ class StrategyRunner:
                         interval_sec=60.0,
                         level=logging.INFO,
                     )
-            if self._is_tradable_symbol(symbol):
-                max_runner_delta = int(
-                    os.getenv("OPTION_MAX_REASONABLE_TICK_VOLUME_DELTA", "1000000")
-                    or "1000000"
-                )
-                if volume > max_runner_delta:
-                    log_throttled(
-                        self._logger,
-                        f"runner_option_volume_clamped:{symbol}",
-                        "RUNNER_OPTION_VOLUME_CLAMPED symbol=%s volume=%s max=%s",
-                        symbol,
-                        volume,
-                        max_runner_delta,
-                        interval_sec=60.0,
-                        level=logging.WARNING,
-                        extra={
-                            "event": "RUNNER_OPTION_VOLUME_CLAMPED",
-                            "symbol": symbol,
-                            "volume": volume,
-                            "max": max_runner_delta,
-                        },
-                    )
-                    volume = 0
+            # MDM has already checked cumulative ordering, resets and trust.
+            # Do not impose a second arbitrary option-delta cap: dropping a
+            # trusted burst makes the runner's completed minute disagree with
+            # the canonical MDM minute. Untrusted deltas remain zero above.
 
             price_source = "ltp"
             price_from_cache = False
