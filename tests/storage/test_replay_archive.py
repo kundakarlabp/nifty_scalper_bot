@@ -161,3 +161,25 @@ def test_recorder_reports_bounded_queue_and_writer_lag(tmp_path):
     assert sidecar["queue_capacity"] == 3
     assert sidecar["max_writer_lag_ms"] >= 0.0
     assert sidecar["written_by_day"]["2026-11-03"] == 1
+
+
+def test_archive_freezes_nested_depth_before_writer_runs(tmp_path):
+    archive = ReplayArchive(tmp_path)
+    instant = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
+    archive.record("snapshot", {"basket": {}}, instant)
+    raw = {
+        "symbol": "NFO:NIFTY26NOV24000PE",
+        "ltp": 90.0,
+        "depth": {
+            "buy": [{"price": 89.95, "quantity": 25}],
+            "sell": [{"price": 90.05, "quantity": 50}],
+        },
+        "ohlc": {"open": 90.0},
+    }
+    archive.record("tick", raw, instant)
+    raw["depth"]["buy"][0]["price"] = 999.0
+    raw["ohlc"]["open"] = 999.0
+    archive.close()
+    observed = load_session(tmp_path / "2026-11-03.jsonl")[1]["payload"]
+    assert observed["depth"]["buy"][0]["price"] == 89.95
+    assert observed["ohlc"]["open"] == 90.0
