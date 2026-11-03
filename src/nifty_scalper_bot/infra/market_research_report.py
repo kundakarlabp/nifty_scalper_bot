@@ -357,6 +357,7 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
 
     def encoded(row: Mapping[str, Any]) -> str:
         return json.dumps(row, separators=(",", ":"), allow_nan=False)
+
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
