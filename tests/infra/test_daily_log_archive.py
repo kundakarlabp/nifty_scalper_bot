@@ -151,6 +151,7 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
     assert "RESEARCH_SESSION_EVIDENCE " in calls[1]["log_text"]
     assert calls[1]["build_sha"] is not None
     assert calls[1]["line_count"] == 2
-    assert archiver.archive_once(
-        datetime(2026, 11, 3, 15, 40, tzinfo=IST)
-    ) == {"archived": False, "reason": "already_finalized"}
+    assert archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST)) == {
+        "archived": False,
+        "reason": "already_finalized",
+    }
