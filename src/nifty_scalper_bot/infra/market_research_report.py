@@ -19,7 +19,7 @@ import statistics
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
@@ -207,23 +207,24 @@ def _cost_model(
 
 
 def _quote_path_dense(
-    quotes: list[tuple[float, float, float]],
+    timestamps: Sequence[float],
     *,
     decision_ts: float,
     horizon_s: int,
     max_gap_s: float = 10.0,
 ) -> bool:
     """Withhold cost/MAE labels if the interior exact-contract tape has gaps."""
-    if not quotes:
+    if not timestamps:
         return False
-    stamps = [tick[0] for tick in quotes]
-    prior = bisect.bisect_right(stamps, decision_ts) - 1
-    end = bisect.bisect_right(stamps, decision_ts + horizon_s)
+    prior = bisect.bisect_right(timestamps, decision_ts) - 1
+    end = bisect.bisect_right(timestamps, decision_ts + horizon_s)
     if prior < 0 or end - prior < 4:
         return False
     return all(
         0 <= right - left <= max_gap_s
-        for left, right in zip(stamps[prior : end - 1], stamps[prior + 1 : end])
+        for left, right in zip(
+            timestamps[prior : end - 1], timestamps[prior + 1 : end]
+        )
     )
 
 
@@ -249,6 +250,10 @@ def _sampled_markouts(
             continue
         samples.setdefault((strategy, contract, minute), row)
 
+    quote_times = {
+        contract: [item[0] for item in books]
+        for contract, books in quotes.items()
+    }
     outcomes: list[dict[str, Any]] = []
     groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for (strategy, contract, minute), row in sorted(samples.items()):
@@ -265,6 +270,7 @@ def _sampled_markouts(
                 quotes.get(contract, ()),
                 decision_ts=decision_ts,
                 horizon_s=horizon,
+                timestamps=quote_times.get(contract, ()),
             )
             context = row.get("context") if isinstance(row.get("context"), dict) else {}
             recorded_lot_size = context.get("lot_size")
@@ -285,7 +291,7 @@ def _sampled_markouts(
             continuous = bool(
                 observation is not None
                 and _quote_path_dense(
-                    quotes.get(contract, ()),
+                    quote_times.get(contract, ()),
                     decision_ts=decision_ts,
                     horizon_s=horizon,
                 )
