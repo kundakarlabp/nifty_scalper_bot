@@ -77,3 +77,87 @@ def test_writer_size_cap_invalidates_evidence(tmp_path):
     assert archive.stats()["failed"] == 1
     with pytest.raises(ValueError, match="replay_capture_incomplete"):
         load_session(tmp_path / "2026-10-01.jsonl")
+
+
+def test_recorder_serializes_only_on_background_writer(tmp_path, monkeypatch):
+    """FULL quote conversion must not run on the WebSocket/tick callback."""
+    import threading
+
+    import nifty_scalper_bot.storage.replay_archive as archive_module
+
+    observed_threads = []
+    original = archive_module.to_json_safe
+
+    def inspect_conversion(payload):
+        observed_threads.append(threading.current_thread().name)
+        return original(payload)
+
+    monkeypatch.setattr(archive_module, "to_json_safe", inspect_conversion)
+    archive = ReplayArchive(tmp_path)
+    t = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
+    archive.record("snapshot", {"basket": {"selected_ce": "NFO:CE"}}, t)
+    for index in range(200):
+        archive.record(
+            "tick",
+            {
+                "symbol": "NFO:NIFTY26NOV24000CE",
+                "ltp": 101.0 + index / 10,
+                "source": "ws",
+                "depth": {
+                    "buy": [{"price": 100.0, "quantity": 75}],
+                    "sell": [{"price": 101.0, "quantity": 75}],
+                },
+            },
+            t,
+        )
+    archive.close()
+    assert observed_threads
+    assert set(observed_threads) == {"replay-archive"}
+    events = load_session(tmp_path / "2026-11-03.jsonl")
+    assert len(events) == 201
+    assert events[-1]["sequence"] == 201
+    stats = archive.stats()
+    assert stats["written"] == 201
+    assert stats["failed"] == 0
+    assert stats["dropped"] == 0
+    assert stats["queue_capacity"] >= 201
+
+
+def test_recorder_upstream_coalescing_invalidates_replay(tmp_path):
+    import pytest
+
+    upstream = {
+        "raw_ws_receipts": 10,
+        "submitted": 9,
+        "processed": 9,
+        "dropped": 0,
+        "coalesced": 0,
+        "legacy_queue_dropped": 0,
+    }
+    archive = ReplayArchive(tmp_path, upstream_provider=lambda: dict(upstream))
+    now = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
+    archive.record("snapshot", {"basket": {}}, now)
+    archive.record("tick", {"symbol": "NSE:NIFTY", "ltp": 100}, now)
+    upstream["raw_ws_receipts"] += 2
+    upstream["submitted"] += 2
+    upstream["processed"] += 1
+    upstream["coalesced"] += 1
+    archive.close()
+    sidecar = json.loads((tmp_path / f"{archive.run_id}.integrity.json").read_text())
+    assert sidecar["upstream_start"]["coalesced"] == 0
+    assert sidecar["upstream_latest"]["coalesced"] == 1
+    with pytest.raises(ValueError, match="replay_capture_upstream_loss"):
+        load_session(tmp_path / "2026-11-03.jsonl")
+
+
+def test_recorder_reports_bounded_queue_and_writer_lag(tmp_path):
+    archive = ReplayArchive(tmp_path, capacity=3)
+    now = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
+    archive.record("snapshot", {}, now)
+    archive.close()
+    sidecar = json.loads((tmp_path / f"{archive.run_id}.integrity.json").read_text())
+    assert sidecar["max_pending"] >= 1
+    assert sidecar["max_pending"] <= 3
+    assert sidecar["queue_capacity"] == 3
+    assert sidecar["max_writer_lag_ms"] >= 0.0
+    assert sidecar["written_by_day"]["2026-11-03"] == 1
