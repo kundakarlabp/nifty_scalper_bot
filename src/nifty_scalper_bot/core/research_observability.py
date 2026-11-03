@@ -50,7 +50,7 @@ def sample_selected_option_parity(
     selector = getattr(hub, "get_selected_option_symbols", None)
     history = getattr(engine, "get_history", None)
     canonical = getattr(hub, "get_ohlc_bars", None)
-    if not all(callable(x) for x in (selector, history, canonical)):
+    if not callable(selector) or not callable(history) or not callable(canonical):
         return []
     try:
         selected = selector()
