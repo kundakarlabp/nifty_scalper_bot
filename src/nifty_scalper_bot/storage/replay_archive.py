@@ -1,7 +1,15 @@
-"""Bounded, asynchronous archive of the observations delivered to the live runner.
+"""Purpose: Capture ordered normalized market observations for replay without blocking trading.
 
-Archive failures never block trading. Sequence gaps and writer failures invalidate
-replay evidence; missing depth is preserved rather than manufactured.
+Responsibilities: ReplayArchive.record queues delivered ticks and snapshots;
+the background writer serializes JSON, reuses buffered day files, and writes
+integrity sidecars with queue-pressure and optional upstream-ingress counters.
+iter_session validates exact sequence, writer totals and reported upstream loss.
+
+Ownership: ReplayArchive owns the authoritative local tick tape and writer
+integrity; MarketDataManager owns WebSocket ingestion and source quality.
+Safety: Writer failures, queue overflow and upstream drops/coalescing invalidate
+research replay; never infer exchange delivery, depth, or fills from missing
+observations. No broker actions, credentials or remote uploads occur here.
 """
 
 from __future__ import annotations
