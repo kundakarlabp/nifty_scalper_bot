@@ -1026,6 +1026,8 @@ def test_incident_single_lot_lifecycle_no_false_exit_no_second_entry(
     """
     from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 
+    # Do not inspect production's protected release-hold path in CI.
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     ce = "NFO:NIFTY2670724050CE"
     pe = "NFO:NIFTY2670724050PE"
 
