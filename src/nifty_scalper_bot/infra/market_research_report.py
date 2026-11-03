@@ -29,6 +29,8 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 _HORIZONS = (60, 180, 300, 600, 900)
+_MODELED_QUANTITY_DEFAULT = 65  # Research assumption; verify instrument lot.
+_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Per-side model, not observed broker fill.
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
@@ -261,6 +263,15 @@ def _sampled_markouts(
                 horizon_s=horizon,
             )
             context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            recorded_lot_size = context.get("lot_size")
+            verified_lot_size = (
+                type(recorded_lot_size) is int and 0 < recorded_lot_size < 10000
+            )
+            quantity = (
+                recorded_lot_size
+                if verified_lot_size
+                else _MODELED_QUANTITY_DEFAULT
+            )
             selected_side_key = "selected_ce" if contract.endswith("CE") else "selected_pe"
             selected = str(context.get(selected_side_key) or "")
             if selected and normalize_symbol(selected) != contract:
@@ -286,8 +297,8 @@ def _sampled_markouts(
                 "cost_adjusted": (
                     _cost_model(
                         observation,
-                        quantity=65,
-                        adverse_slippage_bps=5.0,
+                        quantity=quantity,
+                        adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
                     )
                     if observation is not None and continuous
                     else None
@@ -296,6 +307,11 @@ def _sampled_markouts(
                     "modelled_not_filled"
                     if continuous
                     else "missing_or_gapped_quote_path"
+                ),
+                "cost_quantity_provenance": (
+                    "recorded_decision_lot_size"
+                    if verified_lot_size
+                    else "unverified_default_nifty_lot_assumption"
                 ),
                 "decision_context": context,
                 "sampling": "first_no_vote_per_contract_strategy_utc_minute",
@@ -395,6 +411,13 @@ def build_session_research_report(
         "independent_setup_count": 0,
         "replay_sha256": None,
         "eligible_for_entry_filter_change": False,
+        "cost_model_provenance": {
+            "one_lot_default_units": _MODELED_QUANTITY_DEFAULT,
+            "default_lot_size_is_assumption": True,
+            "adverse_slippage_bps_per_side": _MODELED_ADVERSE_SLIPPAGE_BPS,
+            "implementation": "risk.cost_model.estimate_round_trip_cost",
+            "fills_and_protective_stops_verified": False,
+        },
         "status": "unavailable",
         "blocker": None,
     }
