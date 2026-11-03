@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
+from nifty_scalper_bot.core.option_volume_diagnostics import (
+    describe_option_volume_evidence,
+)
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -58,7 +60,8 @@ def test_runner_preserves_trusted_large_delta_and_quarantines_untrusted(
         SYMBOL, {**base, "volume_traded_today": 1_000}
     )
     normalized = mdm._normalise_tick_volume_delta(
-        SYMBOL, {"instrument_token": 123, "timestamp": now, "volume_traded_today": 2_000_000}
+        SYMBOL,
+        {"instrument_token": 123, "timestamp": now, "volume_traded_today": 2_000_000},
     )
     assert normalized["volume_transition"]["state"] == "accepted"
     assert normalized["volume_delta"] == 1_999_000
