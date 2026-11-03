@@ -104,9 +104,14 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     current_selection: tuple[str, str, str] | None = None
     unmatched = 0
     missing_symbol = 0
+    session_date = (
+        path.name.removesuffix(".jsonl.gz")
+        if path.name.endswith(".jsonl.gz")
+        else path.stem
+    )
     for event in iter_session(path):
         t = datetime.fromisoformat(event["available_at"]).astimezone(IST)
-        if t.date().isoformat() != path.stem:
+        if t.date().isoformat() != session_date:
             raise ValueError("replay_audit_session_date_mismatch")
         if event["kind"] == "snapshot":
             active = _selected(event["payload"])
@@ -213,7 +218,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     return {
         "profile": "replay_capture_fidelity_v1",
         "evidence_label": "RESEARCH_CANDIDATE",
-        "session_date": path.stem,
+        "session_date": session_date,
         "capture_sha256": archive_fingerprint(path),
         "event_count": events,
         "snapshot_count": snapshots,
