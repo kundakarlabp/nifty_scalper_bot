@@ -186,8 +186,7 @@ def test_dense_replay_path_yields_five_cost_adjusted_horizons() -> None:
     assert all(x["cost_adjusted"]["terminal"]["fees_rupees"] > 0 for x in samples)
     assert all(x["cost_adjusted"]["actual_stop_executed"] is None for x in samples)
     assert all(
-        math.isfinite(x["cost_adjusted"]["terminal"]["net_rupees"])
-        for x in samples
+        math.isfinite(x["cost_adjusted"]["terminal"]["net_rupees"]) for x in samples
     )
     assert all(g["cost_adjusted_labelled"] == 1 for g in strata)
 
@@ -211,8 +210,7 @@ def test_traded_contract_mismatch_blocks_counterfactual_markouts() -> None:
     )
     assert all(row["markout"] is None for row in outcomes)
     assert all(
-        row["label_status"] == "contract_not_selected_at_decision"
-        for row in outcomes
+        row["label_status"] == "contract_not_selected_at_decision" for row in outcomes
     )
 
 
