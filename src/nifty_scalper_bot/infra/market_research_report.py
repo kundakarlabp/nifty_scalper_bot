@@ -222,9 +222,7 @@ def _quote_path_dense(
         return False
     return all(
         0 <= right - left <= max_gap_s
-        for left, right in zip(
-            timestamps[prior : end - 1], timestamps[prior + 1 : end]
-        )
+        for left, right in zip(timestamps[prior : end - 1], timestamps[prior + 1 : end])
     )
 
 
@@ -251,8 +249,7 @@ def _sampled_markouts(
         samples.setdefault((strategy, contract, minute), row)
 
     quote_times = {
-        contract: [item[0] for item in books]
-        for contract, books in quotes.items()
+        contract: [item[0] for item in books] for contract, books in quotes.items()
     }
     outcomes: list[dict[str, Any]] = []
     groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
@@ -278,9 +275,7 @@ def _sampled_markouts(
                 type(recorded_lot_size) is int and 0 < recorded_lot_size < 10000
             )
             quantity = (
-                recorded_lot_size
-                if verified_lot_size
-                else _MODELED_QUANTITY_DEFAULT
+                recorded_lot_size if verified_lot_size else _MODELED_QUANTITY_DEFAULT
             )
             selected_side_key = (
                 "selected_ce" if contract.endswith("CE") else "selected_pe"
@@ -386,8 +381,7 @@ def _attach_structural_costs(
 ) -> None:
     """Cost-label original setup decisions only if their full book path is dense."""
     quote_times = {
-        contract: [item[0] for item in books]
-        for contract, books in quotes.items()
+        contract: [item[0] for item in books] for contract, books in quotes.items()
     }
     for outcome in outcomes:
         markout = outcome.get("markout")
@@ -400,13 +394,10 @@ def _attach_structural_costs(
             outcome["cost_adjusted"] = None
             outcome["cost_label_status"] = "invalid_original_decision"
             continue
-        supported = (
-            isinstance(markout, Mapping)
-            and _quote_path_dense(
-                quote_times.get(contract, ()),
-                decision_ts=decision_ts,
-                horizon_s=horizon,
-            )
+        supported = isinstance(markout, Mapping) and _quote_path_dense(
+            quote_times.get(contract, ()),
+            decision_ts=decision_ts,
+            horizon_s=horizon,
         )
         outcome["cost_adjusted"] = (
             _cost_model(
