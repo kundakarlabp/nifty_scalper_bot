@@ -149,3 +149,43 @@ def test_zero_parity_samples_never_qualify_as_verified() -> None:
     assert summary["observations"] == 2
     assert summary["positive_volume_matches"] == 0
     assert summary["verified_fraction_of_observed"] == 0
+
+
+def test_session_storage_flags_upstream_loss_and_reports_queue_lag(tmp_path):
+    from nifty_scalper_bot.infra.market_research_report import capture_storage_status
+
+    counters = {"dropped": 0, "coalesced": 0, "legacy_queue_dropped": 0}
+    folder = tmp_path / "replay_archive"
+    archive = ReplayArchive(folder, upstream_provider=lambda: dict(counters))
+    archive.record("snapshot", {"basket": {}}, DECISION)
+    archive.record("tick", {"symbol": CONTRACT, "ltp": 100}, DECISION)
+    counters["coalesced"] = 1
+    archive.close()
+    quality = capture_storage_status(DECISION.date(), directory=folder)
+    assert quality["upstream_lost_or_coalesced"] == 1
+    assert quality["observed_loss_free"] is False
+    assert "upstream_drop_or_coalescing" in quality["warnings"]
+    assert quality["max_writer_queue_pending"] >= 1
+    assert quality["max_writer_lag_ms"] >= 0
+
+
+def test_postmarket_emits_a_persisted_fidelity_failure_without_fabricating_quotes(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.config import paths
+    from nifty_scalper_bot.infra.market_research_report import (
+        run_postmarket_research,
+    )
+
+    monkeypatch.setattr(paths, "get_data_dir", lambda: tmp_path)
+    path, _ = _session(tmp_path)
+    assert path.is_file()
+    result = run_postmarket_research(DECISION.date(), _journal())
+    assert result["status"] == "analysed"
+    # A bare-basket unit fixture is not a full production snapshot; the
+    # strict quality audit must preserve its blocker independently of markouts.
+    assert result["capture_fidelity"]["status"] == "unavailable"
+    report_path = tmp_path / "research" / "fidelity" / "2026-11-03.json"
+    assert json.loads(report_path.read_text())["archive_integrity_verified"] is False
+    text = "\n".join(research_report_log_lines(result))
+    assert "REPLAY_SESSION_FIDELITY " in text
