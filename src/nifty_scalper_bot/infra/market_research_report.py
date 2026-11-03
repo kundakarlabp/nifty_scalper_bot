@@ -9,6 +9,7 @@ replicated through the existing Supabase daily log archive. Never broker orders.
 from __future__ import annotations
 
 import json
+import os
 import statistics
 from collections import defaultdict
 from datetime import date, datetime
@@ -24,6 +25,72 @@ _IST = ZoneInfo("Asia/Kolkata")
 _HORIZONS = (60, 180, 300)
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
+
+
+def capture_storage_status(session_date: date) -> dict[str, Any]:
+    """Cheap, read-only replay size, writer-drop and queue health evidence."""
+    from nifty_scalper_bot.config.paths import get_data_dir
+
+    folder = get_data_dir() / "replay_archive"
+    tape = folder / f"{session_date.isoformat()}.jsonl"
+    try:
+        configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
+    except (ValueError, TypeError):
+        configured = 512
+    ceiling = max(128, min(2048, configured)) * 1024 * 1024
+    try:
+        size = tape.stat().st_size
+    except OSError:
+        size = 0
+    runs = 0
+    dropped = 0
+    failed = 0
+    pending = 0
+    recorded = 0
+    for sidecar in folder.glob("*.integrity.json"):
+        try:
+            obj = json.loads(sidecar.read_text(encoding="utf-8"))
+            counted = int(
+                obj.get("written_by_day", {}).get(session_date.isoformat(), 0)
+            )
+            if counted <= 0:
+                continue
+            runs += 1
+            recorded += counted
+            dropped += max(0, int(obj.get("dropped") or 0))
+            failed += max(0, int(obj.get("failed") or 0))
+            pending += max(0, int(obj.get("pending") or 0))
+        except (OSError, TypeError, ValueError, KeyError):
+            continue
+    enabled = os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() == "true"
+    used_fraction = round(size / ceiling, 4)
+    warnings = []
+    if enabled and not tape.is_file():
+        warnings.append("session_tape_not_recorded")
+    if enabled and size and runs == 0:
+        warnings.append("writer_integrity_sidecars_missing")
+    if dropped or failed:
+        warnings.append("writer_integrity_degraded")
+    if used_fraction >= 0.80:
+        warnings.append("replay_session_capacity_near_limit")
+    if pending:
+        warnings.append("writer_queue_pending")
+    return {
+        "v": 1,
+        "date": session_date.isoformat(),
+        "capture_enabled": enabled,
+        "tape_present": tape.is_file(),
+        "bytes": size,
+        "capacity_bytes": ceiling,
+        "capacity_used_fraction": used_fraction,
+        "writer_runs": runs,
+        "recorded_events": recorded,
+        "dropped_events": dropped,
+        "failed_events": failed,
+        "pending_events": pending,
+        "warnings": warnings,
+        "complete_capture_verified": False,
+    }
 
 
 def _parse_records(journal: str, marker: str, session_date: date) -> list[dict[str, Any]]:
@@ -292,5 +359,6 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
         trade_db=data_dir / "trades.db",
         output_path=data_dir / "research" / "markouts" / f"{session_date}.json",
     )
+    report["capture_storage"] = capture_storage_status(session_date)
     log_research_report(report)
     return report
