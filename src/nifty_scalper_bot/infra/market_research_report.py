@@ -42,7 +42,10 @@ def capture_storage_status(
     from nifty_scalper_bot.config.paths import get_data_dir
 
     folder = directory if directory is not None else get_data_dir() / "replay_archive"
-    tape = folder / f"{session_date.isoformat()}.jsonl"
+    plain = folder / f"{session_date.isoformat()}.jsonl"
+    compressed = plain.with_name(plain.name + ".gz")
+    tape = plain if plain.is_file() else compressed
+    is_compressed = tape == compressed
     try:
         configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
     except (ValueError, TypeError):
@@ -73,7 +76,7 @@ def capture_storage_status(
         except (OSError, TypeError, ValueError, KeyError):
             continue
     enabled = os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() == "true"
-    used_fraction = round(size / ceiling, 4)
+    used_fraction = None if is_compressed else round(size / ceiling, 4)
     warnings = []
     if enabled and not tape.is_file():
         warnings.append("session_tape_not_recorded")
@@ -81,7 +84,7 @@ def capture_storage_status(
         warnings.append("writer_integrity_sidecars_missing")
     if dropped or failed:
         warnings.append("writer_integrity_degraded")
-    if used_fraction >= 0.80:
+    if used_fraction is not None and used_fraction >= 0.80:
         warnings.append("replay_session_capacity_near_limit")
     if pending:
         warnings.append("writer_queue_pending")
@@ -90,6 +93,7 @@ def capture_storage_status(
         "date": session_date.isoformat(),
         "capture_enabled": enabled,
         "tape_present": tape.is_file(),
+        "tape_compressed": is_compressed,
         "bytes": size,
         "capacity_bytes": ceiling,
         "capacity_used_fraction": used_fraction,
@@ -398,6 +402,10 @@ def build_session_research_report(
     rejection_records = _parse_records(
         journal, "RESEARCH_STRATEGY_REJECTION", session_date
     )
+    if not replay_path.is_file() and replay_path.name.endswith(".jsonl"):
+        compressed_path = replay_path.with_name(replay_path.name + ".gz")
+        if compressed_path.is_file():
+            replay_path = compressed_path
     report: dict[str, Any] = {
         "schema_version": 1,
         "date_ist": session_date.isoformat(),
