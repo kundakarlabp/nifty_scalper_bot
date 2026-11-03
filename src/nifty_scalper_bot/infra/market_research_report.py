@@ -96,7 +96,9 @@ def capture_storage_status(session_date: date) -> dict[str, Any]:
     }
 
 
-def _parse_records(journal: str, marker: str, session_date: date) -> list[dict[str, Any]]:
+def _parse_records(
+    journal: str, marker: str, session_date: date
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for line in journal.splitlines():
         if marker not in line:
@@ -111,7 +113,10 @@ def _parse_records(journal: str, marker: str, session_date: date) -> list[dict[s
             instant = datetime.fromisoformat(
                 str(payload.get("decision_at") or payload.get("checked_at"))
             )
-            if instant.tzinfo is None or instant.astimezone(_IST).date() != session_date:
+            if (
+                instant.tzinfo is None
+                or instant.astimezone(_IST).date() != session_date
+            ):
                 continue
             records.append(payload)
         except (ValueError, TypeError, KeyError):
@@ -143,7 +148,9 @@ def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             round(matches / len(unique), 4) if unique else 0.0
         ),
         "statuses": dict(sorted(statuses.items())),
-        "by_side": {key: dict(sorted(val.items())) for key, val in sorted(by_side.items())},
+        "by_side": {
+            key: dict(sorted(val.items())) for key, val in sorted(by_side.items())
+        },
         "complete_day_coverage_proven": False,
     }
 
@@ -331,7 +338,8 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
     }
-    encoded = lambda row: json.dumps(row, separators=(",", ":"), allow_nan=False)
+    def encoded(row: Mapping[str, Any]) -> str:
+        return json.dumps(row, separators=(",", ":"), allow_nan=False)
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
