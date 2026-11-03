@@ -1,4 +1,4 @@
-"""Purpose: Capture ordered normalized market observations for replay without blocking trading.
+"""Purpose: Record normalized market observations without blocking trading.
 
 Responsibilities: ReplayArchive.record queues delivered ticks and snapshots;
 the background writer serializes JSON, reuses buffered day files, and writes
