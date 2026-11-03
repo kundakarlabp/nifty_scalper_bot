@@ -37,8 +37,12 @@ def _session(tmp_path):
     archive.record(
         "tick",
         {
-            "symbol": CONTRACT, "source": "rest", "depth_available": True,
-            "tradable_quote": True, "bid": 999, "ask": 1000,
+            "symbol": CONTRACT,
+            "source": "rest",
+            "depth_available": True,
+            "tradable_quote": True,
+            "bid": 999,
+            "ask": 1000,
         },
         DECISION + timedelta(seconds=300),
     )
@@ -63,8 +67,8 @@ def _journal() -> str:
         "status": "same_minute_volume_match",
     }
     return (
-        "RESEARCH_STRATEGY_REJECTION " + json.dumps(fields) + "\n"
-        "OPTION_COMPLETED_VOLUME_PARITY " + json.dumps(parity)
+        f"RESEARCH_STRATEGY_REJECTION {json.dumps(fields)}\n"
+        f"OPTION_COMPLETED_VOLUME_PARITY {json.dumps(parity)}"
     )
 
 
@@ -91,7 +95,9 @@ def test_report_uses_exact_contract_and_three_forward_horizons(tmp_path) -> None
     assert report["tradable_ws_quote_ticks"] == 13
     assert report["volume_parity"]["positive_volume_matches"] == 1
     assert [o["horizon_seconds"] for o in report["sampled_observations"]] == [
-        60, 180, 300,
+        60,
+        180,
+        300,
     ]
     assert all(o["markout"] for o in report["sampled_observations"])
     assert all(
@@ -127,12 +133,19 @@ def test_integrity_failure_never_claims_markouts(tmp_path) -> None:
 
 
 def test_zero_parity_samples_never_qualify_as_verified() -> None:
-    summary = _parity_summary([
-        {"symbol": CONTRACT, "indicator_minute": DECISION.isoformat(),
-         "status": "zero_volume_match_unverified"},
-        {"symbol": OTHER, "indicator_minute": DECISION.isoformat(),
-         "status": "same_minute_volume_mismatch"},
-    ])
+    rows = [
+        {
+            "symbol": CONTRACT,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "zero_volume_match_unverified",
+        },
+        {
+            "symbol": OTHER,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "same_minute_volume_mismatch",
+        },
+    ]
+    summary = _parity_summary(rows)
     assert summary["observations"] == 2
     assert summary["positive_volume_matches"] == 0
     assert summary["verified_fraction_of_observed"] == 0
