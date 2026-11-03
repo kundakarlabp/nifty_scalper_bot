@@ -1,9 +1,12 @@
 """Post-session, broker-free analysis of authoritative replay plus journal samples.
 
-Input: the already-recorded immutable replay tape and the local journald
-snapshot; approved/blocked structural decisions come from the existing SQLite
-trade journal. Output: an atomic local JSON report and bounded journal summaries
-replicated through the existing Supabase daily log archive. Never broker orders.
+Responsibilities: validate existing archived tick/quote provenance, separate
+structural setup decisions from minute-sampled strategy rejections, and produce
+60/180/300-second exact-contract ask-to-bid research labels and parity evidence.
+Ownership: SQLite journal and the replay archive remain sole evidence owners;
+this reader persists an atomic local report and bounded Supabase journal lines.
+Safety: No broker orders or network calls, missing evidence fails closed, and
+observational quotes cannot authorize changing any live entry or risk policy.
 """
 
 from __future__ import annotations
