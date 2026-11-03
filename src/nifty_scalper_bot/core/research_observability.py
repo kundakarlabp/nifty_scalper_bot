@@ -63,6 +63,7 @@ _REJECTION_CONTEXT_KEYS = (
     "selected_ce",
     "selected_pe",
     "is_selected_option",
+    "lot_size",
     "stale_data_used",
     "data_age_seconds",
 )
