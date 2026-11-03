@@ -98,7 +98,8 @@ def test_report_uses_exact_contract_and_three_forward_horizons(tmp_path) -> None
         for o in report["sampled_observations"]
     )
     assert report["eligible_for_entry_filter_change"] is False
-    assert json.loads(destination.read_text())["replay_sha256"] == report["replay_sha256"]
+    persisted = json.loads(destination.read_text())
+    assert persisted["replay_sha256"] == report["replay_sha256"]
     lines = research_report_log_lines(report)
     assert lines[0].startswith("RESEARCH_SESSION_EVIDENCE ")
     assert any(line.startswith("RESEARCH_MARKOUT_STRATUM ") for line in lines)
