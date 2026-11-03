@@ -30,11 +30,13 @@ _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
 
-def capture_storage_status(session_date: date) -> dict[str, Any]:
+def capture_storage_status(
+    session_date: date, *, directory: Path | None = None
+) -> dict[str, Any]:
     """Cheap, read-only replay size, writer-drop and queue health evidence."""
     from nifty_scalper_bot.config.paths import get_data_dir
 
-    folder = get_data_dir() / "replay_archive"
+    folder = directory if directory is not None else get_data_dir() / "replay_archive"
     tape = folder / f"{session_date.isoformat()}.jsonl"
     try:
         configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
@@ -288,7 +290,7 @@ def build_session_research_report(
         "status": "unavailable",
         "blocker": None,
     }
-    storage = capture_storage_status(session_date)
+    storage = capture_storage_status(session_date, directory=replay_path.parent)
     report["capture_storage"] = storage
     try:
         if (
