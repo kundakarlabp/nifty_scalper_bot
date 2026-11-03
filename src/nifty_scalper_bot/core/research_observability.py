@@ -87,16 +87,22 @@ def sample_selected_option_parity(
             indicator = indicator_rows[-1] if indicator_rows else None
             indicator_minute = (
                 _minute_key(indicator.get("timestamp") or indicator.get("start"))
-                if indicator is not None else None
+                if indicator is not None
+                else None
             )
-            same_minute_canonical = next(
-                (
-                    row for row in reversed(canonical_rows)
-                    if _minute_key(row.get("timestamp") or row.get("start"))
-                    == indicator_minute
-                ),
-                None,
-            ) if indicator_minute is not None else None
+            same_minute_canonical = (
+                next(
+                    (
+                        row
+                        for row in reversed(canonical_rows)
+                        if _minute_key(row.get("timestamp") or row.get("start"))
+                        == indicator_minute
+                    ),
+                    None,
+                )
+                if indicator_minute is not None
+                else None
+            )
             reference = same_minute_canonical or (
                 canonical_rows[-1] if canonical_rows else None
             )
@@ -188,7 +194,8 @@ def record_strategy_rejection_sample(
         "side": contract[-2:],
         "reason": str(reason or "none")[:100],
         "bar_ts": (
-            bar_time.isoformat() if isinstance(bar_time, datetime)
+            bar_time.isoformat()
+            if isinstance(bar_time, datetime)
             else str(bar_time)[:45] if bar_time else None
         ),
     }
