@@ -8,8 +8,8 @@ Runtime role:
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
-  exports and journals bounded tick latency percentiles without
-  changing tick ordering.
+  drains ordered ticks on a dedicated serial worker rather than the shared
+  asyncio executor, and exports bounded tick latency percentiles.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -44,7 +44,9 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -612,6 +614,9 @@ class MarketDataManager:
         self._tick_drain_scheduled = False
         self._tick_drain_start_pending = False
         self._tick_drain_task: asyncio.Task[None] | None = None
+        self._tick_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="nifty-mdm-tick"
+        )
         self._tick_drain_stopping = False
         self._tick_drain_batch_size = self._parse_int_env(
             "MDM_TICK_DRAIN_BATCH", default=100, minimum=10
@@ -2118,6 +2123,7 @@ class MarketDataManager:
             self._candle_flush_task = None
         self._event_loop_thread_id = None
         self._main_loop = None
+        self._tick_executor.shutdown(wait=False, cancel_futures=False)
         stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
         if callable(stop_fallback_worker):
             stop_fallback_worker()
@@ -2197,6 +2203,7 @@ class MarketDataManager:
         self._tick_consumer_task = None
         self._event_loop_thread_id = None
         self._main_loop = None
+        self._tick_executor.shutdown(wait=False, cancel_futures=False)
         if should_stop:
             self._stop_worker_threads_for_shutdown()
 
@@ -7928,7 +7935,7 @@ class MarketDataManager:
         def _run_tick_on_worker(
             tick_payload: dict[str, Any], scheduled_at: float
         ) -> None:
-            # Worker-await wall time also includes default-executor queueing.
+            # Worker-await wall time includes dispatch and processing time.
             # This measurement starts on the actual worker thread, before the
             # indivisible tick is processed; order and ownership are unchanged.
             dispatch_wait_ms = (time.perf_counter() - scheduled_at) * 1000.0
@@ -7960,8 +7967,12 @@ class MarketDataManager:
                         worker_started = time.monotonic()
                         worker_scheduled_at = time.perf_counter()
                         try:
-                            await asyncio.to_thread(
-                                _run_tick_on_worker, raw, worker_scheduled_at
+                            await asyncio.get_running_loop().run_in_executor(
+                                self._tick_executor,
+                                copy_context().run,
+                                _run_tick_on_worker,
+                                raw,
+                                worker_scheduled_at,
                             )
                         finally:
                             # This is time suspended awaiting a worker, NOT

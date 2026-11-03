@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 
 import pytest
 
@@ -46,3 +49,45 @@ async def test_drain_invocation_cap_preserves_order_and_all_protected_ticks(
         assert stats["drain_callbacks_completed"] >= 4
     finally:
         await mdm.stop_tick_drain(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_tick_drain_avoids_busy_default_executor_and_keeps_trace(monkeypatch):
+    mdm = MarketDataManager(kite=None)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._symbol_by_token[1] = symbol
+    mdm._symbol_to_token[symbol] = 1
+    mdm.set_open_position_symbols([symbol])
+    trace = ContextVar("mdm_tick_trace", default=None)
+    trace.set("expected")
+    received = []
+    monkeypatch.setattr(
+        mdm,
+        "_process_queued_tick",
+        lambda raw: received.append((raw["instrument_token"], trace.get())),
+    )
+
+    blocker = threading.Event()
+    worker_started = threading.Event()
+    default_executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(default_executor)
+
+    def hold_unrelated_worker() -> None:
+        worker_started.set()
+        blocker.wait(timeout=5.0)
+
+    occupied = loop.run_in_executor(None, hold_unrelated_worker)
+    try:
+        assert worker_started.wait(timeout=1.0)
+        mdm.set_event_loop(loop)
+        mdm._enqueue_tick_threadsafe(
+            {"instrument_token": 1, "last_price": 101.0, "timestamp": 100.0}
+        )
+        await asyncio.wait_for(mdm.drain_pending_ticks(timeout=1.0), timeout=2.0)
+        assert received == [(1, "expected")]
+    finally:
+        blocker.set()
+        await occupied
+        await mdm.async_stop()
+        default_executor.shutdown(wait=True)
