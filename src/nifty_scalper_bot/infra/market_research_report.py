@@ -101,6 +101,10 @@ def capture_storage_status(
         warnings.append("replay_session_capacity_near_limit")
     if pending:
         warnings.append("writer_queue_pending")
+    if upstream_losses:
+        warnings.append("upstream_drop_or_coalescing")
+    if upstream_missing:
+        warnings.append("upstream_accounting_unverified")
     return {
         "v": 1,
         "date": session_date.isoformat(),
@@ -114,6 +118,14 @@ def capture_storage_status(
         "dropped_events": dropped,
         "failed_events": failed,
         "pending_events": pending,
+        "max_writer_queue_pending": max_queue,
+        "max_writer_lag_ms": round(max_writer_lag_ms, 3),
+        "upstream_lost_or_coalesced": upstream_losses,
+        "upstream_accounting_unavailable_runs": upstream_missing,
+        "observed_loss_free": bool(
+            runs and not (dropped or failed or pending or upstream_losses)
+            and not upstream_missing
+        ),
         "warnings": warnings,
         "complete_capture_verified": False,
     }
