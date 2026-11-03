@@ -60,6 +60,10 @@ def capture_storage_status(
     failed = 0
     pending = 0
     recorded = 0
+    upstream_missing = 0
+    upstream_losses = 0
+    max_queue = 0
+    max_writer_lag_ms = 0.0
     for sidecar in folder.glob("*.integrity.json"):
         try:
             obj = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -70,6 +74,21 @@ def capture_storage_status(
                 continue
             runs += 1
             recorded += counted
+            max_queue = max(max_queue, int(obj.get("max_pending") or 0))
+            max_writer_lag_ms = max(
+                max_writer_lag_ms, float(obj.get("max_writer_lag_ms") or 0)
+            )
+            initial = obj.get("upstream_start")
+            latest = obj.get("upstream_latest")
+            if isinstance(initial, dict) and isinstance(latest, dict):
+                for key in ("dropped", "coalesced", "legacy_queue_dropped"):
+                    if key in initial and key in latest:
+                        upstream_losses += max(0, int(latest[key]) - int(initial[key]))
+                    else:
+                        upstream_missing += 1
+                        break
+            else:
+                upstream_missing += 1
             dropped += max(0, int(obj.get("dropped") or 0))
             failed += max(0, int(obj.get("failed") or 0))
             pending += max(0, int(obj.get("pending") or 0))
@@ -88,6 +107,10 @@ def capture_storage_status(
         warnings.append("replay_session_capacity_near_limit")
     if pending:
         warnings.append("writer_queue_pending")
+    if upstream_losses:
+        warnings.append("upstream_drop_or_coalescing")
+    if upstream_missing:
+        warnings.append("upstream_accounting_unverified")
     return {
         "v": 1,
         "date": session_date.isoformat(),
@@ -102,6 +125,15 @@ def capture_storage_status(
         "dropped_events": dropped,
         "failed_events": failed,
         "pending_events": pending,
+        "max_writer_queue_pending": max_queue,
+        "max_writer_lag_ms": round(max_writer_lag_ms, 3),
+        "upstream_lost_or_coalesced": upstream_losses,
+        "upstream_accounting_unavailable_runs": upstream_missing,
+        "observed_loss_free": bool(
+            runs
+            and not (dropped or failed or pending or upstream_losses)
+            and not upstream_missing
+        ),
         "warnings": warnings,
         "complete_capture_verified": False,
     }
@@ -545,6 +577,8 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         return json.dumps(row, separators=(",", ":"), allow_nan=False)
 
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
+    if isinstance(report.get("capture_fidelity"), Mapping):
+        lines.append("REPLAY_SESSION_FIDELITY " + encoded(report["capture_fidelity"]))
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
@@ -563,16 +597,67 @@ def log_research_report(report: Mapping[str, Any]) -> None:
 
 
 def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
-    """Run once after session close using only existing host-local evidence."""
+    """Run post-close markouts and strict capture-fidelity preflight offline."""
+    from nifty_scalper_bot.backtesting.replay_fidelity import audit_session
     from nifty_scalper_bot.config.paths import get_data_dir
 
     data_dir = get_data_dir()
+    path = data_dir / "replay_archive" / f"{session_date}.jsonl"
+    if not path.is_file():
+        compressed = path.with_name(path.name + ".gz")
+        if compressed.is_file():
+            path = compressed
+    output = data_dir / "research" / "markouts" / f"{session_date}.json"
     report = build_session_research_report(
         session_date=session_date,
         journal=journal,
-        replay_path=data_dir / "replay_archive" / f"{session_date}.jsonl",
+        replay_path=path,
         trade_db=data_dir / "trades.db",
-        output_path=data_dir / "research" / "markouts" / f"{session_date}.json",
+        output_path=output,
     )
+    quality_path = data_dir / "research" / "fidelity" / f"{session_date}.json"
+    try:
+        fidelity = audit_session(path, gap_seconds=3)
+        role_coverage = {
+            role: {
+                "observed_ticks": fields["observed_ticks"],
+                "distinct_seconds_with_updates": fields[
+                    "distinct_seconds_with_updates"
+                ],
+                "missing_market_minutes": fields["missing_market_minutes"],
+                "gaps_over_threshold": fields["gaps_over_threshold"],
+            }
+            for role, fields in fidelity["roles"].items()
+        }
+        summary = {
+            "status": "audited",
+            "archive_integrity_verified": True,
+            "observed_selected_context_available": fidelity[
+                "observed_selected_context_available"
+            ],
+            "selected_context_quote_update_coverage": role_coverage,
+            "full_session_selected_coverage_proven": False,
+            "actual_exchange_stream_completeness_proven": False,
+            "replay_sha256": fidelity["capture_sha256"],
+        }
+    except (OSError, ValueError, TypeError) as exc:
+        fidelity = {
+            "status": "unavailable",
+            "blocker": (
+                str(exc)[:110] if isinstance(exc, ValueError) else type(exc).__name__
+            ),
+            "archive_integrity_verified": False,
+            "full_session_selected_coverage_proven": False,
+            "actual_exchange_stream_completeness_proven": False,
+        }
+        summary = dict(fidelity)
+    quality_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = quality_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(fidelity, allow_nan=False) + "\n")
+    temporary.replace(quality_path)
+    report["capture_fidelity"] = summary
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text(json.dumps(report, allow_nan=False) + "\n")
+    temporary.replace(output)
     log_research_report(report)
     return report
