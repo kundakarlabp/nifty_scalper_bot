@@ -1,9 +1,16 @@
-"""Background maintenance tasks for order history persistence."""
+"""Background operational maintenance and replication tasks.
+
+Responsibilities: Schedule trade replication, archived market logs, heartbeats,
+order-history rotation, and verified completed replay compression.
+Safety: Every maintenance job runs off the trading hot path, cancels cleanly,
+and cannot alter strategy decisions, broker orders or risk parameters.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from pathlib import Path
 from time import time
 from typing import Any, Awaitable, Callable
@@ -124,6 +131,48 @@ def start_daily_log_archive_task() -> asyncio.Task[Any] | None:
             task_fn=lambda: asyncio.to_thread(archiver.archive_once),
             interval_sec=archive_interval_seconds(),
             task_name="archive_daily_market_logs",
+        )
+    )
+
+
+def start_replay_compaction_task() -> asyncio.Task[Any] | None:
+    """Compress validated prior-day feed archives strictly off market hours."""
+    if os.getenv("REPLAY_ARCHIVE_COMPACTION_ENABLED", "true").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+
+    def compact() -> list[dict[str, object]]:
+        from nifty_scalper_bot.config.paths import get_data_dir
+        from nifty_scalper_bot.storage.replay_compaction import (
+            compact_prior_sessions,
+        )
+
+        reports = compact_prior_sessions(get_data_dir() / "replay_archive")
+        for item in reports:
+            if item.get("complete_integrity_verified"):
+                LOGGER.info(
+                    "REPLAY_ARCHIVE_COMPACTED day=%s bytes=%s",
+                    item["session_date"],
+                    item["compressed_bytes"],
+                )
+            else:
+                LOGGER.warning(
+                    "REPLAY_ARCHIVE_COMPACTION_SKIPPED day=%s reason=%s",
+                    item["session_date"],
+                    item.get("error_type", "invalid_archive"),
+                )
+        return reports
+
+    return safe_task(
+        run_periodic_task(
+            task_fn=lambda: asyncio.to_thread(compact),
+            interval_sec=3600,
+            task_name="compact_completed_replay_archive",
+            run_immediately=True,
         )
     )
 
