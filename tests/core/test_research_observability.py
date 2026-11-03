@@ -135,3 +135,35 @@ def test_rejections_are_exact_contract_minute_samples_not_fake_setups(caplog) ->
         )
         is not None
     )
+
+
+def test_rejection_stores_trend_evidence_without_depth_or_secrets(caplog) -> None:
+    owner = _owner({}, {})
+    with caplog.at_level(logging.INFO):
+        row = record_strategy_rejection_sample(
+            owner,
+            strategy="VWAPPro",
+            symbol=CE,
+            reason="distance_outside_band",
+            indicators={
+                "ltp": 28.35,
+                "vwap": 20.39,
+                "atr": float("nan"),
+                "bid": 28.25,
+                "ask": 28.35,
+                "selected_ce": CE,
+                "quote_update_version": 1177,
+                "depth": {"full_book": "never_archive_in_journal"},
+                "api_secret": "NOT_FOR_RESEARCH",
+            },
+            at=STAMP,
+        )
+    assert row is not None
+    assert row["context"]["ltp"] == 28.35
+    assert row["context"]["vwap"] == 20.39
+    assert row["context"]["selected_ce"] == CE
+    assert "atr" not in row["context"]
+    assert "depth" not in row["context"]
+    assert "api_secret" not in row["context"]
+    assert "NOT_FOR_RESEARCH" not in caplog.text
+    assert "never_archive_in_journal" not in caplog.text
