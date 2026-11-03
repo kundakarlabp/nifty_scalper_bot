@@ -79,7 +79,7 @@ async def test_tick_drain_avoids_busy_default_executor_and_keeps_trace(monkeypat
 
     occupied = loop.run_in_executor(None, hold_unrelated_worker)
     try:
-        assert await asyncio.to_thread(worker_started.wait, 1.0) is True
+        assert worker_started.wait(timeout=1.0)
         mdm.set_event_loop(loop)
         mdm._enqueue_tick_threadsafe(
             {"instrument_token": 1, "last_price": 101.0, "timestamp": 100.0}
