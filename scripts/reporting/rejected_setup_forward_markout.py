@@ -97,7 +97,9 @@ def load_archive_quotes(
         tick = event["payload"]
         if not isinstance(tick, Mapping):
             continue
-        if str(tick.get("source") or "").lower() != "ws":
+        # Normalized LIVE full-depth WebSocket ticks are tagged "ws_full".
+        # Reject REST/poll data, but do not discard the actual executable tape.
+        if str(tick.get("source") or "").lower() not in {"ws", "ws_full"}:
             continue
         if tick.get("depth_available") is not True:
             continue

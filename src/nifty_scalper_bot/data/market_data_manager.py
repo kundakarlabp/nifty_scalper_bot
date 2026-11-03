@@ -10106,8 +10106,28 @@ class MarketDataManager:
 
                 now = datetime.now(timezone.utc)
                 if self._replay_archive is None:
+                    # Buffer bursts without blocking the live tick path. The
+                    # session ceiling is bounded/configurable; exceeding it
+                    # invalidates evidence rather than silently truncating it.
+                    def _bounded_int(
+                        name: str, default: int, low: int, high: int
+                    ) -> int:
+                        try:
+                            value = int(os.getenv(name, str(default)))
+                            return max(low, min(high, value))
+                        except (ValueError, TypeError):
+                            return default
+
+                    capacity = _bounded_int(
+                        "REPLAY_CAPTURE_QUEUE_CAPACITY", 16384, 1024, 65536
+                    )
+                    max_mb = _bounded_int(
+                        "REPLAY_CAPTURE_MAX_SESSION_MB", 512, 128, 2048
+                    )
                     self._replay_archive = ReplayArchive(
-                        get_data_dir() / "replay_archive"
+                        get_data_dir() / "replay_archive",
+                        capacity=capacity,
+                        max_session_bytes=max_mb * 1024 * 1024,
                     )
                 basket = getattr(self, "_active_contract_basket", None)
                 # A versioned active basket is immutable until its next commit.

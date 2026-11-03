@@ -111,3 +111,47 @@ def test_archive_includes_bounded_startup_audit_without_protection_claim() -> No
     assert audit["max_startup_to_ready_seconds"] == 31
     assert audit["protective_stop_verification"] == "not_established_from_log_markers"
     assert "DO_NOT_REPLICATE" not in str(audit)
+
+
+def test_research_waits_for_settle_and_replicates_summary() -> None:
+    calls = []
+    research_calls = []
+
+    def research(day, journal):
+        research_calls.append((day, journal))
+        return {
+            "date_ist": day.isoformat(),
+            "status": "analysed",
+            "blocker": None,
+            "replay_sha256": "a" * 64,
+            "tradable_ws_quote_ticks": 4,
+            "independent_setup_count": 0,
+            "sampled_observations": [],
+            "sampled_strata": [],
+            "structural_strata": [],
+            "volume_parity": {
+                "observations": 2,
+                "positive_volume_matches": 2,
+            },
+        }
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        log_reader=lambda _start, _end: "normal journal entry",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        research_runner=research,
+    )
+    before = archiver.archive_once(datetime(2026, 11, 3, 15, 31, tzinfo=IST))
+    after = archiver.archive_once(datetime(2026, 11, 3, 15, 35, tzinfo=IST))
+    assert before["finalized"] is False
+    assert after["finalized"] is True
+    assert len(research_calls) == 1
+    assert "RESEARCH_SESSION_EVIDENCE " not in calls[0]["log_text"]
+    assert "RESEARCH_SESSION_EVIDENCE " in calls[1]["log_text"]
+    assert calls[1]["build_sha"] is not None
+    assert calls[1]["line_count"] == 2
+    assert archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST)) == {
+        "archived": False,
+        "reason": "already_finalized",
+    }

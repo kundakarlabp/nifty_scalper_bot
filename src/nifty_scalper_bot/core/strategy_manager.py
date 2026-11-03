@@ -18,7 +18,8 @@ Direction-authority invariant:
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
 - The final option combiner gate independently revalidates direction alignment.
 - SMC-only independent confirmation cannot veto a separately confirmed VWAP
-  trigger on the same underlying side; opposing context still fails closed."""
+  trigger on the same underlying side; opposing context still fails closed.
+- Bounded research parity and sampled no-vote telemetry never authorize entry."""
 
 from __future__ import annotations
 
@@ -49,6 +50,10 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
+from nifty_scalper_bot.core.research_observability import (
+    record_strategy_rejection_sample,
+    sample_selected_option_parity,
+)
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
@@ -3728,12 +3733,27 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             self._record_strategy_evaluation_observability(strategy_name)
+            if strategy_name == "VWAPPro" and symbol_is_option:
+                # Independent of the VWAP decision and its zero-volume gate.
+                # Samples both selected CE/PE; no extra tick subscription.
+                try:
+                    sample_selected_option_parity(self)
+                except Exception:  # noqa: BLE001
+                    pass  # Observability must never modify entry behavior.
             if base_signal is None:
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
                 self._record_strategy_no_vote_observability(strategy_name, reason)
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
+                if symbol_is_option and strategy_name in {"SMC", "VWAPPro", "ORBPro"}:
+                    try:
+                        record_strategy_rejection_sample(
+                            self, strategy=strategy_name, symbol=symbol,
+                            reason=reason, indicators=indicators,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # Research recording is never an entry gate.
                 # Quote freshness does not prove that this option candle traded.
                 # A bounded, per-symbol sample distinguishes an absent volume
                 # field from a genuine zero without relaxing this no-vote gate.
