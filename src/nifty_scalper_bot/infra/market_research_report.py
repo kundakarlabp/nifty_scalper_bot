@@ -288,8 +288,17 @@ def build_session_research_report(
         "status": "unavailable",
         "blocker": None,
     }
+    storage = capture_storage_status(session_date)
+    report["capture_storage"] = storage
     try:
+        if (
+            storage["dropped_events"]
+            or storage["failed_events"]
+            or storage["pending_events"]
+        ):
+            raise ValueError("replay_capture_writer_not_settled_or_degraded")
         quotes, sha, quote_count = load_archive_quotes(replay_path)
+        report["writer_integrity_verified"] = True
         report["replay_sha256"] = sha
         report["tradable_ws_quote_ticks"] = quote_count
         if not quote_count:
@@ -371,6 +380,5 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
         trade_db=data_dir / "trades.db",
         output_path=data_dir / "research" / "markouts" / f"{session_date}.json",
     )
-    report["capture_storage"] = capture_storage_status(session_date)
     log_research_report(report)
     return report
