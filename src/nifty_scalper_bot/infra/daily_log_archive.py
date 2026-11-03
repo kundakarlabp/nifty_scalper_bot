@@ -111,8 +111,10 @@ class DailyLogArchiver:
                 storage = capture_storage_status(session_date)
                 prefix = f"[{current.strftime('%Y-%m-%d %H:%M:%S')} IST] "
                 text += (
-                    "\n" + prefix + "REPLAY_CAPTURE_STORAGE " +
-                    json.dumps(storage, separators=(",", ":"), allow_nan=False)
+                    "\n"
+                    + prefix
+                    + "REPLAY_CAPTURE_STORAGE "
+                    + json.dumps(storage, separators=(",", ":"), allow_nan=False)
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning(
@@ -137,8 +139,8 @@ class DailyLogArchiver:
                     type(exc).__name__,
                 )
                 lines_for_archive = [
-                    "RESEARCH_SESSION_EVIDENCE " +
-                    '{"v":1,"status":"unavailable","blocker":"postmarket_runner_failed"}'
+                    "RESEARCH_SESSION_EVIDENCE "
+                    + '{"v":1,"status":"unavailable","blocker":"postmarket_runner_failed"}'
                 ]
             if lines_for_archive:
                 prefix = f"[{current.strftime('%Y-%m-%d %H:%M:%S')} IST] "
