@@ -38,6 +38,14 @@ jobs:
           cache: pip
       - name: Install development dependencies
         run: python -m pip install -e '.[dev]' -q
+      - name: Show capture patch Black formatting diff
+        run: |
+          python -m black --diff \
+            src/nifty_scalper_bot/backtesting/replay_fidelity.py \
+            src/nifty_scalper_bot/infra/market_research_report.py \
+            src/nifty_scalper_bot/storage/replay_archive.py \
+            tests/infra/test_market_research_report.py \
+            tests/storage/test_replay_archive.py 2>&1
       - name: Fetch pull-request base
         run: git fetch --no-tags origin "${{ github.base_ref }}" --depth=50
       - name: Validate module documentation and interface drift
