@@ -230,6 +230,7 @@ def test_spread_not_double_charged_for_ask_to_bid_quote_profit() -> None:
     assert modeled["observed_mae"]["net_rupees"] < 0
     assert modeled["actual_stop_executed"] is None
 
+
 def test_session_storage_flags_upstream_loss_and_reports_queue_lag(tmp_path):
     from nifty_scalper_bot.infra.market_research_report import capture_storage_status
 
