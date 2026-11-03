@@ -10098,9 +10098,12 @@ class MarketDataManager:
                     # Buffer bursts without blocking the live tick path. The
                     # session ceiling is bounded/configurable; exceeding it
                     # invalidates evidence rather than silently truncating it.
-                    def _bounded_int(name: str, default: int, low: int, high: int) -> int:
+                    def _bounded_int(
+                        name: str, default: int, low: int, high: int
+                    ) -> int:
                         try:
-                            return max(low, min(high, int(os.getenv(name, str(default)))))
+                            value = int(os.getenv(name, str(default)))
+                            return max(low, min(high, value))
                         except (ValueError, TypeError):
                             return default
 
