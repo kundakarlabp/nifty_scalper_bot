@@ -78,6 +78,7 @@ def test_writer_size_cap_invalidates_evidence(tmp_path):
     with pytest.raises(ValueError, match="replay_capture_incomplete"):
         load_session(tmp_path / "2026-10-01.jsonl")
 
+
 def test_recorder_serializes_only_on_background_writer(tmp_path, monkeypatch):
     """FULL quote conversion must not run on the WebSocket/tick callback."""
     import threading
