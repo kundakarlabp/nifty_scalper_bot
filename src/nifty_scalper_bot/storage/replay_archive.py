@@ -15,13 +15,13 @@ observations. No broker actions, credentials or remote uploads occur here.
 from __future__ import annotations
 
 import hashlib
-from copy import deepcopy
 import json
 import os
 import queue
 import threading
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
