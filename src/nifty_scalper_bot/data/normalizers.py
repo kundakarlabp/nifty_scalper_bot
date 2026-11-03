@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import math
-import os
 from typing import Any, Mapping
 
 
@@ -35,13 +34,12 @@ def normalize_history_row(symbol: str, row: Any, source: str = "historical") -> 
         o, h, l, c = float(open_), float(high), float(low), float(close)
         if not all(math.isfinite(value) and value > 0 for value in (o, h, l, c)):
             return None
-        symbol_upper = str(symbol or "").upper()
-        is_option_symbol = symbol_upper.endswith("CE") or symbol_upper.endswith("PE")
+        # The MDM/CandleEngine owns volume provenance and interval deltas.
+        # A fixed option-minute cap discards legitimate high-volume bars
+        # (notably expiry sessions) and breaks runner/indicator parity.
         try:
-            volume_value = int(float(volume or 0))
-        except (TypeError, ValueError):
-            volume_value = 0
-        if is_option_symbol and volume_value > int(os.getenv("OPTION_MAX_REASONABLE_1M_VOLUME", "5000000")):
+            volume_value = max(int(float(volume or 0)), 0)
+        except (TypeError, ValueError, OverflowError):
             volume_value = 0
         bar = {
             "symbol": str(symbol),
