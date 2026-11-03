@@ -293,12 +293,11 @@ def build_session_research_report(
     storage = capture_storage_status(session_date, directory=replay_path.parent)
     report["capture_storage"] = storage
     try:
-        if (
-            storage["dropped_events"]
-            or storage["failed_events"]
-            or storage["pending_events"]
-        ):
-            raise ValueError("replay_capture_writer_not_settled_or_degraded")
+        # Pending observations may not yet have reached the tape.
+        # Once settled, the existing strict reader validates drops,
+        # failures, sequence continuity and all per-run sidecars.
+        if storage["pending_events"]:
+            raise ValueError("replay_capture_writer_not_settled")
         quotes, sha, quote_count = load_archive_quotes(replay_path)
         report["writer_integrity_verified"] = True
         report["replay_sha256"] = sha
