@@ -83,9 +83,7 @@ def capture_storage_status(
             if isinstance(initial, dict) and isinstance(latest, dict):
                 for key in ("dropped", "coalesced", "legacy_queue_dropped"):
                     if key in initial and key in latest:
-                        upstream_losses += max(
-                            0, int(latest[key]) - int(initial[key])
-                        )
+                        upstream_losses += max(0, int(latest[key]) - int(initial[key]))
                     else:
                         upstream_missing += 1
                         break
@@ -132,7 +130,8 @@ def capture_storage_status(
         "upstream_lost_or_coalesced": upstream_losses,
         "upstream_accounting_unavailable_runs": upstream_missing,
         "observed_loss_free": bool(
-            runs and not (dropped or failed or pending or upstream_losses)
+            runs
+            and not (dropped or failed or pending or upstream_losses)
             and not upstream_missing
         ),
         "warnings": warnings,
@@ -579,9 +578,7 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
 
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
     if isinstance(report.get("capture_fidelity"), Mapping):
-        lines.append(
-            "REPLAY_SESSION_FIDELITY " + encoded(report["capture_fidelity"])
-        )
+        lines.append("REPLAY_SESSION_FIDELITY " + encoded(report["capture_fidelity"]))
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
@@ -646,9 +643,9 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
     except (OSError, ValueError, TypeError) as exc:
         fidelity = {
             "status": "unavailable",
-            "blocker": str(exc)[:110]
-            if isinstance(exc, ValueError)
-            else type(exc).__name__,
+            "blocker": (
+                str(exc)[:110] if isinstance(exc, ValueError) else type(exc).__name__
+            ),
             "archive_integrity_verified": False,
             "full_session_selected_coverage_proven": False,
             "actual_exchange_stream_completeness_proven": False,
