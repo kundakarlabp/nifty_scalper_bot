@@ -2,7 +2,8 @@
 
 Responsibilities: validate existing archived tick/quote provenance, separate
 structural setup decisions from minute-sampled strategy rejections, and produce
-60/180/300-second exact-contract ask-to-bid research labels and parity evidence.
+60/180/300/600/900-second exact-contract ask-to-bid research labels, modeled
+execution costs, adverse excursion and volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -11,21 +12,25 @@ observational quotes cannot authorize changing any live entry or risk policy.
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import statistics
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
-_HORIZONS = (60, 180, 300)
+_HORIZONS = (60, 180, 300, 600, 900)
+_MODELED_QUANTITY_DEFAULT = 65  # Research assumption; verify instrument lot.
+_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Per-side model, not observed broker fill.
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
@@ -37,7 +42,10 @@ def capture_storage_status(
     from nifty_scalper_bot.config.paths import get_data_dir
 
     folder = directory if directory is not None else get_data_dir() / "replay_archive"
-    tape = folder / f"{session_date.isoformat()}.jsonl"
+    plain = folder / f"{session_date.isoformat()}.jsonl"
+    compressed = plain.with_name(plain.name + ".gz")
+    tape = plain if plain.is_file() else compressed
+    is_compressed = tape == compressed
     try:
         configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
     except (ValueError, TypeError):
@@ -68,7 +76,7 @@ def capture_storage_status(
         except (OSError, TypeError, ValueError, KeyError):
             continue
     enabled = os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() == "true"
-    used_fraction = round(size / ceiling, 4)
+    used_fraction = None if is_compressed else round(size / ceiling, 4)
     warnings = []
     if enabled and not tape.is_file():
         warnings.append("session_tape_not_recorded")
@@ -76,7 +84,7 @@ def capture_storage_status(
         warnings.append("writer_integrity_sidecars_missing")
     if dropped or failed:
         warnings.append("writer_integrity_degraded")
-    if used_fraction >= 0.80:
+    if used_fraction is not None and used_fraction >= 0.80:
         warnings.append("replay_session_capacity_near_limit")
     if pending:
         warnings.append("writer_queue_pending")
@@ -85,6 +93,7 @@ def capture_storage_status(
         "date": session_date.isoformat(),
         "capture_enabled": enabled,
         "tape_present": tape.is_file(),
+        "tape_compressed": is_compressed,
         "bytes": size,
         "capacity_bytes": ceiling,
         "capacity_used_fraction": used_fraction,
@@ -157,6 +166,66 @@ def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _cost_model(
+    markout: Mapping[str, Any],
+    *,
+    quantity: int,
+    adverse_slippage_bps: float,
+) -> dict[str, Any]:
+    """Apply the canonical fee model to crossed ask/bid, never double-pay spread."""
+    ask = float(markout["entry_ask"])
+    slip = adverse_slippage_bps / 10_000
+    paid = ask * (1 + slip)
+
+    def exit_value(bid: float) -> dict[str, float]:
+        sold = bid * (1 - slip)
+        cost = estimate_round_trip_cost(
+            entry_price=paid,
+            exit_price=sold,
+            quantity=quantity,
+            half_spread=0.0,
+        )
+        gross = (sold - paid) * quantity
+        return {
+            "gross_rupees": round(gross, 2),
+            "fees_rupees": round(cost.total, 2),
+            "net_rupees": round(gross - cost.total, 2),
+        }
+
+    low = ask * (1 + float(markout["mae_markout_pct"]) / 100)
+    high = ask * (1 + float(markout["mfe_markout_pct"]) / 100)
+    return {
+        "terminal": exit_value(float(markout["terminal_bid"])),
+        "observed_mae": exit_value(low),
+        "observed_mfe": exit_value(high),
+        "quantity_units_assumed": quantity,
+        "adverse_slippage_bps_per_side": adverse_slippage_bps,
+        "spread_crossed_using_actual_ask_bid": True,
+        "depth_quantity_verified": False,
+        "actual_stop_executed": None,
+    }
+
+
+def _quote_path_dense(
+    timestamps: Sequence[float],
+    *,
+    decision_ts: float,
+    horizon_s: int,
+    max_gap_s: float = 10.0,
+) -> bool:
+    """Withhold cost/MAE labels if the interior exact-contract tape has gaps."""
+    if not timestamps:
+        return False
+    prior = bisect.bisect_right(timestamps, decision_ts) - 1
+    end = bisect.bisect_right(timestamps, decision_ts + horizon_s)
+    if prior < 0 or end - prior < 4:
+        return False
+    return all(
+        0 <= right - left <= max_gap_s
+        for left, right in zip(timestamps[prior : end - 1], timestamps[prior + 1 : end])
+    )
+
+
 def _sampled_markouts(
     records: list[dict[str, Any]],
     quotes: Mapping[str, list[tuple[float, float, float]]],
@@ -179,6 +248,9 @@ def _sampled_markouts(
             continue
         samples.setdefault((strategy, contract, minute), row)
 
+    quote_times = {
+        contract: [item[0] for item in books] for contract, books in quotes.items()
+    }
     outcomes: list[dict[str, Any]] = []
     groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for (strategy, contract, minute), row in sorted(samples.items()):
@@ -195,6 +267,36 @@ def _sampled_markouts(
                 quotes.get(contract, ()),
                 decision_ts=decision_ts,
                 horizon_s=horizon,
+                timestamps=quote_times.get(contract, ()),
+            )
+            raw_context = row.get("context")
+            context: dict[str, Any] = (
+                raw_context if isinstance(raw_context, dict) else {}
+            )
+            recorded_lot_size = context.get("lot_size")
+            verified_lot_size = (
+                isinstance(recorded_lot_size, int)
+                and not isinstance(recorded_lot_size, bool)
+                and 0 < recorded_lot_size < 10000
+            )
+            quantity = (
+                recorded_lot_size
+                if isinstance(recorded_lot_size, int) and verified_lot_size
+                else _MODELED_QUANTITY_DEFAULT
+            )
+            selected_side_key = (
+                "selected_ce" if contract.endswith("CE") else "selected_pe"
+            )
+            selected = str(context.get(selected_side_key) or "")
+            if selected and normalize_symbol(selected) != contract:
+                observation, status = None, "contract_not_selected_at_decision"
+            continuous = bool(
+                observation is not None
+                and _quote_path_dense(
+                    quote_times.get(contract, ()),
+                    decision_ts=decision_ts,
+                    horizon_s=horizon,
+                )
             )
             result = {
                 "strategy": strategy,
@@ -206,6 +308,26 @@ def _sampled_markouts(
                 "horizon_seconds": horizon,
                 "markout": observation,
                 "label_status": status,
+                "cost_adjusted": (
+                    _cost_model(
+                        observation,
+                        quantity=quantity,
+                        adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
+                    )
+                    if observation is not None and continuous
+                    else None
+                ),
+                "cost_label_status": (
+                    "modelled_not_filled"
+                    if continuous
+                    else "missing_or_gapped_quote_path"
+                ),
+                "cost_quantity_provenance": (
+                    "recorded_decision_lot_size"
+                    if verified_lot_size
+                    else "unverified_default_nifty_lot_assumption"
+                ),
+                "decision_context": context,
                 "sampling": "first_no_vote_per_contract_strategy_utc_minute",
                 "independent_structural_setup": False,
             }
@@ -220,6 +342,11 @@ def _sampled_markouts(
             if isinstance(item["markout"], dict)
         ]
         enough = len(labelled) >= _MIN_LABELLED
+        net_labelled = [
+            float(item["cost_adjusted"]["terminal"]["net_rupees"])
+            for item in items
+            if isinstance(item.get("cost_adjusted"), dict)
+        ]
         strata.append(
             {
                 "strategy": strategy,
@@ -240,12 +367,59 @@ def _sampled_markouts(
                     if enough
                     else None
                 ),
+                "cost_adjusted_labelled": len(net_labelled),
+                "mean_modelled_net_rupees": (
+                    round(statistics.mean(net_labelled), 2)
+                    if len(net_labelled) >= _MIN_LABELLED
+                    else None
+                ),
+                "actual_stop_outcomes_verified": False,
                 "minimum_labelled": _MIN_LABELLED,
                 "independent_structural_setup": False,
                 "eligible_for_filter_change": False,
             }
         )
     return outcomes, strata
+
+
+def _attach_structural_costs(
+    outcomes: list[dict[str, Any]],
+    quotes: Mapping[str, list[tuple[float, float, float]]],
+) -> None:
+    """Cost-label original setup decisions only if their full book path is dense."""
+    quote_times = {
+        contract: [item[0] for item in books] for contract, books in quotes.items()
+    }
+    for outcome in outcomes:
+        markout = outcome.get("markout")
+        at = outcome.get("decision_timestamp")
+        try:
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                raise ValueError("invalid_original_decision_timestamp")
+            decision_ts = float(at)
+            horizon = int(outcome["horizon_seconds"])
+            contract = str(outcome["contract"])
+        except (ValueError, TypeError, KeyError):
+            outcome["cost_adjusted"] = None
+            outcome["cost_label_status"] = "invalid_original_decision"
+            continue
+        supported = isinstance(markout, Mapping) and _quote_path_dense(
+            quote_times.get(contract, ()),
+            decision_ts=decision_ts,
+            horizon_s=horizon,
+        )
+        if isinstance(markout, Mapping) and supported:
+            outcome["cost_adjusted"] = _cost_model(
+                markout,
+                quantity=_MODELED_QUANTITY_DEFAULT,
+                adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
+            )
+        else:
+            outcome["cost_adjusted"] = None
+        outcome["cost_label_status"] = (
+            "modelled_not_filled" if supported else "missing_or_gapped_quote_path"
+        )
+        outcome["cost_quantity_provenance"] = "unverified_default_nifty_lot_assumption"
 
 
 def build_session_research_report(
@@ -278,6 +452,10 @@ def build_session_research_report(
     rejection_records = _parse_records(
         journal, "RESEARCH_STRATEGY_REJECTION", session_date
     )
+    if not replay_path.is_file() and replay_path.name.endswith(".jsonl"):
+        compressed_path = replay_path.with_name(replay_path.name + ".gz")
+        if compressed_path.is_file():
+            replay_path = compressed_path
     report: dict[str, Any] = {
         "schema_version": 1,
         "date_ist": session_date.isoformat(),
@@ -291,6 +469,13 @@ def build_session_research_report(
         "independent_setup_count": 0,
         "replay_sha256": None,
         "eligible_for_entry_filter_change": False,
+        "cost_model_provenance": {
+            "one_lot_default_units": _MODELED_QUANTITY_DEFAULT,
+            "default_lot_size_is_assumption": True,
+            "adverse_slippage_bps_per_side": _MODELED_ADVERSE_SLIPPAGE_BPS,
+            "implementation": "risk.cost_model.estimate_round_trip_cost",
+            "fills_and_protective_stops_verified": False,
+        },
         "status": "unavailable",
         "blocker": None,
     }
@@ -318,6 +503,7 @@ def build_session_research_report(
                 )
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
+                _attach_structural_costs(events, quotes)
                 report["structural_outcomes"] = events
                 report["structural_strata"] = summarize_groups(
                     events, min_labelled=_MIN_LABELLED

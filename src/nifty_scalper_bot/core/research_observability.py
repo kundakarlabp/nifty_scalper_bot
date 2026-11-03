@@ -1,14 +1,17 @@
 """Bounded, read-only evidence for selected CE/PE parity and strategy no-votes.
 
-Live evaluation owns no new tick writer: the canonical replay archive remains the
-only high-frequency quote store. Samples are minute-bounded journald records,
-shipped by the existing off-hot-path daily log archiver. Missing evidence never
-constitutes a pass and cannot change signal or broker admission.
+Responsibilities: Preserve once-per-minute rejected SMC, VWAP and ORB
+decision-time scalar evidence and selected-option volume parity in journald.
+Boundaries: ReplayArchive remains the only high-frequency full-depth quote tape;
+the existing daily log archiver mirrors samples without a second database.
+Safety: Missing or nonfinite evidence is omitted, never assumed to pass, and
+cannot change order admission, broker actions or protective risk constraints.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +25,61 @@ from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 LOGGER = get_logger(__name__)
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
+# Frozen same-decision scalar context, never full books or credentials.
+_REJECTION_CONTEXT_KEYS = (
+    "ltp",
+    "price",
+    "close",
+    "open",
+    "high",
+    "low",
+    "bid",
+    "ask",
+    "spread_pct",
+    "timestamp_ms",
+    "last_tick_timestamp",
+    "quote_update_version",
+    "volume",
+    "avg_volume",
+    "atr",
+    "vwap",
+    "session_vwap",
+    "exchange_vwap",
+    "direction_bias",
+    "underlying_direction_bias",
+    "underlying_direction_confidence",
+    "context_age_seconds",
+    "regime",
+    "futures_price",
+    "futures_vwap",
+    "futures_vwap_slope",
+    "futures_volume_ratio",
+    "ema_fast",
+    "ema_slow",
+    "bos_confirmed",
+    "choch_confirmed",
+    "retest_confirmed",
+    "premium_reclaim",
+    "selected_ce",
+    "selected_pe",
+    "is_selected_option",
+    "lot_size",
+    "stale_data_used",
+    "data_age_seconds",
+)
+
+
+def _research_scalar(value: Any) -> Any:
+    """Retain finite scalar metadata only; never arrays or arbitrary mappings."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:100]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
 
 
 def _completed(rows: Any) -> list[Mapping[str, Any]]:
@@ -193,6 +251,12 @@ def record_strategy_rejection_sample(
         "symbol": contract,
         "side": contract[-2:],
         "reason": str(reason or "none")[:100],
+        "context": {
+            key: scalar
+            for key in _REJECTION_CONTEXT_KEYS
+            if key in indicators
+            if (scalar := _research_scalar(indicators[key])) is not None
+        },
         "bar_ts": (
             bar_time.isoformat()
             if isinstance(bar_time, datetime)

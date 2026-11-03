@@ -8,7 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 from scripts.reporting.rejected_setup_forward_markout import load_archive_quotes
 
 from nifty_scalper_bot.infra.market_research_report import (
+    _cost_model,
     _parity_summary,
+    _sampled_markouts,
     build_session_research_report,
     research_report_log_lines,
 )
@@ -81,7 +83,7 @@ def test_full_depth_ws_source_is_retained_but_rest_is_excluded(tmp_path) -> None
     assert max(row[1] for row in quotes[CONTRACT]) < 999
 
 
-def test_report_uses_exact_contract_and_three_forward_horizons(tmp_path) -> None:
+def test_report_uses_exact_contract_and_five_forward_horizons(tmp_path) -> None:
     path, _run = _session(tmp_path)
     destination = tmp_path / "research" / "markouts.json"
     report = build_session_research_report(
@@ -98,8 +100,14 @@ def test_report_uses_exact_contract_and_three_forward_horizons(tmp_path) -> None
         60,
         180,
         300,
+        600,
+        900,
     ]
-    assert all(o["markout"] for o in report["sampled_observations"])
+    assert all(o["markout"] for o in report["sampled_observations"][:3])
+    assert all(o["markout"] is None for o in report["sampled_observations"][3:])
+    assert all(
+        o["cost_adjusted"] is None for o in report["sampled_observations"]
+    )  # Sparse archived books must not support an MAE or net-P&L claim.
     assert all(
         o["independent_structural_setup"] is False
         for o in report["sampled_observations"]
@@ -149,3 +157,75 @@ def test_zero_parity_samples_never_qualify_as_verified() -> None:
     assert summary["observations"] == 2
     assert summary["positive_volume_matches"] == 0
     assert summary["verified_fraction_of_observed"] == 0
+
+
+def test_dense_replay_path_yields_five_cost_adjusted_horizons() -> None:
+    import math
+
+    at = DECISION.timestamp()
+    quotes = {CONTRACT: [(at - 1.0, 100.0, 100.1)]}
+    quotes[CONTRACT].extend(
+        (at + second, 100.0 + 0.005 * second, 100.1 + 0.005 * second)
+        for second in range(1, 901)
+    )
+    samples, strata = _sampled_markouts(
+        [
+            {
+                "strategy": "SMC",
+                "symbol": CONTRACT,
+                "evaluation_minute": DECISION.isoformat(),
+                "decision_at": DECISION.isoformat(),
+                "reason": "underlying_no_liquidity_sweep",
+                "context": {"selected_ce": CONTRACT, "vwap": 99.5},
+            }
+        ],
+        quotes,
+    )
+    assert len(samples) == 5
+    assert all(x["cost_adjusted"] is not None for x in samples)
+    assert all(x["cost_adjusted"]["terminal"]["fees_rupees"] > 0 for x in samples)
+    assert all(x["cost_adjusted"]["actual_stop_executed"] is None for x in samples)
+    assert all(
+        math.isfinite(x["cost_adjusted"]["terminal"]["net_rupees"]) for x in samples
+    )
+    assert all(g["cost_adjusted_labelled"] == 1 for g in strata)
+
+
+def test_traded_contract_mismatch_blocks_counterfactual_markouts() -> None:
+    at = DECISION.timestamp()
+    rows = [(at - 1.0, 100.0, 100.1)]
+    rows.extend((at + sec, 101.0, 101.1) for sec in range(1, 61))
+    outcomes, _ = _sampled_markouts(
+        [
+            {
+                "strategy": "VWAPPro",
+                "symbol": CONTRACT,
+                "evaluation_minute": DECISION.isoformat(),
+                "decision_at": DECISION.isoformat(),
+                "reason": "distance_outside_band",
+                "context": {"selected_ce": OTHER},
+            }
+        ],
+        {CONTRACT: rows},
+    )
+    assert all(row["markout"] is None for row in outcomes)
+    assert all(
+        row["label_status"] == "contract_not_selected_at_decision" for row in outcomes
+    )
+
+
+def test_spread_not_double_charged_for_ask_to_bid_quote_profit() -> None:
+    modeled = _cost_model(
+        {
+            "entry_ask": 100.0,
+            "terminal_bid": 102.0,
+            "mae_markout_pct": -1.0,
+            "mfe_markout_pct": 3.0,
+        },
+        quantity=65,
+        adverse_slippage_bps=0,
+    )
+    assert modeled["terminal"]["gross_rupees"] == 130.0
+    assert modeled["terminal"]["net_rupees"] < 130.0
+    assert modeled["observed_mae"]["net_rupees"] < 0
+    assert modeled["actual_stop_executed"] is None

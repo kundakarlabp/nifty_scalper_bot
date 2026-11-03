@@ -1,7 +1,10 @@
-"""Fixed, isolated research jobs; never import the live application or place orders.
+"""Isolated, resource-bounded research jobs and recorded-feed replay.
 
-GitHub's request manifest and the dashboard share one single-flight launcher.
-Collection/ledger analysis is explicitly distinct from a full strategy backtest.
+Responsibilities: Manage single-flight collection and credential-free historical
+replay, partition verified genuine process epochs, and accept compressed or raw
+capture sessions without changing active strategy or broker state.
+Safety: Never import live application entrypoints, send broker orders, invent
+missing quotes or treat an invalid replay as a successful backtest.
 """
 
 from __future__ import annotations
@@ -488,7 +491,7 @@ def partition_replay_runs(path: Path, destination: Path) -> list[tuple[str, Path
 
     source_sha = archive_fingerprint(path)
     shards = {
-        run_id: destination / f"epoch-{index:02d}" / path.name
+        run_id: destination / f"epoch-{index:02d}" / path.name.removesuffix(".gz")
         for index, run_id in enumerate(run_ids, 1)
     }
     try:
@@ -544,6 +547,8 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             report["deferred_from"] = day
             break
         path = source / f"{day}.jsonl"
+        if not path.is_file():
+            path = source / f"{day}.jsonl.gz"
         if not path.is_file():
             # Calendar dates; holidays are not assumed to be missing trading data.
             report["missing_dates"].append(day)
