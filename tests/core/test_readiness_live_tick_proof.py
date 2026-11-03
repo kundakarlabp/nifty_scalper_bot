@@ -137,8 +137,10 @@ async def test_live_orders_not_armed_without_tradable_quote() -> None:
 
 @pytest.mark.asyncio
 async def test_live_orders_armed_with_fresh_ltp_bars_and_tradable_depth(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
+    # Keep the real release-hold protection intact; isolate only its test path.
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
     snaps = {
         "NSE:NIFTY": Snap(25000, 2, True, 24999, 25001, True),
