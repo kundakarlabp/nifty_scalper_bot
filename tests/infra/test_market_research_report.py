@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from scripts.reporting.rejected_setup_forward_markout import load_archive_quotes
 
 from nifty_scalper_bot.infra.market_research_report import (
+    _candidate_session_date_ist,
     _cost_model,
     _parity_summary,
     _sampled_markouts,
@@ -269,3 +270,58 @@ def test_postmarket_emits_a_persisted_fidelity_failure_without_fabricating_quote
     assert json.loads(report_path.read_text())["archive_integrity_verified"] is False
     text = "\n".join(research_report_log_lines(result))
     assert "REPLAY_SESSION_FIDELITY " in text
+
+def test_research_day_uses_ist_and_rejects_bad_timestamps() -> None:
+    assert _candidate_session_date_ist(
+        {"timestamp": "2026-11-02T18:40:00+00:00"}
+    ) == date(2026, 11, 3)
+    assert _candidate_session_date_ist(
+        {"timestamp": "2026-11-02T12:00:00+00:00"}
+    ) == date(2026, 11, 2)
+    assert _candidate_session_date_ist({"timestamp": "invalid"}) is None
+
+
+def test_postclose_ignores_prior_day_setup_decisions(tmp_path, monkeypatch) -> None:
+    """Historical approved/blocked setups must not dilute today's coverage."""
+    path, _run = _session(tmp_path)
+    db = tmp_path / "trades.db"
+    db.touch()
+
+    def row(stamp, setup_id):
+        return {
+            "event_name": "candidate.blocked",
+            "timestamp": stamp,
+            "symbol": CONTRACT,
+            "direction": "CE",
+            "reason_code": "alpha_below_threshold",
+            "meta": {
+                "research_context": {
+                    "setup_id": setup_id,
+                    "strategy": "smc",
+                    "contract_side": "CE",
+                }
+            },
+        }
+
+    prior = row("2026-11-02T11:00:00+00:00", "prior")
+    midnight_ist = row("2026-11-02T18:40:00+00:00", "midnight_ist")
+    today = row("2026-11-03T08:00:00+00:00", "today")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.journal.trade_ledger.load_candidate_decision_rows",
+        lambda _path: [prior, midnight_ist, today],
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=_journal(),
+        replay_path=path,
+        trade_db=db,
+        output_path=tmp_path / "filtered.json",
+    )
+    assert report["status"] == "analysed"
+    assert report["independent_setup_count"] == 2
+    assert report["historical_decision_rows_excluded"] == 1
+    assert len(report["structural_outcomes"]) == 2 * 5
+    assert all(
+        item["contract"] == CONTRACT for item in report["structural_outcomes"]
+    )
+    assert report["eligible_for_entry_filter_change"] is False
