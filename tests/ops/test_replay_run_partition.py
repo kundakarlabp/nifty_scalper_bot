@@ -55,6 +55,26 @@ def test_same_day_restart_replays_as_two_isolated_epochs(tmp_path):
     assert archive_fingerprint(path) == before
 
 
+def test_compressed_two_run_session_preserves_epoch_partition(tmp_path):
+    from nifty_scalper_bot.storage.replay_compaction import (
+        compact_completed_session,
+    )
+
+    source = _record_two_runs(tmp_path)
+    compact_completed_session(
+        source,
+        now=datetime.fromisoformat("2026-10-22T10:00:00+05:30"),
+    )
+    compressed = source.with_name(source.name + ".gz")
+    runs = partition_replay_runs(compressed, tmp_path / "epochs")
+    assert len(runs) == 2
+    for run_id, epoch in runs:
+        assert epoch.suffix == ".jsonl"
+        assert epoch.name == "2026-10-21.jsonl"
+        assert validate_replay_epochs(epoch)[0] == 2
+    assert not source.exists()
+
+
 def test_single_epoch_reuses_original_verified_archive(tmp_path):
     now = datetime.fromisoformat("2026-10-21T10:00:00+05:30")
     archive = ReplayArchive(tmp_path / "archive")
