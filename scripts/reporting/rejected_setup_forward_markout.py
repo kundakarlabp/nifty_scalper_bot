@@ -3,6 +3,7 @@
 Responsibilities: Deduplicate approved/blocked setup identities from the
 canonical decision ledger; compare the SAME observed option contract's
 point-in-time ask with future bid quotes from an integrity-checked replay.
+Optionally reuse validated chronological quote-time indexes for large sessions.
 Boundaries: No broker calls, strategy overrides, or new setup identity owner.
 Safety: Missing/rotated contracts, untradable quotes, and archive gaps are
 unlabelled; markouts are not proof of fills or post-cost profitability.
@@ -39,19 +40,22 @@ def observed_markout(
     max_entry_age_s: float = 3.0,
     terminal_tolerance_s: float = 5.0,
     min_forward_quotes: int = 3,
+    timestamps: Sequence[float] | None = None,
 ) -> tuple[dict[str, float | int] | None, str]:
     """Use only a known prior ask and subsequent bid quotes; never future entry."""
     if not math.isfinite(decision_ts) or horizon_s <= 0:
         raise ValueError("invalid_markout_window")
     if not ticks:
         return None, "no_tradable_exact_contract_quotes"
-    timestamps = [tick[0] for tick in ticks]
-    previous = bisect.bisect_right(timestamps, decision_ts) - 1
-    if previous < 0 or decision_ts - timestamps[previous] > max_entry_age_s:
+    if timestamps is not None and len(timestamps) != len(ticks):
+        raise ValueError("invalid_quote_timestamp_index")
+    chronology = timestamps if timestamps is not None else [tick[0] for tick in ticks]
+    previous = bisect.bisect_right(chronology, decision_ts) - 1
+    if previous < 0 or decision_ts - chronology[previous] > max_entry_age_s:
         return None, "no_point_in_time_entry_ask"
     entry_ask = ticks[previous][2]
-    left = bisect.bisect_right(timestamps, decision_ts)
-    right = bisect.bisect_right(timestamps, decision_ts + horizon_s)
+    left = bisect.bisect_right(chronology, decision_ts)
+    right = bisect.bisect_right(chronology, decision_ts + horizon_s)
     forward = ticks[left:right]
     if len(forward) < min_forward_quotes:
         return None, "insufficient_forward_quotes"
@@ -70,7 +74,7 @@ def observed_markout(
             "mfe_markout_pct": round(100 * (high_bid / entry_ask - 1), 5),
             "mae_markout_pct": round(100 * (low_bid / entry_ask - 1), 5),
             "forward_quote_count": len(forward),
-            "entry_quote_age_seconds": round(decision_ts - timestamps[previous], 3),
+            "entry_quote_age_seconds": round(decision_ts - chronology[previous], 3),
             "terminal_quote_age_seconds": round(
                 decision_ts + horizon_s - terminal_at, 3
             ),
