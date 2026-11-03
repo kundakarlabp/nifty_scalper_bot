@@ -229,13 +229,17 @@ def _sampled_markouts(
                 "labelled": len(labelled),
                 "unlabelled": len(items) - len(labelled),
                 "coverage_fraction": round(len(labelled) / len(items), 4),
-                "mean_ask_to_bid_pct": round(statistics.mean(labelled), 5)
-                if enough else None,
-                "median_ask_to_bid_pct": round(statistics.median(labelled), 5)
-                if enough else None,
-                "positive_fraction": round(
-                    sum(value > 0 for value in labelled) / len(labelled), 4
-                ) if enough else None,
+                "mean_ask_to_bid_pct": (
+                    round(statistics.mean(labelled), 5) if enough else None
+                ),
+                "median_ask_to_bid_pct": (
+                    round(statistics.median(labelled), 5) if enough else None
+                ),
+                "positive_fraction": (
+                    round(sum(value > 0 for value in labelled) / len(labelled), 4)
+                    if enough
+                    else None
+                ),
                 "minimum_labelled": _MIN_LABELLED,
                 "independent_structural_setup": False,
                 "eligible_for_filter_change": False,
@@ -323,7 +327,8 @@ def build_session_research_report(
             report["status"] = "analysed"
     except (OSError, ValueError, TypeError) as exc:
         report["blocker"] = (
-            str(exc)[:110] if isinstance(exc, ValueError)
+            str(exc)[:110]
+            if isinstance(exc, ValueError)
             else f"research_source_{type(exc).__name__}"
         )
 
@@ -349,6 +354,7 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
     }
+
     def encoded(row: Mapping[str, Any]) -> str:
         return json.dumps(row, separators=(",", ":"), allow_nan=False)
     lines = ["RESEARCH_SESSION_EVIDENCE " + encoded(base)]
