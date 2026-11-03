@@ -137,7 +137,8 @@ async def test_live_orders_not_armed_without_tradable_quote() -> None:
 
 @pytest.mark.asyncio
 async def test_live_orders_armed_with_fresh_ltp_bars_and_tradable_depth(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ) -> None:
     # Keep the real release-hold protection intact; isolate only its test path.
     monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
