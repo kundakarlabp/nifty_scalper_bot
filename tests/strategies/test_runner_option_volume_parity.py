@@ -35,6 +35,7 @@ def _tick_runner() -> StrategyRunner:
     runner._last_valid_price_ts = {}
     runner._quote_update_versions = {}
     runner._first_tick_logged_symbols = {SYMBOL}
+    runner._tick_log_throttle_seconds = 60.0
     runner._should_log_throttled = lambda *_args, **_kwargs: False
     runner._tick_has_quote_update = lambda _tick: False
     runner._refresh_risk_halt_state = lambda _symbol: False
