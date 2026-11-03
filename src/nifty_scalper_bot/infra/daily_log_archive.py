@@ -13,6 +13,7 @@ Safety: Archiving failures cannot create orders, change risk or enable LIVE.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Callable, Mapping
@@ -74,6 +75,7 @@ class DailyLogArchiver:
         self._timeout_seconds = max(1.0, float(timeout_seconds))
         self._transport = transport or _post_json
         self._log_reader = log_reader or self._read_journal
+        self._capture_storage_probe_enabled = log_reader is None
         # The real host enables post-close research; injected log readers in
         # isolated tests require an explicitly provided research runner.
         if research_runner is None and log_reader is None:
@@ -100,6 +102,23 @@ class DailyLogArchiver:
         text = self._log_reader(start, end)
         if not text.strip():
             return {"archived": False, "reason": "no_logs"}
+        if self._capture_storage_probe_enabled:
+            try:
+                from nifty_scalper_bot.infra.market_research_report import (
+                    capture_storage_status,
+                )
+
+                storage = capture_storage_status(session_date)
+                prefix = f"[{current.strftime('%Y-%m-%d %H:%M:%S')} IST] "
+                text += (
+                    "\n" + prefix + "REPLAY_CAPTURE_STORAGE " +
+                    json.dumps(storage, separators=(",", ":"), allow_nan=False)
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "REPLAY_CAPTURE_STORAGE_UNAVAILABLE error_type=%s",
+                    type(exc).__name__,
+                )
 
         # Keep replay and integrity sidecars out of the remote payload.
         # Run only after the final options session and writer settle window;
