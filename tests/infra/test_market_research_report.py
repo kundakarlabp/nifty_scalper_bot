@@ -321,7 +321,5 @@ def test_postclose_ignores_prior_day_setup_decisions(tmp_path, monkeypatch) -> N
     assert report["independent_setup_count"] == 2
     assert report["historical_decision_rows_excluded"] == 1
     assert len(report["structural_outcomes"]) == 2 * 5
-    assert all(
-        item["contract"] == CONTRACT for item in report["structural_outcomes"]
-    )
+    assert all(item["contract"] == CONTRACT for item in report["structural_outcomes"])
     assert report["eligible_for_entry_filter_change"] is False
