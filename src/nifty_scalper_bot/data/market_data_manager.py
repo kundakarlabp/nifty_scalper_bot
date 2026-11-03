@@ -433,6 +433,7 @@ class MarketDataManager:
         self._external_tick_handler: Callable[[dict[str, Any]], None] | None = None
         self._replay_capture_lock = threading.RLock()
         self._replay_archive: Any | None = None
+        self._raw_ws_receipts_total = 0
         self._replay_snapshot_key: tuple[str, str] | None = None
         self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
         self._broker = broker
@@ -7137,6 +7138,7 @@ class MarketDataManager:
         """Record transport-level websocket receipt without validating market data."""
         now = time.monotonic() if received_mono is None else float(received_mono)
         self._last_raw_ws_receive_mono = now
+        self._raw_ws_receipts_total += 1
         token = tick.get("instrument_token") or tick.get("token")
         try:
             token_int = int(token) if token is not None else None
@@ -10128,6 +10130,14 @@ class MarketDataManager:
                         get_data_dir() / "replay_archive",
                         capacity=capacity,
                         max_session_bytes=max_mb * 1024 * 1024,
+                        upstream_provider=lambda: {
+                            "raw_ws_receipts": int(self._raw_ws_receipts_total),
+                            "submitted": int(self._tick_submitted_total),
+                            "processed": int(self._tick_processed_total),
+                            "dropped": int(self._tick_dropped_total),
+                            "coalesced": int(self._tick_coalesced_total),
+                            "legacy_queue_dropped": int(self._tick_queue_dropped),
+                        },
                     )
                 basket = getattr(self, "_active_contract_basket", None)
                 # A versioned active basket is immutable until its next commit.
