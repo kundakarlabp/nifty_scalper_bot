@@ -60,6 +60,10 @@ def capture_storage_status(
     failed = 0
     pending = 0
     recorded = 0
+    upstream_missing = 0
+    upstream_losses = 0
+    max_queue = 0
+    max_writer_lag_ms = 0.0
     for sidecar in folder.glob("*.integrity.json"):
         try:
             obj = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -70,6 +74,23 @@ def capture_storage_status(
                 continue
             runs += 1
             recorded += counted
+            max_queue = max(max_queue, int(obj.get("max_pending") or 0))
+            max_writer_lag_ms = max(
+                max_writer_lag_ms, float(obj.get("max_writer_lag_ms") or 0)
+            )
+            initial = obj.get("upstream_start")
+            latest = obj.get("upstream_latest")
+            if isinstance(initial, dict) and isinstance(latest, dict):
+                for key in ("dropped", "coalesced", "legacy_queue_dropped"):
+                    if key in initial and key in latest:
+                        upstream_losses += max(
+                            0, int(latest[key]) - int(initial[key])
+                        )
+                    else:
+                        upstream_missing += 1
+                        break
+            else:
+                upstream_missing += 1
             dropped += max(0, int(obj.get("dropped") or 0))
             failed += max(0, int(obj.get("failed") or 0))
             pending += max(0, int(obj.get("pending") or 0))
@@ -88,6 +109,10 @@ def capture_storage_status(
         warnings.append("replay_session_capacity_near_limit")
     if pending:
         warnings.append("writer_queue_pending")
+    if upstream_losses:
+        warnings.append("upstream_drop_or_coalescing")
+    if upstream_missing:
+        warnings.append("upstream_accounting_unverified")
     return {
         "v": 1,
         "date": session_date.isoformat(),
@@ -102,6 +127,14 @@ def capture_storage_status(
         "dropped_events": dropped,
         "failed_events": failed,
         "pending_events": pending,
+        "max_writer_queue_pending": max_queue,
+        "max_writer_lag_ms": round(max_writer_lag_ms, 3),
+        "upstream_lost_or_coalesced": upstream_losses,
+        "upstream_accounting_unavailable_runs": upstream_missing,
+        "observed_loss_free": bool(
+            runs and not (dropped or failed or pending or upstream_losses)
+            and not upstream_missing
+        ),
         "warnings": warnings,
         "complete_capture_verified": False,
     }
