@@ -156,9 +156,7 @@ class ReplayArchive:
         # fields must not change if the bus later mutates the caller's tick.
         # Avoid the expensive JSON conversion and filesystem I/O here.
         shallow_payload = {
-            key: deepcopy(value)
-            if isinstance(value, (dict, list, tuple))
-            else value
+            key: deepcopy(value) if isinstance(value, (dict, list, tuple)) else value
             for key, value in payload.items()
         }
         with self._lock:
@@ -232,12 +230,13 @@ class ReplayArchive:
                     continue
                 try:
                     lag_ms = (time.monotonic() - queued_at) * 1000.0
-                    self._max_writer_lag_ms = max(
-                        self._max_writer_lag_ms, lag_ms
+                    self._max_writer_lag_ms = max(self._max_writer_lag_ms, lag_ms)
+                    day = (
+                        datetime.fromisoformat(event["available_at"])
+                        .astimezone(IST)
+                        .date()
+                        .isoformat()
                     )
-                    day = datetime.fromisoformat(
-                        event["available_at"]
-                    ).astimezone(IST).date().isoformat()
                     encoded = json.dumps(
                         {
                             **event,
@@ -255,9 +254,7 @@ class ReplayArchive:
                         self.directory.mkdir(parents=True, exist_ok=True)
                         path = self.directory / f"{day}.jsonl"
                         current_bytes = path.stat().st_size if path.exists() else 0
-                        handle = path.open(
-                            "a", encoding="utf-8", buffering=1024 * 1024
-                        )
+                        handle = path.open("a", encoding="utf-8", buffering=1024 * 1024)
                         current_day = day
                     if current_bytes + row_bytes > self.max_session_bytes:
                         raise OSError("replay_archive_session_size_limit")
@@ -284,6 +281,7 @@ class ReplayArchive:
             except OSError:
                 self.failed += 1
             self._persist_integrity()
+
 
 def iter_session(path: Path) -> Iterator[dict[str, Any]]:
     """Reject partial writes, sequence gaps, failed capture and backwards clocks."""
