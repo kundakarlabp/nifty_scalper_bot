@@ -82,7 +82,6 @@ def _research_scalar(value: Any) -> Any:
     return None
 
 
-
 def _completed(rows: Any) -> list[Mapping[str, Any]]:
     if not isinstance(rows, (tuple, list)):
         return []
