@@ -254,9 +254,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     for role in ("CE", "PE"):
         quote_minutes = websocket_quote_minutes[role]
         roles[role]["observed_ws_two_sided_quote_minutes"] = len(quote_minutes)
-        roles[role]["missing_ws_two_sided_quote_minutes"] = 375 - len(
-            quote_minutes
-        )
+        roles[role]["missing_ws_two_sided_quote_minutes"] = 375 - len(quote_minutes)
         roles[role]["missing_ws_two_sided_quote_minute_ranges"] = (
             _missing_market_minute_ranges(quote_minutes)
         )
