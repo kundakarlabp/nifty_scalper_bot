@@ -645,6 +645,14 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
     quality_path = data_dir / "research" / "fidelity" / f"{session_date}.json"
     try:
         fidelity = audit_session(path, gap_seconds=3)
+        # Both analyses must observe identical immutable tape bytes. The
+        # recorder may still be appending after the nominal settlement window;
+        # never certify quote markouts from different archive revisions.
+        if (
+            report.get("replay_sha256") is not None
+            and report["replay_sha256"] != fidelity["capture_sha256"]
+        ):
+            raise ValueError("replay_archive_changed_between_passes")
         role_coverage = {
             role: {
                 "observed_ticks": fields["observed_ticks"],
@@ -671,6 +679,16 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             "replay_sha256": fidelity["capture_sha256"],
         }
     except (OSError, ValueError, TypeError) as exc:
+        if isinstance(exc, ValueError) and str(exc) == (
+            "replay_archive_changed_between_passes"
+        ):
+            report["status"] = "unavailable"
+            report["blocker"] = str(exc)
+            report["sampled_observations"] = []
+            report["sampled_strata"] = []
+            report["structural_outcomes"] = []
+            report["structural_strata"] = []
+            report["eligible_for_entry_filter_change"] = False
         fidelity = {
             "status": "unavailable",
             "blocker": (
