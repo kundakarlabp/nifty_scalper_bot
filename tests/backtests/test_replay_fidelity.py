@@ -106,9 +106,7 @@ def test_missing_quote_minute_ranges_preserve_exact_holes() -> None:
         {"start_ist": "10:17", "end_ist": "10:18", "minutes": 2},
         {"start_ist": "14:30", "end_ist": "14:30", "minutes": 1},
     ]
-    assert _missing_market_minute_ranges(
-        observed | {"10:17", "10:18", "14:30"}
-    ) == []
+    assert _missing_market_minute_ranges(observed | {"10:17", "10:18", "14:30"}) == []
 
 
 def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
