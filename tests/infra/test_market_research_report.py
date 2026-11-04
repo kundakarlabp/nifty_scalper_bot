@@ -159,6 +159,27 @@ def test_zero_parity_samples_never_qualify_as_verified() -> None:
     assert summary["verified_fraction_of_observed"] == 0
 
 
+def test_parity_summary_preserves_lagged_common_minute_evidence() -> None:
+    rows = [
+        {
+            "symbol": CONTRACT,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "same_minute_volume_match",
+            "latest_sources_aligned": False,
+        },
+        {
+            "symbol": OTHER,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "same_minute_volume_match",
+            "latest_sources_aligned": True,
+        },
+    ]
+    summary = _parity_summary(rows)
+    assert summary["positive_volume_matches"] == 2
+    assert summary["latest_source_unaligned_observations"] == 1
+    assert summary["latest_aligned_positive_matches"] == 1
+
+
 def test_dense_replay_path_yields_five_cost_adjusted_horizons() -> None:
     import math
 
