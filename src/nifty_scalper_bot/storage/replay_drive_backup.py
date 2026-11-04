@@ -142,9 +142,7 @@ def _one_day(
             runner=runner,
             deadline=deadline,
         )
-        md5_lines = _rclone(
-            ["md5sum", destination], runner=runner, deadline=deadline
-        )
+        md5_lines = _rclone(["md5sum", destination], runner=runner, deadline=deadline)
         match = _MD5.match(md5_lines.strip())
         if match is None or match.group(1).lower() != expected["md5"]:
             raise ValueError("replay_drive_remote_checksum_mismatch")
