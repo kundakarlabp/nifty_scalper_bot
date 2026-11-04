@@ -16,6 +16,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -44,14 +45,21 @@ def _hashes(path: Path) -> dict[str, Any]:
     }
 
 
-def _rclone(args: list[str], *, runner: Callable[..., Any] = subprocess.run) -> str:
+def _rclone(
+    args: list[str], *,
+    runner: Callable[..., Any] = subprocess.run,
+    deadline: float,
+) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("replay_drive_transfer_budget_exceeded")
     try:
         result = runner(
             ["rclone", *args],
             capture_output=True,
             text=True,
             check=False,
-            timeout=1800,
+            timeout=min(1800, max(1, remaining)),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("replay_drive_transfer_failed") from exc
@@ -125,14 +133,18 @@ def _one_day(
     temporary.replace(manifest_path)
     sources.append((manifest_path.name, manifest_path))
     remote_prefix = f"{remote}{day[:4]}/{day}/"
+    deadline = time.monotonic() + 1800  # Entire daily transfer <= 30 min.
     for name, source in sources:
         expected = _hashes(source)
         destination = remote_prefix + name
         _rclone(
             ["copyto", str(source), destination, "--checksum", "--immutable"],
             runner=runner,
+            deadline=deadline,
         )
-        md5_lines = _rclone(["md5sum", destination], runner=runner)
+        md5_lines = _rclone(
+            ["md5sum", destination], runner=runner, deadline=deadline
+        )
         match = _MD5.match(md5_lines.strip())
         if match is None or match.group(1).lower() != expected["md5"]:
             raise ValueError("replay_drive_remote_checksum_mismatch")
@@ -169,8 +181,9 @@ def backup_prior_sessions(
     if moment.tzinfo is None:
         raise ValueError("replay_drive_requires_timezone")
     local = moment.astimezone(_IST)
-    # Reserve 07:00–17:00 IST for pre-open and live trading without disk pressure.
-    if 7 <= local.hour < 17 or not remote:
+    # Reject starts from 06:00: 30-minute total budget finishes before
+    # the 07:00 pre-open protection and live trading session.
+    if 6 <= local.hour < 17 or not remote:
         return []
     if not _REMOTE.fullmatch(remote):
         raise ValueError("replay_drive_remote_name_invalid")
