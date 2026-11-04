@@ -149,12 +149,16 @@ def sample_selected_option_parity(
             indicator_latest = indicator_rows[-1] if indicator_rows else None
             canonical_latest = canonical_rows[-1] if canonical_rows else None
             indicator_latest_minute = (
-                _minute_key(indicator_latest.get("timestamp") or indicator_latest.get("start"))
+                _minute_key(
+                    indicator_latest.get("timestamp") or indicator_latest.get("start")
+                )
                 if indicator_latest is not None
                 else None
             )
             canonical_latest_minute = (
-                _minute_key(canonical_latest.get("timestamp") or canonical_latest.get("start"))
+                _minute_key(
+                    canonical_latest.get("timestamp") or canonical_latest.get("start")
+                )
                 if canonical_latest is not None
                 else None
             )
@@ -172,7 +176,9 @@ def sample_selected_option_parity(
             )
             indicator = common_indicator or indicator_latest
             compared_minute = (
-                _minute_key(indicator.get("timestamp") or indicator.get("start"))
+                _minute_key(
+                    indicator.get("timestamp") or indicator.get("start")
+                )
                 if indicator is not None
                 else None
             )
@@ -225,7 +231,8 @@ def sample_selected_option_parity(
                     - evidence["canonical_completed_volume"]
                     if evidence["indicator_completed_volume"] is not None
                     and evidence["canonical_completed_volume"] is not None
-                    and evidence["indicator_completed_ts"] == evidence["canonical_completed_ts"]
+                    and evidence["indicator_completed_ts"]
+                    == evidence["canonical_completed_ts"]
                     else None
                 ),
             }
