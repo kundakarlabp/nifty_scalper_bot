@@ -61,9 +61,7 @@ def _fake_rclone(remote_data: dict[str, bytes]):
     return execute
 
 
-def test_uploads_verified_tape_and_integrity_with_no_live_io(
-    tmp_path, monkeypatch
-):
+def test_uploads_verified_tape_and_integrity_with_no_live_io(tmp_path, monkeypatch):
     source = _source(tmp_path)
     (tmp_path / "research" / "fidelity").mkdir(parents=True)
     (tmp_path / "research" / "fidelity" / "2026-11-04.json").write_text(
@@ -101,9 +99,7 @@ def test_uploads_verified_tape_and_integrity_with_no_live_io(
     assert receipt["session_date_ist"] == "2026-11-04"
     # No retransfers once an immutable, verified receipt is present.
     assert (
-        backup_prior_sessions(
-            tmp_path, remote="niftybackup:", now=AFTER, runner=fake
-        )
+        backup_prior_sessions(tmp_path, remote="niftybackup:", now=AFTER, runner=fake)
         == []
     )
 
@@ -132,18 +128,14 @@ def test_checksum_mismatch_never_marks_uploaded_or_removes_source(
             runner=corrupt_remote,
         )
     assert source.exists()
-    assert not (
-        tmp_path / "replay_drive_backups" / "2026-11-04.receipt.json"
-    ).exists()
+    assert not (tmp_path / "replay_drive_backups" / "2026-11-04.receipt.json").exists()
 
 
 def test_unconfigured_and_invalid_remotes_are_safe(tmp_path, monkeypatch):
     _source(tmp_path)
     assert backup_prior_sessions(tmp_path, remote="", now=AFTER) == []
     with pytest.raises(ValueError, match="remote_name_invalid"):
-        backup_prior_sessions(
-            tmp_path, remote="nifty:; rm -rf /", now=AFTER
-        )
+        backup_prior_sessions(tmp_path, remote="nifty:; rm -rf /", now=AFTER)
     monkeypatch.setattr(
         "nifty_scalper_bot.storage.replay_drive_backup.shutil.which",
         lambda _name: None,
