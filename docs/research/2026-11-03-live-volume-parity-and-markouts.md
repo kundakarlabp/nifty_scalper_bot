@@ -12,14 +12,21 @@ WebSocket, database schema, public endpoint, automation service or broker call.
 - `REPLAY_CAPTURE_QUEUE_CAPACITY` defaults to 16,384 and is clamped to
   1,024–65,536. Queue drops invalidate integrity. Never block trading to
   preserve research.
-- `REPLAY_CAPTURE_MAX_SESSION_MB` defaults to 512 and is clamped to
-  128–2,048 MiB. Keep the default until host disk headroom is verified.
-  Capacity exhaustion invalidates replay; never silently sample away ticks.
+- `REPLAY_CAPTURE_MAX_SESSION_MB` requests 1,024 MiB by default and
+  is clamped to 128–2,048 MiB. A one-time recorder startup disk check retains
+  a 2 GiB free-space reserve; otherwise the recorder fails back to the
+  original 512 MiB ceiling and publishes `capacity_guard` plus a warning.
+  The sidecar records the effective ceiling. Capacity exhaustion still
+  invalidates replay; never silently sample away ticks.
 - The live strategy manager emits `OPTION_COMPLETED_VOLUME_PARITY` once each
   UTC minute for **both** selected CE/PE. It compares completed minute
   timestamps and actual volume across the indicator and canonical data paths.
   Equal *zero* is `zero_volume_match_unverified`, **not** verified parity.
-  Missing or different-minute pairs are counted separately.
+  Missing or different-minute pairs are counted separately. When one
+  source has not yet finalized the newest bar, the observer compares the newest
+  common completed minute and separately records both latest source timestamps
+  and `latest_sources_aligned`; a historical match does not certify live
+  source synchronization. Genuine same-minute differences remain mismatches.
 - Independently of strategy acceptance, `RESEARCH_STRATEGY_REJECTION`
   records the first observed SMC, VWAPPro and ORBPro no-vote per UTC minute,
   exact contract and strategy. The sampled event now also stores finite,
@@ -29,7 +36,9 @@ WebSocket, database schema, public endpoint, automation service or broker call.
   must not be called independent trading opportunities.
 - The existing five-minute log archive adds `REPLAY_CAPTURE_STORAGE` status
   (file size, ceiling, queue backlog and integrity counters). No tape bytes,
-  broker tokens or private account data are uploaded.
+  broker tokens or private account data are uploaded. A strict
+  post-session audit now publishes exact missing selected CE/PE quote-update
+  minute ranges; zero writer drops does not establish exchange completeness.
 
 ## Post-close read-only report
 
