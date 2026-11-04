@@ -8,7 +8,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from nifty_scalper_bot.backtesting.replay_fidelity import audit_session
+from nifty_scalper_bot.backtesting.replay_fidelity import (
+    _missing_market_minute_ranges,
+    audit_session,
+)
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -90,6 +93,22 @@ def test_verified_capture_has_anonymous_quote_fidelity_statistics(tmp_path):
     assert report["account_pnl"] is None
     assert not report["promotion_eligible"]
     assert not report["actual_exchange_stream_completeness_proven"]
+
+
+def test_missing_quote_minute_ranges_preserve_exact_holes() -> None:
+    # Observed ticks are updates, not a guarantee of every exchange message.
+    observed = {
+        f"{minute // 60:02d}:{minute % 60:02d}"
+        for minute in range(9 * 60 + 15, 15 * 60 + 30)
+    }
+    observed -= {"10:17", "10:18", "14:30"}
+    assert _missing_market_minute_ranges(observed) == [
+        {"start_ist": "10:17", "end_ist": "10:18", "minutes": 2},
+        {"start_ist": "14:30", "end_ist": "14:30", "minutes": 1},
+    ]
+    assert _missing_market_minute_ranges(
+        observed | {"10:17", "10:18", "14:30"}
+    ) == []
 
 
 def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
