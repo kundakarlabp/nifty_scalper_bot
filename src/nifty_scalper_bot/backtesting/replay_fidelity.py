@@ -105,6 +105,7 @@ def _missing_market_minute_ranges(observed: set[str]) -> list[dict[str, Any]]:
             first = index
         previous = index
     groups.append((first, previous))
+
     def clock(offset: int) -> str:
         minute = start_minute + offset
         return f"{minute // 60:02d}:{minute % 60:02d}"
