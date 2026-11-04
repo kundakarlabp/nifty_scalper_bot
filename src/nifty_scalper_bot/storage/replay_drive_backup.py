@@ -190,6 +190,9 @@ def backup_prior_sessions(
         day = tape.name.removesuffix(".jsonl.gz")
         if day >= local.date().isoformat():
             continue
+        receipt = data_dir / "replay_drive_backups" / f"{day}.receipt.json"
+        if receipt.is_file():
+            continue
         reports.append(_one_day(data_dir, tape, remote, runner=runner))
         if len(reports) >= limit:
             break
