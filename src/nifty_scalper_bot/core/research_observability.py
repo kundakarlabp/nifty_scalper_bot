@@ -168,7 +168,8 @@ def sample_selected_option_parity(
             }
             common_indicator = next(
                 (
-                    row for row in reversed(indicator_rows)
+                    row
+                    for row in reversed(indicator_rows)
                     if _minute_key(row.get("timestamp") or row.get("start"))
                     in canonical_by_minute
                 ),
@@ -176,9 +177,7 @@ def sample_selected_option_parity(
             )
             indicator = common_indicator or indicator_latest
             compared_minute = (
-                _minute_key(
-                    indicator.get("timestamp") or indicator.get("start")
-                )
+                _minute_key(indicator.get("timestamp") or indicator.get("start"))
                 if indicator is not None
                 else None
             )
