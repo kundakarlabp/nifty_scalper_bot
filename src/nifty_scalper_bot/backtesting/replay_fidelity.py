@@ -105,12 +105,12 @@ def _missing_market_minute_ranges(observed: set[str]) -> list[dict[str, Any]]:
             first = index
         previous = index
     groups.append((first, previous))
+    def clock(offset: int) -> str:
+        minute = start_minute + offset
+        return f"{minute // 60:02d}:{minute % 60:02d}"
+
     return [
-        {
-            "start_ist": f"{(start_minute + a) // 60:02d}:{(start_minute + a) % 60:02d}",
-            "end_ist": f"{(start_minute + b) // 60:02d}:{(start_minute + b) % 60:02d}",
-            "minutes": b - a + 1,
-        }
+        {"start_ist": clock(a), "end_ist": clock(b), "minutes": b - a + 1}
         for a, b in groups
     ]
 
