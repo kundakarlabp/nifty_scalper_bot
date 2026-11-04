@@ -652,9 +652,7 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
                     "distinct_seconds_with_updates"
                 ],
                 "missing_market_minutes": fields["missing_market_minutes"],
-                "missing_market_minute_ranges": fields[
-                    "missing_market_minute_ranges"
-                ],
+                "missing_market_minute_ranges": fields["missing_market_minute_ranges"],
                 "first_market_tick_ist": fields["first_market_tick_ist"],
                 "last_market_tick_ist": fields["last_market_tick_ist"],
                 "gaps_over_threshold": fields["gaps_over_threshold"],
