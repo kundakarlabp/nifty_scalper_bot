@@ -10124,7 +10124,7 @@ class MarketDataManager:
                         "REPLAY_CAPTURE_QUEUE_CAPACITY", 16384, 1024, 65536
                     )
                     max_mb = _bounded_int(
-                        "REPLAY_CAPTURE_MAX_SESSION_MB", 512, 128, 2048
+                        "REPLAY_CAPTURE_MAX_SESSION_MB", 1024, 128, 2048
                     )
                     self._replay_archive = ReplayArchive(
                         get_data_dir() / "replay_archive",
