@@ -625,9 +625,11 @@ def _run_captured_baseline_stress(
             )
         except (OSError, ValueError):
             scenario = None
-        raw_bps = scenario.get("slippage_bps_per_side") if isinstance(
-            scenario, dict
-        ) else None
+        raw_bps = (
+            scenario.get("slippage_bps_per_side")
+            if isinstance(scenario, dict)
+            else None
+        )
         if isinstance(raw_bps, (str, int, float)) and not isinstance(raw_bps, bool):
             try:
                 recorded_bps = float(raw_bps)
