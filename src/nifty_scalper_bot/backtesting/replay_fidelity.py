@@ -84,6 +84,35 @@ def _selected(snapshot: Mapping[str, Any]) -> dict[str, str]:
     return selected
 
 
+def _missing_market_minute_ranges(observed: set[str]) -> list[dict[str, Any]]:
+    """Lossless grouped timestamps of market minutes with no observed quote."""
+    start_minute = 9 * 60 + 15
+    missing = [
+        offset
+        for offset in range(375)
+        if f"{(start_minute + offset) // 60:02d}:{(start_minute + offset) % 60:02d}"
+        not in observed
+    ]
+    if not missing:
+        return []
+    groups: list[tuple[int, int]] = []
+    first = previous = missing[0]
+    for index in missing[1:]:
+        if index != previous + 1:
+            groups.append((first, previous))
+            first = index
+        previous = index
+    groups.append((first, previous))
+    return [
+        {
+            "start_ist": f"{(start_minute + a) // 60:02d}:{(start_minute + a) % 60:02d}",
+            "end_ist": f"{(start_minute + b) // 60:02d}:{(start_minute + b) % 60:02d}",
+            "minutes": b - a + 1,
+        }
+        for a, b in groups
+    ]
+
+
 def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     if not math.isfinite(gap_seconds) or not 0 < gap_seconds <= 900:
         raise ValueError("replay_audit_invalid_gap")
@@ -191,6 +220,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             "total_market_session_seconds": 22500,
             "seconds_without_observed_updates": (22500 - len(seconds_observed[role])),
             "missing_market_minutes": 375 - len(minutes[role]),
+            "missing_market_minute_ranges": _missing_market_minute_ranges(
+                minutes[role]
+            ),
             "market_session_ticks": c["market_session_ticks"],
             "observed_market_minutes": len(minutes[role]),
             "websocket_ticks": c["websocket_ticks"],
