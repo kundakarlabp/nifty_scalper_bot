@@ -47,9 +47,9 @@ def capture_storage_status(
     tape = plain if plain.is_file() else compressed
     is_compressed = tape == compressed
     try:
-        configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
+        configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
     except (ValueError, TypeError):
-        configured = 512
+        configured = 1024
     ceiling = max(128, min(2048, configured)) * 1024 * 1024
     try:
         size = tape.stat().st_size
@@ -64,6 +64,8 @@ def capture_storage_status(
     upstream_losses = 0
     max_queue = 0
     max_writer_lag_ms = 0.0
+    effective_capacities: list[int] = []
+    capacity_guards: set[str] = set()
     for sidecar in folder.glob("*.integrity.json"):
         try:
             obj = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -73,6 +75,12 @@ def capture_storage_status(
             if counted <= 0:
                 continue
             runs += 1
+            observed_capacity = obj.get("max_session_bytes")
+            if type(observed_capacity) is int and observed_capacity > 0:
+                effective_capacities.append(observed_capacity)
+            guard = obj.get("capacity_guard")
+            if isinstance(guard, str) and guard:
+                capacity_guards.add(guard)
             recorded += counted
             max_queue = max(max_queue, int(obj.get("max_pending") or 0))
             max_writer_lag_ms = max(
@@ -94,6 +102,11 @@ def capture_storage_status(
             pending += max(0, int(obj.get("pending") or 0))
         except (OSError, TypeError, ValueError, KeyError):
             continue
+    # Report the actual narrowest writer ceiling, not the larger requested
+    # limit when disk headroom forced a safe fallback.
+    requested_ceiling = ceiling
+    if effective_capacities:
+        ceiling = min(effective_capacities)
     enabled = os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() == "true"
     used_fraction = None if is_compressed else round(size / ceiling, 4)
     warnings = []
@@ -111,6 +124,8 @@ def capture_storage_status(
         warnings.append("upstream_drop_or_coalescing")
     if upstream_missing:
         warnings.append("upstream_accounting_unverified")
+    if any(guard != "requested" for guard in capacity_guards):
+        warnings.append("replay_capacity_disk_guard_fallback")
     return {
         "v": 1,
         "date": session_date.isoformat(),
@@ -119,6 +134,8 @@ def capture_storage_status(
         "tape_compressed": is_compressed,
         "bytes": size,
         "capacity_bytes": ceiling,
+        "requested_capacity_bytes": requested_ceiling,
+        "capacity_guard": sorted(capacity_guards),
         "capacity_used_fraction": used_fraction,
         "writer_runs": runs,
         "recorded_events": recorded,
