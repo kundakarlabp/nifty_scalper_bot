@@ -142,27 +142,44 @@ def sample_selected_option_parity(
         try:
             indicator_rows = _completed(history(symbol, count=5, field="bars"))
             canonical_rows = _completed(canonical(symbol, limit=5))
-            indicator = indicator_rows[-1] if indicator_rows else None
-            indicator_minute = (
+            # The two completed-bar consumers advance on independent clocks:
+            # the indicator may receive a bar before CandleEngine's flush grace
+            # closes it. Compare the NEWEST COMMON UTC minute, not two tails
+            # that happen to be read on opposite sides of that boundary.
+            indicator_latest = indicator_rows[-1] if indicator_rows else None
+            canonical_latest = canonical_rows[-1] if canonical_rows else None
+            indicator_latest_minute = (
+                _minute_key(indicator_latest.get("timestamp") or indicator_latest.get("start"))
+                if indicator_latest is not None
+                else None
+            )
+            canonical_latest_minute = (
+                _minute_key(canonical_latest.get("timestamp") or canonical_latest.get("start"))
+                if canonical_latest is not None
+                else None
+            )
+            canonical_by_minute = {
+                _minute_key(row.get("timestamp") or row.get("start")): row
+                for row in canonical_rows
+            }
+            common_indicator = next(
+                (
+                    row for row in reversed(indicator_rows)
+                    if _minute_key(row.get("timestamp") or row.get("start"))
+                    in canonical_by_minute
+                ),
+                None,
+            )
+            indicator = common_indicator or indicator_latest
+            compared_minute = (
                 _minute_key(indicator.get("timestamp") or indicator.get("start"))
                 if indicator is not None
                 else None
             )
-            same_minute_canonical = (
-                next(
-                    (
-                        row
-                        for row in reversed(canonical_rows)
-                        if _minute_key(row.get("timestamp") or row.get("start"))
-                        == indicator_minute
-                    ),
-                    None,
-                )
-                if indicator_minute is not None
-                else None
-            )
-            reference = same_minute_canonical or (
-                canonical_rows[-1] if canonical_rows else None
+            reference = (
+                canonical_by_minute[compared_minute]
+                if common_indicator is not None
+                else canonical_latest
             )
             evidence = describe_option_volume_evidence(
                 {"volume": indicator.get("volume") if indicator else None},
@@ -187,6 +204,30 @@ def sample_selected_option_parity(
                 "canonical_volume": evidence["canonical_completed_volume"],
                 "indicator_bars": len(indicator_rows),
                 "canonical_bars": len(canonical_rows),
+                "latest_indicator_minute": indicator_latest_minute,
+                "latest_canonical_minute": canonical_latest_minute,
+                "latest_sources_aligned": (
+                    indicator_latest_minute == canonical_latest_minute
+                    and indicator_latest_minute is not None
+                ),
+                "compared_common_minute": (
+                    compared_minute if common_indicator is not None else None
+                ),
+                "comparison_used_older_common_minute": (
+                    common_indicator is not None
+                    and (
+                        compared_minute != indicator_latest_minute
+                        or compared_minute != canonical_latest_minute
+                    )
+                ),
+                "volume_difference": (
+                    evidence["indicator_completed_volume"]
+                    - evidence["canonical_completed_volume"]
+                    if evidence["indicator_completed_volume"] is not None
+                    and evidence["canonical_completed_volume"] is not None
+                    and evidence["indicator_completed_ts"] == evidence["canonical_completed_ts"]
+                    else None
+                ),
             }
         except Exception as exc:  # noqa: BLE001 - diagnostics cannot affect entry
             record = {
