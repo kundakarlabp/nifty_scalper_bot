@@ -1,8 +1,10 @@
 """Purpose: Read-only observation-quality audit for recorded market-data events.
 
-Responsibilities: Validate archive integrity with the existing replay validators
-and inspect selected CE/PE quote provenance, two-sided books and five-level depth
-within each basket segment. Ownership stays with the offline replay-audit layer.
+Responsibilities: Validate archive integrity with the existing replay validators;
+audit_session inspects selected CE/PE quote provenance, two-sided books and five-level
+depth within each basket segment. _missing_market_minute_ranges reports exact IST
+minutes without observed quote updates, without reconstructing or inventing ticks.
+Ownership stays with the offline replay-audit layer.
 Safety: Missing or partial depth cannot certify quote context; this audit never
 recovers exchange messages, proves fills, or changes live trading decisions.
 """
