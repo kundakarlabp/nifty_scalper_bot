@@ -1,8 +1,8 @@
 """Isolated, resource-bounded research jobs and recorded-feed replay.
 
 Responsibilities: Manage single-flight collection and credential-free historical
-replay, partition verified genuine process epochs, and accept compressed or raw
-capture sessions without changing active strategy or broker state.
+replay, date-pin completed sessions, and partition genuine process epochs.
+run_recorded_replays supports unchanged captured-config and paired exits research.
 Safety: Never import live application entrypoints, send broker orders, invent
 missing quotes or treat an invalid replay as a successful backtest.
 """
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -34,28 +34,62 @@ _SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
 def validate_request(
-    payload: dict[str, Any], *, today: date | None = None
+    payload: dict[str, Any],
+    *,
+    today: date | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Accept bounded data requests only, never arbitrary commands or paths."""
-    if set(payload) - {"id", "days", "mode"}:
-        raise ValueError("Only id, days and mode are supported")
+    """Accept bounded, dated offline requests; never commands or arbitrary paths."""
+    allowed = {"id", "days", "mode", "session_date", "profile"}
+    if set(payload) - allowed:
+        raise ValueError("Only id, days, mode, session_date and profile are supported")
     job_id = payload.get("id")
     days = payload.get("days", 30)
     mode = payload.get("mode", "all")
+    profile = payload.get("profile", "paired_adaptive")
     if mode not in {"all", "components", "runtime"}:
         raise ValueError("mode must be all, components or runtime")
+    if profile not in {"paired_adaptive", "captured_baseline"}:
+        raise ValueError("unsupported research replay profile")
+    if profile != "paired_adaptive" and mode != "runtime":
+        raise ValueError("captured_baseline_requires_runtime_mode")
     if not isinstance(job_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", job_id):
         raise ValueError("Invalid request id")
     if type(days) is not int or not 1 <= days <= 90:
         raise ValueError("days must be an integer from 1 to 90")
-    end = (today or datetime.now(IST).date()) - timedelta(days=1)
-    return {
+    clock = now or datetime.now(IST)
+    if clock.tzinfo is None:
+        raise ValueError("research_request_clock_requires_timezone")
+    local_now = clock.astimezone(IST)
+    current_date = today or local_now.date()
+    pinned = payload.get("session_date")
+    if pinned is not None:
+        if mode != "runtime" or days != 1:
+            raise ValueError("pinned_session_requires_one_day_runtime")
+        if not isinstance(pinned, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pinned):
+            raise ValueError("invalid_replay_session_date")
+        try:
+            end = date.fromisoformat(pinned)
+        except ValueError as exc:
+            raise ValueError("invalid_replay_session_date") from exc
+        if end > current_date or end < current_date - timedelta(days=89):
+            raise ValueError("replay_session_date_out_of_range")
+        if end == current_date and local_now.time() < dt_time(16, 0):
+            raise ValueError("replay_same_day_requires_post_close")
+    else:
+        end = current_date - timedelta(days=1)
+    request = {
         "id": job_id,
         "days": days,
         "mode": mode,
         "start": (end - timedelta(days=days - 1)).isoformat(),
         "end": end.isoformat(),
     }
+    if pinned is not None:
+        request["session_date"] = end.isoformat()
+    if "profile" in payload:
+        request["profile"] = profile
+    return request
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -118,7 +152,10 @@ def _terminate_worker(process: Any) -> None:
 def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) -> bool:
     """Keep immutable job IDs bound to one mode and requested duration."""
 
-    return all(existing.get(key) == request.get(key) for key in ("id", "days", "mode"))
+    return all(
+        existing.get(key) == request.get(key)
+        for key in ("id", "days", "mode", "start", "end", "session_date", "profile")
+    )
 
 
 def _launcher_mode() -> str:
