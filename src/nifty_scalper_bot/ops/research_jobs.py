@@ -154,10 +154,17 @@ def _terminate_worker(process: Any) -> None:
 def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) -> bool:
     """Keep immutable job IDs bound to one mode and requested duration."""
 
-    return all(
-        existing.get(key) == request.get(key)
-        for key in ("id", "days", "mode", "start", "end", "session_date", "profile")
-    )
+    identity = ("id", "days", "mode")
+    if not all(existing.get(key) == request.get(key) for key in identity):
+        return False
+    special = ("session_date", "profile")
+    if any(key in existing or key in request for key in special):
+        return all(
+            existing.get(key) == request.get(key)
+            for key in (*special, "start", "end")
+        )
+    # Historical in-progress research statuses did not store start/end.
+    return True
 
 
 def _launcher_mode() -> str:
