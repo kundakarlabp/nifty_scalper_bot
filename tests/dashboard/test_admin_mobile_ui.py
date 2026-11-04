@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from nifty_scalper_bot import admin_dashboard as dashboard
+from nifty_scalper_bot import operating_control
 from nifty_scalper_bot import superlite_admin_core as core
 
 
@@ -26,6 +27,13 @@ def test_mobile_dashboard_loads_without_expensive_live_probes(monkeypatch) -> No
             "ENABLE_LIVE": "false",
             "EXECUTION_MODE": "SHADOW",
         },
+    )
+    # operating_control imports _read_env directly at module import time;
+    # mocking admin_dashboard._read_env alone still hits protected host paths.
+    monkeypatch.setattr(
+        operating_control,
+        "_read_env",
+        lambda: {"BOT_OPERATING_MODE": "AUTO"},
     )
     monkeypatch.setattr(
         dashboard,
