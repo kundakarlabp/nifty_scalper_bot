@@ -37,8 +37,14 @@ WebSocket, database schema, public endpoint, automation service or broker call.
 - The existing five-minute log archive adds `REPLAY_CAPTURE_STORAGE` status
   (file size, ceiling, queue backlog and integrity counters). No tape bytes,
   broker tokens or private account data are uploaded. A strict
-  post-session audit now publishes exact missing selected CE/PE quote-update
-  minute ranges; zero writer drops does not establish exchange completeness.
+  post-session audit now publishes exact missing selected CE/PE tick-update
+  minute ranges and separate stricter two-sided WebSocket quote-update ranges.
+  REST-only and LTP-only ticks do not establish executable quote coverage;
+  zero writer drops does not establish exchange completeness.
+
+A replay used in two separate research/fidelity passes must have the same
+SHA-256 after both passes; differing hashes invalidate the modelled markouts
+and block any implication of executable strategy expectancy.
 
 ## Post-close read-only report
 
