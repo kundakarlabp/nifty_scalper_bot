@@ -200,10 +200,20 @@ def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         statuses[status] += 1
         by_side[symbol[-2:]][status] += 1
     matches = statuses.get("same_minute_volume_match", 0)
+    latest_unaligned = sum(
+        row.get("latest_sources_aligned") is False for row in unique.values()
+    )
+    latest_aligned_matches = sum(
+        row.get("status") == "same_minute_volume_match"
+        and row.get("latest_sources_aligned") is True
+        for row in unique.values()
+    )
     return {
         "unit": "distinct_selected_contract_completed_minute",
         "observations": len(unique),
         "positive_volume_matches": matches,
+        "latest_source_unaligned_observations": latest_unaligned,
+        "latest_aligned_positive_matches": latest_aligned_matches,
         "verified_fraction_of_observed": (
             round(matches / len(unique), 4) if unique else 0.0
         ),
