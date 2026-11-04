@@ -159,6 +159,27 @@ def test_zero_parity_samples_never_qualify_as_verified() -> None:
     assert summary["verified_fraction_of_observed"] == 0
 
 
+def test_parity_summary_preserves_lagged_common_minute_evidence() -> None:
+    rows = [
+        {
+            "symbol": CONTRACT,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "same_minute_volume_match",
+            "latest_sources_aligned": False,
+        },
+        {
+            "symbol": OTHER,
+            "indicator_minute": DECISION.isoformat(),
+            "status": "same_minute_volume_match",
+            "latest_sources_aligned": True,
+        },
+    ]
+    summary = _parity_summary(rows)
+    assert summary["positive_volume_matches"] == 2
+    assert summary["latest_source_unaligned_observations"] == 1
+    assert summary["latest_aligned_positive_matches"] == 1
+
+
 def test_dense_replay_path_yields_five_cost_adjusted_horizons() -> None:
     import math
 
@@ -269,3 +290,33 @@ def test_postmarket_emits_a_persisted_fidelity_failure_without_fabricating_quote
     assert json.loads(report_path.read_text())["archive_integrity_verified"] is False
     text = "\n".join(research_report_log_lines(result))
     assert "REPLAY_SESSION_FIDELITY " in text
+
+
+def test_postmarket_changed_archive_hash_invalidates_counterfactuals(
+    tmp_path, monkeypatch
+) -> None:
+    from nifty_scalper_bot.backtesting import replay_fidelity
+    from nifty_scalper_bot.config import paths
+    from nifty_scalper_bot.infra.market_research_report import (
+        run_postmarket_research,
+    )
+
+    monkeypatch.setattr(paths, "get_data_dir", lambda: tmp_path)
+    path, _ = _session(tmp_path)
+    assert path.is_file()
+    monkeypatch.setattr(
+        replay_fidelity,
+        "audit_session",
+        lambda *_args, **_kwargs: {"capture_sha256": "0" * 64},
+    )
+    report = run_postmarket_research(DECISION.date(), _journal())
+    assert report["status"] == "unavailable"
+    assert report["blocker"] == "replay_archive_changed_between_passes"
+    assert report["sampled_observations"] == []
+    assert report["structural_outcomes"] == []
+    assert report["eligible_for_entry_filter_change"] is False
+    assert report["capture_fidelity"]["archive_integrity_verified"] is False
+    persisted = json.loads(
+        (tmp_path / "research" / "markouts" / "2026-11-03.json").read_text()
+    )
+    assert persisted["status"] == "unavailable"

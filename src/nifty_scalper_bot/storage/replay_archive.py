@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import threading
 import time
 import uuid
@@ -111,7 +112,22 @@ class ReplayArchive:
         upstream_provider: Callable[[], Mapping[str, int]] | None = None,
     ) -> None:
         self.directory = directory
+        self.requested_max_session_bytes = max_session_bytes
         self.max_session_bytes = max_session_bytes
+        self.capacity_guard = "requested"
+        # This is checked once when the recorder starts, not on the tick path.
+        # Never raise the raw-tape limit unless the host can retain a 2 GiB
+        # emergency disk reserve alongside the complete requested session.
+        if max_session_bytes > 512 * 1024 * 1024:
+            try:
+                usage_path = directory if directory.exists() else directory.parent
+                available = shutil.disk_usage(usage_path).free
+                if available < max_session_bytes + 2 * 1024 * 1024 * 1024:
+                    self.max_session_bytes = 512 * 1024 * 1024
+                    self.capacity_guard = "insufficient_disk_headroom"
+            except OSError:
+                self.max_session_bytes = 512 * 1024 * 1024
+                self.capacity_guard = "disk_headroom_unverified"
         self.run_id = uuid.uuid4().hex
         self.dropped = 0
         self.failed = 0
@@ -180,6 +196,9 @@ class ReplayArchive:
     def stats(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "requested_max_session_bytes": self.requested_max_session_bytes,
+            "max_session_bytes": self.max_session_bytes,
+            "capacity_guard": self.capacity_guard,
             "written": self.written,
             "dropped": self.dropped,
             "failed": self.failed,

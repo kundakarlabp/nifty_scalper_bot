@@ -47,9 +47,9 @@ def capture_storage_status(
     tape = plain if plain.is_file() else compressed
     is_compressed = tape == compressed
     try:
-        configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "512"))
+        configured = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
     except (ValueError, TypeError):
-        configured = 512
+        configured = 1024
     ceiling = max(128, min(2048, configured)) * 1024 * 1024
     try:
         size = tape.stat().st_size
@@ -64,6 +64,8 @@ def capture_storage_status(
     upstream_losses = 0
     max_queue = 0
     max_writer_lag_ms = 0.0
+    effective_capacities: list[int] = []
+    capacity_guards: set[str] = set()
     for sidecar in folder.glob("*.integrity.json"):
         try:
             obj = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -73,6 +75,12 @@ def capture_storage_status(
             if counted <= 0:
                 continue
             runs += 1
+            observed_capacity = obj.get("max_session_bytes")
+            if type(observed_capacity) is int and observed_capacity > 0:
+                effective_capacities.append(observed_capacity)
+            guard = obj.get("capacity_guard")
+            if isinstance(guard, str) and guard:
+                capacity_guards.add(guard)
             recorded += counted
             max_queue = max(max_queue, int(obj.get("max_pending") or 0))
             max_writer_lag_ms = max(
@@ -94,6 +102,11 @@ def capture_storage_status(
             pending += max(0, int(obj.get("pending") or 0))
         except (OSError, TypeError, ValueError, KeyError):
             continue
+    # Report the actual narrowest writer ceiling, not the larger requested
+    # limit when disk headroom forced a safe fallback.
+    requested_ceiling = ceiling
+    if effective_capacities:
+        ceiling = min(effective_capacities)
     enabled = os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() == "true"
     used_fraction = None if is_compressed else round(size / ceiling, 4)
     warnings = []
@@ -111,6 +124,8 @@ def capture_storage_status(
         warnings.append("upstream_drop_or_coalescing")
     if upstream_missing:
         warnings.append("upstream_accounting_unverified")
+    if any(guard != "requested" for guard in capacity_guards):
+        warnings.append("replay_capacity_disk_guard_fallback")
     return {
         "v": 1,
         "date": session_date.isoformat(),
@@ -119,6 +134,8 @@ def capture_storage_status(
         "tape_compressed": is_compressed,
         "bytes": size,
         "capacity_bytes": ceiling,
+        "requested_capacity_bytes": requested_ceiling,
+        "capacity_guard": sorted(capacity_guards),
         "capacity_used_fraction": used_fraction,
         "writer_runs": runs,
         "recorded_events": recorded,
@@ -183,10 +200,20 @@ def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         statuses[status] += 1
         by_side[symbol[-2:]][status] += 1
     matches = statuses.get("same_minute_volume_match", 0)
+    latest_unaligned = sum(
+        row.get("latest_sources_aligned") is False for row in unique.values()
+    )
+    latest_aligned_matches = sum(
+        row.get("status") == "same_minute_volume_match"
+        and row.get("latest_sources_aligned") is True
+        for row in unique.values()
+    )
     return {
         "unit": "distinct_selected_contract_completed_minute",
         "observations": len(unique),
         "positive_volume_matches": matches,
+        "latest_source_unaligned_observations": latest_unaligned,
+        "latest_aligned_positive_matches": latest_aligned_matches,
         "verified_fraction_of_observed": (
             round(matches / len(unique), 4) if unique else 0.0
         ),
@@ -618,6 +645,14 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
     quality_path = data_dir / "research" / "fidelity" / f"{session_date}.json"
     try:
         fidelity = audit_session(path, gap_seconds=3)
+        # Both analyses must observe identical immutable tape bytes. The
+        # recorder may still be appending after the nominal settlement window;
+        # never certify quote markouts from different archive revisions.
+        if (
+            report.get("replay_sha256") is not None
+            and report["replay_sha256"] != fidelity["capture_sha256"]
+        ):
+            raise ValueError("replay_archive_changed_between_passes")
         role_coverage = {
             role: {
                 "observed_ticks": fields["observed_ticks"],
@@ -625,6 +660,18 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
                     "distinct_seconds_with_updates"
                 ],
                 "missing_market_minutes": fields["missing_market_minutes"],
+                "missing_market_minute_ranges": fields["missing_market_minute_ranges"],
+                "observed_ws_two_sided_quote_minutes": fields.get(
+                    "observed_ws_two_sided_quote_minutes"
+                ),
+                "missing_ws_two_sided_quote_minutes": fields.get(
+                    "missing_ws_two_sided_quote_minutes"
+                ),
+                "missing_ws_two_sided_quote_minute_ranges": fields.get(
+                    "missing_ws_two_sided_quote_minute_ranges"
+                ),
+                "first_market_tick_ist": fields["first_market_tick_ist"],
+                "last_market_tick_ist": fields["last_market_tick_ist"],
                 "gaps_over_threshold": fields["gaps_over_threshold"],
             }
             for role, fields in fidelity["roles"].items()
@@ -641,6 +688,16 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             "replay_sha256": fidelity["capture_sha256"],
         }
     except (OSError, ValueError, TypeError) as exc:
+        if isinstance(exc, ValueError) and str(exc) == (
+            "replay_archive_changed_between_passes"
+        ):
+            report["status"] = "unavailable"
+            report["blocker"] = str(exc)
+            report["sampled_observations"] = []
+            report["sampled_strata"] = []
+            report["structural_outcomes"] = []
+            report["structural_strata"] = []
+            report["eligible_for_entry_filter_change"] = False
         fidelity = {
             "status": "unavailable",
             "blocker": (

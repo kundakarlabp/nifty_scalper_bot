@@ -183,3 +183,28 @@ def test_archive_freezes_nested_depth_before_writer_runs(tmp_path):
     observed = load_session(tmp_path / "2026-11-03.jsonl")[1]["payload"]
     assert observed["depth"]["buy"][0]["price"] == 89.95
     assert observed["ohlc"]["open"] == 90.0
+
+
+def test_replay_headroom_accepts_larger_tape_only_with_disk_reserve(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import nifty_scalper_bot.storage.replay_archive as module
+
+    mib = 1024 * 1024
+    monkeypatch.setattr(
+        module.shutil, "disk_usage", lambda path: SimpleNamespace(free=4 * 1024**3)
+    )
+    larger = ReplayArchive(tmp_path, max_session_bytes=1024 * mib)
+    assert larger.stats()["max_session_bytes"] == 1024 * mib
+    assert larger.stats()["capacity_guard"] == "requested"
+    larger.close()
+
+    monkeypatch.setattr(
+        module.shutil, "disk_usage", lambda path: SimpleNamespace(free=2 * 1024**3)
+    )
+    fallback = ReplayArchive(tmp_path, max_session_bytes=1024 * mib)
+    assert fallback.stats()["max_session_bytes"] == 512 * mib
+    assert fallback.stats()["capacity_guard"] == "insufficient_disk_headroom"
+    fallback.close()

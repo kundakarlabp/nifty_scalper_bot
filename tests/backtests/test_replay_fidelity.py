@@ -8,7 +8,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from nifty_scalper_bot.backtesting.replay_fidelity import audit_session
+from nifty_scalper_bot.backtesting.replay_fidelity import (
+    _missing_market_minute_ranges,
+    audit_session,
+)
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -86,10 +89,26 @@ def test_verified_capture_has_anonymous_quote_fidelity_statistics(tmp_path):
     assert report["observed_selected_context_available"]
     assert report["roles"]["CE"]["five_level_depth_ticks"] == 1
     assert report["roles"]["PE"]["uncrossed_two_sided_depth_ticks"] == 1
+    assert report["roles"]["CE"]["observed_ws_two_sided_quote_minutes"] == 1
+    assert report["roles"]["CE"]["missing_ws_two_sided_quote_minutes"] == 374
     assert report["roles"]["SPOT"]["observed_market_minutes"] == 1
     assert report["account_pnl"] is None
     assert not report["promotion_eligible"]
     assert not report["actual_exchange_stream_completeness_proven"]
+
+
+def test_missing_quote_minute_ranges_preserve_exact_holes() -> None:
+    # Observed ticks are updates, not a guarantee of every exchange message.
+    observed = {
+        f"{minute // 60:02d}:{minute % 60:02d}"
+        for minute in range(9 * 60 + 15, 15 * 60 + 30)
+    }
+    observed -= {"10:17", "10:18", "14:30"}
+    assert _missing_market_minute_ranges(observed) == [
+        {"start_ist": "10:17", "end_ist": "10:18", "minutes": 2},
+        {"start_ist": "14:30", "end_ist": "14:30", "minutes": 1},
+    ]
+    assert _missing_market_minute_ranges(observed | {"10:17", "10:18", "14:30"}) == []
 
 
 def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
@@ -97,7 +116,23 @@ def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
     assert not report["observed_selected_context_available"]
     assert report["roles"]["CE"]["uncrossed_two_sided_depth_ticks"] == 0
     assert report["roles"]["PE"]["five_level_depth_ticks"] == 0
+    assert report["roles"]["CE"]["observed_ws_two_sided_quote_minutes"] == 0
+    assert report["roles"]["CE"]["missing_ws_two_sided_quote_minutes"] == 375
     assert report["account_pnl"] is None
+
+
+def test_rest_quote_cannot_fill_missing_ws_quote_minutes(tmp_path):
+    recorder = ReplayArchive(tmp_path)
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
+    recorder.record("snapshot", _snapshot(), now)
+    for symbol in (CE, PE, FUT, "NSE:NIFTY 50"):
+        recorder.record("tick", _tick(symbol, source="rest"), now)
+    recorder.close()
+    report = audit_session(tmp_path / "2026-10-21.jsonl")
+    assert report["roles"]["CE"]["observed_market_minutes"] == 1
+    assert report["roles"]["CE"]["observed_ws_two_sided_quote_minutes"] == 0
+    assert report["roles"]["PE"]["missing_ws_two_sided_quote_minutes"] == 375
+    assert not report["observed_selected_context_available"]
 
 
 def test_single_level_depth_does_not_certify_five_level_option_quotes(tmp_path):

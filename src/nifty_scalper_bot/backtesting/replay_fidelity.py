@@ -1,8 +1,10 @@
 """Purpose: Read-only observation-quality audit for recorded market-data events.
 
-Responsibilities: Validate archive integrity with the existing replay validators
-and inspect selected CE/PE quote provenance, two-sided books and five-level depth
-within each basket segment. Ownership stays with the offline replay-audit layer.
+Responsibilities: Validate archive integrity with the existing replay validators;
+audit_session inspects selected CE/PE quote provenance, two-sided books and five-level
+depth within each basket segment. _missing_market_minute_ranges reports exact IST
+minutes without observed quote updates, without reconstructing or inventing ticks.
+Ownership stays with the offline replay-audit layer.
 Safety: Missing or partial depth cannot certify quote context; this audit never
 recovers exchange messages, proves fills, or changes live trading decisions.
 """
@@ -84,6 +86,36 @@ def _selected(snapshot: Mapping[str, Any]) -> dict[str, str]:
     return selected
 
 
+def _missing_market_minute_ranges(observed: set[str]) -> list[dict[str, Any]]:
+    """Lossless grouped timestamps of market minutes with no observed quote."""
+    start_minute = 9 * 60 + 15
+    missing = [
+        offset
+        for offset in range(375)
+        if f"{(start_minute + offset) // 60:02d}:{(start_minute + offset) % 60:02d}"
+        not in observed
+    ]
+    if not missing:
+        return []
+    groups: list[tuple[int, int]] = []
+    first = previous = missing[0]
+    for index in missing[1:]:
+        if index != previous + 1:
+            groups.append((first, previous))
+            first = index
+        previous = index
+    groups.append((first, previous))
+
+    def clock(offset: int) -> str:
+        minute = start_minute + offset
+        return f"{minute // 60:02d}:{minute % 60:02d}"
+
+    return [
+        {"start_ist": clock(a), "end_ist": clock(b), "minutes": b - a + 1}
+        for a, b in groups
+    ]
+
+
 def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     if not math.isfinite(gap_seconds) or not 0 < gap_seconds <= 900:
         raise ValueError("replay_audit_invalid_gap")
@@ -93,6 +125,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         raise ValueError("replay_audit_missing_selected_contracts")
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     minutes: dict[str, set[str]] = defaultdict(set)
+    # WS two-sided quote minutes are stricter than all delivered tick minutes.
+    # REST, LTP-only and depth-free updates cannot establish quote coverage.
+    websocket_quote_minutes: dict[str, set[str]] = defaultdict(set)
     seconds_observed: dict[str, set[str]] = defaultdict(set)
     first_market: dict[str, datetime] = {}
     last_market: dict[str, datetime] = {}
@@ -158,6 +193,15 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         if _number(tick.get("ltp")):
             c["positive_ltp_ticks"] += 1
         top, full = _depth(tick)
+        if role in {"CE", "PE"} and (
+            str(tick.get("source") or "").lower() in {"ws", "ws_full", "websocket"}
+        ):
+            bid, ask = tick.get("bid"), tick.get("ask")
+            valid_top = _number(bid) and _number(ask) and bid <= ask
+            if (top or valid_top) and (
+                9 * 60 + 15 <= t.hour * 60 + t.minute < 15 * 60 + 30
+            ):
+                websocket_quote_minutes[role].add(t.strftime("%H:%M"))
         if top:
             c["uncrossed_two_sided_depth_ticks"] += 1
             if current_segment is not None:
@@ -191,6 +235,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             "total_market_session_seconds": 22500,
             "seconds_without_observed_updates": (22500 - len(seconds_observed[role])),
             "missing_market_minutes": 375 - len(minutes[role]),
+            "missing_market_minute_ranges": _missing_market_minute_ranges(
+                minutes[role]
+            ),
             "market_session_ticks": c["market_session_ticks"],
             "observed_market_minutes": len(minutes[role]),
             "websocket_ticks": c["websocket_ticks"],
@@ -204,6 +251,13 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
                 c["five_level_depth_ticks"] / n if n else None
             ),
         }
+    for role in ("CE", "PE"):
+        quote_minutes = websocket_quote_minutes[role]
+        roles[role]["observed_ws_two_sided_quote_minutes"] = len(quote_minutes)
+        roles[role]["missing_ws_two_sided_quote_minutes"] = 375 - len(quote_minutes)
+        roles[role]["missing_ws_two_sided_quote_minute_ranges"] = (
+            _missing_market_minute_ranges(quote_minutes)
+        )
     # Rotation itself is not a data-quality defect. A snapshot creates a
     # fresh coverage obligation for the new selected contracts, even if the
     # same basket was seen previously. Incomplete segments remain blocked.
