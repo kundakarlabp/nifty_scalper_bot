@@ -1,9 +1,10 @@
 """Background operational maintenance and replication tasks.
 
 Responsibilities: Schedule trade replication, archived market logs, heartbeats,
-order-history rotation, and verified completed replay compression.
-Safety: Every maintenance job runs off the trading hot path, cancels cleanly,
-and cannot alter strategy decisions, broker orders or risk parameters.
+order-history rotation, verified replay compression and optional Drive backups.
+The start_replay_compaction_task worker invokes archival strictly off-market.
+Safety: Maintenance cannot alter strategy decisions, broker orders or risk;
+Drive credentials remain outside the application and uploads never run in-market.
 """
 
 from __future__ import annotations
@@ -167,6 +168,25 @@ def start_replay_compaction_task() -> asyncio.Task[Any] | None:
                     "REPLAY_ARCHIVE_COMPACTION_SKIPPED day=%s reason=%s",
                     item["session_date"],
                     item.get("error_type", "invalid_archive"),
+                )
+        remote = os.getenv("REPLAY_GDRIVE_REMOTE", "").strip()
+        if remote:
+            from nifty_scalper_bot.storage.replay_drive_backup import (
+                backup_prior_sessions,
+            )
+
+            try:
+                for saved in backup_prior_sessions(get_data_dir(), remote=remote):
+                    LOGGER.info(
+                        "REPLAY_DRIVE_BACKUP day=%s status=%s files=%s",
+                        saved["day"],
+                        saved["status"],
+                        saved.get("files", 0),
+                    )
+            except (OSError, RuntimeError, ValueError) as exc:
+                LOGGER.warning(
+                    "REPLAY_DRIVE_BACKUP_FAILED error_type=%s",
+                    type(exc).__name__,
                 )
         return reports
 
