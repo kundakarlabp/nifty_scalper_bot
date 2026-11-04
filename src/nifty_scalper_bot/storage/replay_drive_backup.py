@@ -44,9 +44,7 @@ def _hashes(path: Path) -> dict[str, Any]:
     }
 
 
-def _rclone(
-    args: list[str], *, runner: Callable[..., Any] = subprocess.run
-) -> str:
+def _rclone(args: list[str], *, runner: Callable[..., Any] = subprocess.run) -> str:
     try:
         result = runner(
             ["rclone", *args],
@@ -102,10 +100,7 @@ def _one_day(
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_dir / f"{day}.manifest.json"
     receipt_path = manifest_dir / f"{day}.receipt.json"
-    tracked = [
-        {"name": name, **_hashes(source)}
-        for name, source in sources
-    ]
+    tracked = [{"name": name, **_hashes(source)} for name, source in sources]
     manifest = {
         "schema_version": 1,
         "session_date_ist": day,
