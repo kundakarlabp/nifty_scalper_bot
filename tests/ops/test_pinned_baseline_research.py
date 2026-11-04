@@ -123,8 +123,7 @@ def test_baseline_stresses_original_policy_and_checks_same_archive(
     assert len(calls) == 3
     assert report["promotion_eligible"] is False
     assert all(
-        not row["exchange_stop_execution_proven"]
-        for row in report["slippage_stress"]
+        not row["exchange_stop_execution_proven"] for row in report["slippage_stress"]
     )
 
 
