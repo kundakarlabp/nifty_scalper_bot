@@ -176,9 +176,7 @@ def start_replay_compaction_task() -> asyncio.Task[Any] | None:
             )
 
             try:
-                for saved in backup_prior_sessions(
-                    get_data_dir(), remote=remote
-                ):
+                for saved in backup_prior_sessions(get_data_dir(), remote=remote):
                     LOGGER.info(
                         "REPLAY_DRIVE_BACKUP day=%s status=%s files=%s",
                         saved["day"],
