@@ -160,8 +160,7 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
     special = ("session_date", "profile")
     if any(key in existing or key in request for key in special):
         return all(
-            existing.get(key) == request.get(key)
-            for key in (*special, "start", "end")
+            existing.get(key) == request.get(key) for key in (*special, "start", "end")
         )
     # Historical in-progress research statuses did not store start/end.
     return True
