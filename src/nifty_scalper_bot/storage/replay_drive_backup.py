@@ -46,7 +46,8 @@ def _hashes(path: Path) -> dict[str, Any]:
 
 
 def _rclone(
-    args: list[str], *,
+    args: list[str],
+    *,
     runner: Callable[..., Any] = subprocess.run,
     deadline: float,
 ) -> str:
