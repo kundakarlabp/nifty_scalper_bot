@@ -125,6 +125,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         raise ValueError("replay_audit_missing_selected_contracts")
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     minutes: dict[str, set[str]] = defaultdict(set)
+    # WS two-sided quote minutes are stricter than all delivered tick minutes.
+    # REST, LTP-only and depth-free updates cannot establish quote coverage.
+    websocket_quote_minutes: dict[str, set[str]] = defaultdict(set)
     seconds_observed: dict[str, set[str]] = defaultdict(set)
     first_market: dict[str, datetime] = {}
     last_market: dict[str, datetime] = {}
@@ -190,6 +193,15 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         if _number(tick.get("ltp")):
             c["positive_ltp_ticks"] += 1
         top, full = _depth(tick)
+        if role in {"CE", "PE"} and (
+            str(tick.get("source") or "").lower() in {"ws", "ws_full", "websocket"}
+        ):
+            bid, ask = tick.get("bid"), tick.get("ask")
+            valid_top = _number(bid) and _number(ask) and bid <= ask
+            if (top or valid_top) and (
+                9 * 60 + 15 <= t.hour * 60 + t.minute < 15 * 60 + 30
+            ):
+                websocket_quote_minutes[role].add(t.strftime("%H:%M"))
         if top:
             c["uncrossed_two_sided_depth_ticks"] += 1
             if current_segment is not None:
@@ -239,6 +251,15 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
                 c["five_level_depth_ticks"] / n if n else None
             ),
         }
+    for role in ("CE", "PE"):
+        quote_minutes = websocket_quote_minutes[role]
+        roles[role]["observed_ws_two_sided_quote_minutes"] = len(quote_minutes)
+        roles[role]["missing_ws_two_sided_quote_minutes"] = 375 - len(
+            quote_minutes
+        )
+        roles[role]["missing_ws_two_sided_quote_minute_ranges"] = (
+            _missing_market_minute_ranges(quote_minutes)
+        )
     # Rotation itself is not a data-quality defect. A snapshot creates a
     # fresh coverage obligation for the new selected contracts, even if the
     # same basket was seen previously. Incomplete segments remain blocked.
