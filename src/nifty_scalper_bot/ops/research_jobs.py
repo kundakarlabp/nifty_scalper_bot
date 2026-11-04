@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -66,7 +66,9 @@ def validate_request(
     if pinned is not None:
         if mode != "runtime" or days != 1:
             raise ValueError("pinned_session_requires_one_day_runtime")
-        if not isinstance(pinned, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pinned):
+        if not isinstance(pinned, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}", pinned
+        ):
             raise ValueError("invalid_replay_session_date")
         try:
             end = date.fromisoformat(pinned)
@@ -74,7 +76,7 @@ def validate_request(
             raise ValueError("invalid_replay_session_date") from exc
         if end > current_date or end < current_date - timedelta(days=89):
             raise ValueError("replay_session_date_out_of_range")
-        if end == current_date and local_now.time() < dt_time(16, 0):
+        if end == current_date and local_now.hour < 16:
             raise ValueError("replay_same_day_requires_post_close")
     else:
         end = current_date - timedelta(days=1)
@@ -676,7 +678,10 @@ def _run_captured_baseline_stress(
                 "result_file": f"captured-baseline-{bps}bps/report.json",
             }
         )
-    if len(result["slippage_stress"]) == 3 and archive_fingerprint(epoch_path) == source_sha:
+    if (
+        len(result["slippage_stress"]) == 3
+        and archive_fingerprint(epoch_path) == source_sha
+    ):
         result["state"] = "completed"
     elif result.get("error_code") is None:
         result["error_code"] = "replay_archive_changed_during_stress"
