@@ -100,9 +100,7 @@ def test_parity_uses_latest_common_minute_and_exposes_flush_lag() -> None:
         },
         {CE: [_bar(150)], PE: [_bar(300)]},
     )
-    observed = sample_selected_option_parity(
-        owner, at=STAMP + timedelta(minutes=2)
-    )
+    observed = sample_selected_option_parity(owner, at=STAMP + timedelta(minutes=2))
     assert len(observed) == 2
     assert all(row["status"] == "same_minute_volume_match" for row in observed)
     assert all(row["compared_common_minute"] == STAMP.isoformat() for row in observed)
@@ -116,9 +114,7 @@ def test_parity_does_not_hide_genuine_older_same_minute_divergence() -> None:
         {CE: [_bar(150), _bar(250, STAMP + timedelta(minutes=1))]},
         {CE: [_bar(175)]},
     )
-    observed = sample_selected_option_parity(
-        owner, at=STAMP + timedelta(minutes=2)
-    )
+    observed = sample_selected_option_parity(owner, at=STAMP + timedelta(minutes=2))
     ce = next(row for row in observed if row["symbol"] == CE)
     assert ce["status"] == "same_minute_volume_mismatch"
     assert ce["volume_difference"] == -25
