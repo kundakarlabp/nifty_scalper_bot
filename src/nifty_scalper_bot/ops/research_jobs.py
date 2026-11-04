@@ -623,11 +623,18 @@ def _run_captured_baseline_stress(
             )
         except (OSError, ValueError):
             scenario = None
+        if isinstance(scenario, dict):
+            try:
+                recorded_bps = float(scenario.get("slippage_bps_per_side"))
+            except (ValueError, TypeError):
+                recorded_bps = -1.0
+        else:
+            recorded_bps = -1.0
         if (
             worker.returncode != 0
             or not isinstance(scenario, dict)
             or scenario.get("archive_sha256") != source_sha
-            or float(scenario.get("slippage_bps_per_side", -1)) != bps
+            or recorded_bps != bps
         ):
             try:
                 failure = json.loads(
