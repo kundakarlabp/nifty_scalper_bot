@@ -557,6 +557,125 @@ def partition_replay_runs(path: Path, destination: Path) -> list[tuple[str, Path
     return list(shards.items())
 
 
+def _run_captured_baseline_stress(
+    root: Path,
+    epoch_path: Path,
+    output: Path,
+    env: dict[str, str],
+    interpreter: Path,
+    deadline: float,
+) -> dict[str, Any]:
+    """Replay the captured configuration unchanged at three execution stresses.
+
+    This never toggles live trailing/strategy settings. Each scenario runs the
+    normal isolated production-composition replay, not the paired ablation.
+    """
+    from nifty_scalper_bot.storage.replay_archive import archive_fingerprint
+
+    source_sha = archive_fingerprint(epoch_path)
+    result: dict[str, Any] = {
+        "profile": "captured_baseline",
+        "state": "failed",
+        "evidence_label": "RESEARCH_CANDIDATE",
+        "archive_sha256": source_sha,
+        "promotion_eligible": False,
+        "slippage_stress": [],
+    }
+    for bps in (10, 25, 50):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            result["error_code"] = "replay_runtime_budget_exhausted"
+            break
+        directory = output / f"captured-baseline-{bps}bps"
+        directory.mkdir(parents=True, exist_ok=True)
+        command = [
+            str(interpreter),
+            str(root / "scripts/run_runtime_replay.py"),
+            "--session",
+            str(epoch_path.resolve()),
+            "--output",
+            str(directory.resolve()),
+            "--slippage-bps",
+            str(bps),
+        ]
+        # No --compare-adaptive and no ADAPTIVE_PROFIT_LOCK_ENABLED override:
+        # the original archived configuration selects the live policy.
+        try:
+            with (directory / "worker.log").open("w") as log:
+                worker = subprocess.run(
+                    command,
+                    cwd=directory,
+                    env=env,
+                    stdout=log,
+                    stderr=log,
+                    timeout=min(600, remaining),
+                    check=False,
+                )
+        except subprocess.TimeoutExpired:
+            result["error_code"] = "replay_timeout"
+            break
+        except OSError:
+            result["error_code"] = "replay_worker_unavailable"
+            break
+        try:
+            scenario = json.loads(
+                (directory / "report.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            scenario = None
+        if (
+            worker.returncode != 0
+            or not isinstance(scenario, dict)
+            or scenario.get("archive_sha256") != source_sha
+            or float(scenario.get("slippage_bps_per_side", -1)) != bps
+        ):
+            try:
+                failure = json.loads(
+                    (directory / "failure.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                failure = {}
+            error = failure.get("error_code") if isinstance(failure, dict) else None
+            result["error_code"] = (
+                error
+                if isinstance(error, str)
+                and re.fullmatch(r"replay_[a-z0-9_]{1,80}", error)
+                else "replay_baseline_scenario_failed"
+            )
+            result["failed_stress_bps"] = bps
+            break
+        orders = scenario.get("orders")
+        account = scenario.get("modeled_account")
+        positions = scenario.get("positions")
+        if (
+            not isinstance(orders, list)
+            or not isinstance(account, dict)
+            or not isinstance(positions, list)
+        ):
+            result["error_code"] = "replay_baseline_report_invalid"
+            break
+        result["slippage_stress"].append(
+            {
+                "slippage_bps_per_side": bps,
+                "archive_sha256": source_sha,
+                "captured_revision": scenario.get("captured_revision"),
+                "order_count": len(orders),
+                "open_position_count": len(positions),
+                "after_cost_modeled_equity_pnl": account.get("net_equity_pnl"),
+                "modeled_fees": account.get("fees"),
+                "max_equity_drawdown": scenario.get("max_equity_drawdown"),
+                "risk_stops_and_fills_are_modeled": True,
+                "exchange_stop_execution_proven": False,
+                "result_file": f"captured-baseline-{bps}bps/report.json",
+            }
+        )
+    if len(result["slippage_stress"]) == 3 and archive_fingerprint(epoch_path) == source_sha:
+        result["state"] = "completed"
+    elif result.get("error_code") is None:
+        result["error_code"] = "replay_archive_changed_during_stress"
+    return result
+
+
 def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     """Replay each complete captured session in its own credential-free process."""
     from nifty_scalper_bot.config.paths import get_data_dir
@@ -647,6 +766,19 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
                 interpreter = root / ".venv/bin/python"
                 if not interpreter.is_file():
                     interpreter = Path(sys.executable)
+                if request.get("profile") == "captured_baseline":
+                    baseline = _run_captured_baseline_stress(
+                        root,
+                        epoch_path,
+                        run_directory,
+                        env,
+                        interpreter,
+                        deadline,
+                    )
+                    report["sessions"].append(
+                        {"date": day, "run_id": run_id, **baseline}
+                    )
+                    continue
                 with (run_directory / "worker.log").open("w") as log:
                     try:
                         result = subprocess.run(
