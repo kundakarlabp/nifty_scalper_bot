@@ -43,6 +43,42 @@ separate scope. Changing strategy parameters and demonstrating profitability req
 chronological holdout evaluation after valid session data is available.
 
 
+## Exact completed-session captured-config baseline
+
+The repository-owner request file may pin one completed IST session (only
+`mode=runtime`, `days=1`) with:
+
+```json
+{"id":"research-20261104-captured-baseline-1d-01","days":1,"mode":"runtime","session_date":"2026-11-04","profile":"captured_baseline"}
+```
+
+The target must be no more than 89 days old and cannot be today before
+**16:00 IST**. The actual tape must still pass original run/sequence and
+sidecar validation; a finalized journal alone is insufficient. The guarded
+production updater polls the existing request manifest and launches the
+existing **isolated systemd research worker**, without broker credentials or
+restarting the engine solely to run a backtest. A blocked deployment/worker
+must remain explicitly blocked rather than reported as completed.
+
+The `captured_baseline` profile **does not toggle the adaptive trailing
+controller or any captured strategy settings**. Each isolated execution uses
+the original snapshot's configuration, production-composition decision/risk/
+bracket owners and next observed executable quote, once at each per-side
+adverse-slippage stress of 10, 25 and 50 basis points. The existing paper fill
+model applies bid/ask, available depth and modeled taxes/fees. Exact raw
+`report.json` files retain orders, fill statuses, costs, positions, equity and
+drawdown. The bounded job status summarizes after-cost modeled equity P&L,
+fees, order count and unresolved open-position exposure. A source checksum
+change or missing scenario fails closed. No recorded/live fill is inferred.
+
+**Do not interpret** 10/25/50 bps scenarios as observed slippage, model
+unverified gap-through-stop fills as guarantees, or infer statistically valid
+net expectancy from one session. The existing independent rejected-setup
+research is labelled separately; minute samples are not distinct trading
+opportunities. Only exact-contract decisions with validated ask-to-bid paths
+may enter structural outcome comparisons. Multi-day out-of-sample promotion
+remains disabled.
+
 ## Automatic read-only quote-fidelity preflight
 
 Every invocation of `scripts/run_runtime_replay.py` now writes
