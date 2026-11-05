@@ -8179,14 +8179,12 @@ class OrderManager:
                     f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}"
                 )
 
-                # Update Bracket (Stop Loss / Target)
-                self._register_virtual_bracket_for_fill(
-                    order, source="manual_adoption" if adopted else "order_update"
-                )
-
-                # Update Positions (Critical for Dashboard accuracy)
-                if hasattr(self._positions, "apply_broker_order_update"):
-                    try:
+                # Broker-confirmed fill must reach PositionManager before the
+                # bracket attempts an exchange-resident reduce-only stop.
+                # Preserve the software watchdog if position sync raises.
+                position_sync_error: Exception | None = None
+                try:
+                    if hasattr(self._positions, "apply_broker_order_update"):
                         self._positions.apply_broker_order_update(
                             order.order_id,
                             {
@@ -8196,15 +8194,17 @@ class OrderManager:
                                 "filled_quantity": order.filled_quantity,
                             },
                         )
-                    except Exception:
-                        self._logger.exception("Unhandled exception", exc_info=True)
-                        raise
-                elif hasattr(self._positions, "update_from_order"):
-                    try:
+                    elif hasattr(self._positions, "update_from_order"):
                         self._positions.update_from_order(order)
-                    except Exception:
-                        self._logger.exception("Unhandled exception", exc_info=True)
-                        raise
+                except Exception as exc:
+                    self._logger.exception("Broker fill position sync failed", exc_info=True)
+                    position_sync_error = exc
+
+                self._register_virtual_bracket_for_fill(
+                    order, source="manual_adoption" if adopted else "order_update"
+                )
+                if position_sync_error is not None:
+                    raise position_sync_error
 
                 self._confirm_position_protection_for_fill(order)
                 order.applied_filled_quantity = broker_filled_quantity
