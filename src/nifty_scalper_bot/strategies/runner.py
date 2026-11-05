@@ -2408,21 +2408,33 @@ class StrategyRunner:
         except Exception:
             indicator_tail = {}
 
-        def _diverges(other: Mapping[datetime, tuple[float, ...]]) -> bool:
-            return any(
-                minute in other
-                and any(
-                    not math.isclose(left, right, rel_tol=0.0, abs_tol=0.000001)
-                    for left, right in zip(ohlcv, other[minute])
-                )
-                for minute, ohlcv in canonical_tail.items()
-            )
+        def _first_drift(
+            other: Mapping[datetime, tuple[float, ...]]
+        ) -> tuple[datetime, str, float, float] | None:
+            for minute, values in canonical_tail.items():
+                observed = other.get(minute)
+                if observed is None:
+                    continue
+                for field, expected, actual in zip(
+                    ("open", "high", "low", "close", "volume"), values, observed
+                ):
+                    if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.000001):
+                        return minute, field, expected, actual
+            return None
 
-        content_diverged = _diverges(runner_tail) or _diverges(indicator_tail)
-        if content_diverged:
+        drift = _first_drift(runner_tail)
+        projection = "runner"
+        if drift is None:
+            drift = _first_drift(indicator_tail)
+            projection = "indicator"
+        content_diverged = drift is not None
+        if drift is not None:
+            minute, field, expected, actual = drift
             self._logger.warning(
-                "RUNNER_CANONICAL_OHLCV_DIVERGENCE symbol=%s role=%s action=reseed",
-                normalized, role,
+                "RUNNER_CANONICAL_OHLCV_DIVERGENCE symbol=%s role=%s "
+                "action=reseed projection=%s field=%s minute=%s "
+                "canonical=%s observed=%s",
+                normalized, role, projection, field, minute, expected, actual,
             )
         indicator_count = indicator_before
         source_ready = source_count >= required_count
@@ -6290,7 +6302,9 @@ class StrategyRunner:
             if indicator_count >= target_min_bars:
                 self._set_symbol_hydration_state(normalized_symbol, SymbolState.READY)
                 self._seed_pipeline_store(normalized_symbol)
-                self._seed_candle_engine_from_history(normalized_symbol)
+                # Keep the canonical registry mirror, not a reverse history import.
+                if hasattr(self, "_candle_engines"):
+                    self._mirror_authoritative_candle_engine(normalized_symbol)
             else:
                 self._set_symbol_hydration_state(
                     normalized_symbol, SymbolState.DEGRADED

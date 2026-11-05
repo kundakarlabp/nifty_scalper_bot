@@ -161,6 +161,8 @@ def test_sync_reseeds_duplicate_runner_minutes_from_canonical_history() -> None:
 def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     canonical = _bars(50)
     runner = _runner(canonical, canonical)
+    warnings: list[str] = []
+    runner._logger.warning = lambda message, *args: warnings.append(message % args)
     altered = [dict(row) for row in canonical]
     altered[-2]["volume"] += 125
     runner._indicator_engine.replace_history(SYMBOL, altered, source="test", min_bars=1)
@@ -183,6 +185,9 @@ def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     )
     assert one.success and two.success
     assert reseeds == ["parity"]
+    assert any(
+        "projection=indicator" in line and "field=volume" in line for line in warnings
+    )
     assert (
         runner._indicator_engine.get_history(SYMBOL, count=2, field="bars")[0]["volume"]
         == canonical[-2]["volume"]
