@@ -119,7 +119,8 @@ def observe_completed_selected_pair(
                 if value and normalize_symbol(str(value)).endswith(("CE", "PE"))
             )
         )
-        if len(selected) != 2 or normalize_symbol(str(bar.get("symbol") or "")) not in selected:
+        observed_symbol = normalize_symbol(str(bar.get("symbol") or ""))
+        if len(selected) != 2 or observed_symbol not in selected:
             return []
         minute = _minute_key(bar.get("timestamp") or bar.get("start"))
         if minute is None:
