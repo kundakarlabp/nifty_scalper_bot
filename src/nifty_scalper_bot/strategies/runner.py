@@ -2731,27 +2731,68 @@ class StrategyRunner:
                         or indicator_last < mdm_last
                     )
                 )
+                # A REST overlap can amend an already-finalized futures minute
+                # without changing history length or its latest timestamp.
+                # The CandleEngine correction revision exposes that event without
+                # re-comparing all 400 bars on every live tick.
+                revision_seen = getattr(self, "_context_correction_revision_seen", None)
+                if not isinstance(revision_seen, dict):
+                    revision_seen = {}
+                    self._context_correction_revision_seen = revision_seen
+                engine = getattr(self, "_candle_engines", {}).get(normalized)
+                revision_getter = getattr(engine, "get_history_correction_revision", None)
+                correction_revision = (
+                    int(revision_getter()) if callable(revision_getter) else None
+                )
+                correction_changed = bool(
+                    correction_revision is not None
+                    and correction_revision != revision_seen.get(normalized, 0)
+                )
                 runner_depth_target = min(source_count, _runner_history_cap())
                 needs_sync = bool(
-                    indicator_count < minimum
+                    correction_changed
+                    or indicator_count < minimum
                     or runner_count < minimum
                     or source_count > indicator_count
                     or runner_count < runner_depth_target
                     or stale_projection
                 )
                 after = indicator_count
-                if needs_sync:
+                if correction_changed:
+                    result = self.sync_history_from_mdm(
+                        normalized,
+                        required_bars=minimum,
+                        reason=source,
+                        role=role,
+                        request_if_short=source_count < minimum,
+                    )
+                    after = result.indicator_bars
+                    if result.success:
+                        revision_seen[normalized] = correction_revision
+                elif needs_sync:
                     after = self._sync_history_from_mdm_cache(
                         normalized,
                         required_bars=minimum,
                         source=source,
                         request_if_short=source_count < minimum,
                     )
+                    if correction_revision is not None and after >= minimum:
+                        revision_seen[normalized] = correction_revision
+                elif correction_revision is not None:
+                    revision_seen[normalized] = correction_revision
 
                 if source_count < target:
                     now = time.monotonic()
                     last_request = float(request_state.get(normalized, 0.0) or 0.0)
-                    if now - last_request >= _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS:
+                    # The 400-bar ORB target is optional structural context,
+                    # not a reason to fetch historical REST every 30 seconds
+                    # once the minimum strategy context is already ready.
+                    interval = (
+                        600.0
+                        if source_count >= minimum
+                        else _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS
+                    )
+                    if now - last_request >= interval:
                         if self._schedule_runtime_history_ensure(
                             normalized,
                             role=role,
