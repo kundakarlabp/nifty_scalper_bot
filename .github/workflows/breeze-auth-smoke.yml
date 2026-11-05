@@ -1,6 +1,6 @@
 # File purpose: Authenticate a Breeze research session in isolation.
-# Key responsibilities: Validate the configured GitHub Actions secret-backed login.
-# Operational constraints: Read-only only, no orders, data, or live-bot imports.
+# Key responsibilities: Validate broker login and the documented option-history sample.
+# Operational constraints: Read-only; no orders, live imports or public market-data artifacts.
 name: Breeze research authentication smoke
 
 on:
@@ -31,3 +31,28 @@ jobs:
           BREEZE_API_SECRET: ${{ secrets.BREEZE_API_SECRET }}
           BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: python scripts/archive_breeze_history.py --auth-only
+      - name: Test read-only documented historical option pair (no artifact)
+        env:
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_API_SECRET: ${{ secrets.BREEZE_API_SECRET }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/archive_breeze_history.py \
+            --day 2025-02-03 --expiry 2025-02-06 --strike 23200 \
+            --timestamp-convention bar_start --outdir "$RUNNER_TEMP/breeze-smoke" \
+            > "$RUNNER_TEMP/breeze-summary.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "breeze-summary.json").read_text()
+          )
+          bars = {side: report["contracts"][side]["bars"] for side in ("CE", "PE")}
+          print("Breeze historical read-only minute counts:", bars)
+          if any(count < 1 for count in bars.values()):
+              raise SystemExit("Broker history returned no observed minutes")
+          PY
