@@ -77,6 +77,9 @@ def _write_lifecycle(db_path: Any) -> None:
                     "estimated_costs": {"total": 50.0},
                     "net_pnl": 600.0,
                     "final_stop_price": 104.0,
+                    "trailing_history": [
+                        {"revision": 1, "old_sl": 90.0, "new_sl": 104.0}
+                    ],
                     "r_multiple": 0.92,
                     "mfe_r": 1.3,
                     "mae_r": 0.2,
@@ -138,6 +141,9 @@ def test_replication_is_idempotent_and_preserves_risk_semantics(tmp_path: Any) -
     assert trade["gross_pnl"] == 650.0
     assert trade["estimated_costs"] == 50.0
     assert trade["net_pnl"] == 600.0
+    assert trade["trailing_history"] == [
+        {"revision": 1, "old_sl": 90.0, "new_sl": 104.0}
+    ]
     assert trade["ledger_complete"] is True
 
 
@@ -248,6 +254,7 @@ def test_ledger_batch_uses_uniform_postgrest_row_shape(tmp_path: Any) -> None:
     assert entry["exit_price"] is None
     assert "net_pnl" in entry
     assert entry["net_pnl"] is None
+    assert entry["trailing_history"] == []
 
 
 def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:

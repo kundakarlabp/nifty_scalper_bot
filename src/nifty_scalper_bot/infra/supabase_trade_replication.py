@@ -362,6 +362,13 @@ class SupabaseTradeReplicator:
             row["created_at"],
             row["updated_at"],
         )
+        outcome = _json_object(row["outcome_json"])
+        history = outcome.get("trailing_history")
+        trailing_history = (
+            [step for step in history[-64:] if isinstance(step, dict)]
+            if isinstance(history, list)
+            else []
+        )
         payload = {
             "trade_id": str(row["trade_id"]),
             "trading_date": _trading_date(timestamp),
@@ -403,7 +410,8 @@ class SupabaseTradeReplicator:
             "build_sha": _optional_text(row["build_sha"]),
             "costs": _json_object(row["costs_json"]),
             "execution_quality": _json_object(row["execution_quality_json"]),
-            "outcome": _json_object(row["outcome_json"]),
+            "outcome": outcome,
+            "trailing_history": trailing_history,
             "updated_at": _iso_utc(float(row["updated_at"])),
             "created_at": _iso_utc(float(row["created_at"])),
         }
