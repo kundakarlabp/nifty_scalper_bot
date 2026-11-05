@@ -61,6 +61,7 @@ def test_completed_trade_mae_includes_executable_exit_fill() -> None:
         exit_arrival_price=104.95,
         exit_quote_bid=104.95,
         exit_quote_ask=105.05,
+        exit_quote_age_ms=75.0,
         exit_triggered_at=1001.0,
         exit_submitted_at=1001.2,
         exit_order_type="LIMIT",
@@ -77,5 +78,6 @@ def test_completed_trade_mae_includes_executable_exit_fill() -> None:
     )
 
     assert outcome["mae_points"] == 3.55
+    assert outcome["execution_quality"]["exit_quote_age_ms"] == 75.0
     assert outcome["mae_r"] > 1.0
     assert outcome["mfe_points"] == 0.15
