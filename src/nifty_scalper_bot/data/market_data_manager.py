@@ -438,7 +438,9 @@ class MarketDataManager:
         self._replay_archive: Any | None = None
         self._raw_ingress_archive: Any | None = None
         self._raw_ingress_sequence: dict[str, int] = {}
+        self._raw_ingress_count_by_day: dict[str, int] = {}
         self._raw_ingress_capture_errors = 0
+        self._raw_ingress_init_retry_at = 0.0
         self._raw_ws_receipts_total = 0
         self._replay_snapshot_key: tuple[str, str] | None = None
         self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
@@ -7111,6 +7113,11 @@ class MarketDataManager:
         if lock is None:
             return
         with lock:
+            if (
+                self._raw_ingress_archive is None
+                and time.monotonic() < self._raw_ingress_init_retry_at
+            ):
+                return
             try:
                 from shutil import disk_usage
 
@@ -7136,6 +7143,7 @@ class MarketDataManager:
                     ) * 1024 * 1024
                     if disk_usage(root).free < required_free:
                         self._raw_ingress_capture_errors += 1
+                        self._raw_ingress_init_retry_at = time.monotonic() + 300.0
                         log_throttled(
                             self._logger,
                             "raw_ws_capture_no_headroom",
@@ -7150,9 +7158,10 @@ class MarketDataManager:
                         max_session_bytes=requested_mb * 1024 * 1024,
                         upstream_provider=lambda: {
                             "raw_ws_receipts": int(self._raw_ws_receipts_total),
+                            "capture_errors": int(self._raw_ingress_capture_errors),
                             **{
-                                "receipt:" + key: value
-                                for key, value in self._raw_ingress_sequence.items()
+                                "day_receipt:" + key: value
+                                for key, value in self._raw_ingress_count_by_day.items()
                             },
                         },
                     )
@@ -7181,6 +7190,10 @@ class MarketDataManager:
                 identity = f"{symbol}|{token}|{generation}"
                 next_sequence = self._raw_ingress_sequence.get(identity, 0) + 1
                 self._raw_ingress_sequence[identity] = next_sequence
+                day_identity = f"{day}|{identity}"
+                self._raw_ingress_count_by_day[day_identity] = (
+                    self._raw_ingress_count_by_day.get(day_identity, 0) + 1
+                )
                 archive.record(
                     "tick",
                     {
@@ -7197,6 +7210,8 @@ class MarketDataManager:
                 )
             except Exception as exc:  # noqa: BLE001 - research cannot block trading
                 self._raw_ingress_capture_errors += 1
+                if self._raw_ingress_archive is None:
+                    self._raw_ingress_init_retry_at = time.monotonic() + 300.0
                 log_throttled(
                     self._logger,
                     "raw_ws_capture_failure",
@@ -7214,6 +7229,7 @@ class MarketDataManager:
                 "raw_ws_receipts_total": int(self._raw_ws_receipts_total),
                 "capture_errors": int(self._raw_ingress_capture_errors),
                 "received_by_symbol_epoch": dict(self._raw_ingress_sequence),
+                "received_by_day_symbol_epoch": dict(self._raw_ingress_count_by_day),
                 "archive": archive.stats() if archive is not None else None,
             }
 
