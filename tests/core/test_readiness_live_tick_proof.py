@@ -202,7 +202,11 @@ async def test_ensure_selected_options_hydrated_handles_runner_reseed_failure() 
 
 
 @pytest.mark.asyncio
-async def test_live_readiness_treats_depth_only_quote_as_tradable(monkeypatch) -> None:
+async def test_live_readiness_treats_depth_only_quote_as_tradable(
+    monkeypatch, tmp_path
+) -> None:
+    # Isolate the real broker-safe release hold from CI-only host paths.
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
 
     class DepthSnap(Snap):

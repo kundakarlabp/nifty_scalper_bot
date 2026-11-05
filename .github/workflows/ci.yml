@@ -22,6 +22,8 @@ env:
   BRACKET_AUTO_RESTORE: "false"
   ALLOW_NETWORK: "false"
   ALLOW_REAL_BROKER: "false"
+  # CI must never inspect deployment-host release controls. All jobs are isolated.
+  NIFTYBOT_CONFIG_DIR: "/tmp/niftybot-ci"
 
 jobs:
   draft-fast-check:
