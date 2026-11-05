@@ -95,6 +95,44 @@ def _completed(rows: Any) -> list[Mapping[str, Any]]:
     ]
 
 
+def observe_completed_selected_pair(
+    owner: Any, bar: Mapping[str, Any], mdm: Any
+) -> list[dict[str, Any]]:
+    """Audit both selected options on canonical bar completion, not strategy votes.
+
+    Both contracts must have finalized the triggering minute. The normal
+    parity sampler owns the once-per-minute latch; nothing here mutates
+    the execution path or forces any additional market-data request.
+    """
+    hub = getattr(owner, "_data_hub", None)
+    selector = getattr(hub, "get_selected_option_symbols", None)
+    latest = getattr(mdm, "get_latest_closed_bar", None)
+    if not callable(selector) or not callable(latest):
+        return []
+    try:
+        selected = tuple(
+            dict.fromkeys(
+                normalize_symbol(str(value))
+                for value in selector()
+                if value and normalize_symbol(str(value)).endswith(("CE", "PE"))
+            )
+        )
+        if len(selected) != 2 or normalize_symbol(str(bar.get("symbol") or "")) not in selected:
+            return []
+        minute = _minute_key(bar.get("timestamp") or bar.get("start"))
+        if minute is None:
+            return []
+        for option in selected:
+            row = latest(option)
+            if not isinstance(row, Mapping):
+                return []
+            if _minute_key(row.get("timestamp") or row.get("start")) != minute:
+                return []
+    except (AttributeError, TypeError, ValueError):
+        return []
+    return sample_selected_option_parity(owner)
+
+
 def sample_selected_option_parity(
     owner: Any, *, at: datetime | None = None
 ) -> list[dict[str, Any]]:
