@@ -236,9 +236,11 @@ this importer, not added to production dependencies.
   or committed. GitHub Actions secrets are not automatically installed on the
   production server, nor does their presence establish valid authentication.
 - The separate Breeze research authentication smoke workflow runs on a
-  matching main-branch push or manual dispatch and authenticates only; it
-  never retrieves candles or places an order. If GitHub-hosted runner egress
-  is disallowed, validate using the registered static IP at production.
+  matching main-branch push or manual dispatch. It authenticates and checks
+  the broker-documented February 2025 NIFTY option pair for nonempty bars,
+  without publishing any historical-data artifact or placing an order.
+  A GitHub-hosted runner has different egress from the registered static IP;
+  failed remote authentication must be checked at approved egress.
 - Contract expiry and strike must be externally verified point-in-time
   identities; the importer does not infer ATM or construct Zerodha tokens.
   It validates each provider response's exchange, underlying, expiry,
