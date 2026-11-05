@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.research_observability import (
+    observe_completed_selected_pair,
     record_strategy_rejection_sample,
     sample_selected_option_parity,
 )
@@ -197,3 +198,33 @@ def test_rejection_stores_trend_evidence_without_depth_or_secrets(caplog) -> Non
     assert "api_secret" not in row["context"]
     assert "NOT_FOR_RESEARCH" not in caplog.text
     assert "never_archive_in_journal" not in caplog.text
+
+
+def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() -> None:
+    next_minute = STAMP + timedelta(minutes=1)
+    indicator = {
+        CE: [_bar(200, next_minute)],
+        PE: [_bar(250, next_minute)],
+    }
+    canonical = {
+        CE: [_bar(200, next_minute)],
+        PE: [_bar(240)],
+    }
+    owner = _owner(indicator, canonical)
+    mdm = SimpleNamespace(
+        get_latest_closed_bar=lambda symbol: (
+            canonical[symbol][-1] if canonical.get(symbol) else None
+        )
+    )
+    assert observe_completed_selected_pair(
+        owner, {"symbol": CE, "timestamp": next_minute}, mdm
+    ) == []
+    canonical[PE].append(_bar(250, next_minute))
+    observed = observe_completed_selected_pair(
+        owner, {"symbol": PE, "timestamp": next_minute}, mdm
+    )
+    assert len(observed) == 2
+    assert {item["status"] for item in observed} == {"same_minute_volume_match"}
+    assert observe_completed_selected_pair(
+        owner, {"symbol": PE, "timestamp": next_minute}, mdm
+    ) == []
