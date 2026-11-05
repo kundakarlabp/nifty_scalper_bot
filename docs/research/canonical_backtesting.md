@@ -271,3 +271,49 @@ broker-derived data through a public GitHub Actions artifact.
 
 Provider docs: https://github.com/Idirect-Tech/Breeze-Python-SDK
 and https://api.icicidirect.com/breezeapi/documents/index.html.
+
+### Private historical acquisition before strategy testing
+
+`scripts/archive_breeze_bulk.py` uses the same sealed-bar importer for the NIFTY
+index, every dated future expiry found in a published NSE daily report, and a
+bounded initial option universe: the opening-nearest paired strike in the two
+nearest published option expiries. All NIFTY EOD derivative rows are retained,
+including further expiries/strikes not yet acquired intraday. Same-day EOD
+identities authorize acquisition only; they never establish historical trading
+eligibility or lot availability before that day's close.
+
+The frozen target is 6 November 2024 through 5 November 2026 inclusive. Begin with
+a one-day index/futures/options pilot, then expand the explicit request in
+`deploy/breeze_collection_request.json`. Requests are limited to 4,400 per run,
+spaced at least 1.1 seconds apart, with a 90-minute acquisition deadline and
+3-GiB minimum free-disk floor. Five consecutive provider errors stop collection.
+Account-wide quota use by other jobs must also be considered. The collector
+never claims the selected option subset is all historical intraday strikes.
+
+Dated identities come from original NSE F&O reports in the existing pinned
+public mirror; missing dates use the corresponding official NSE archive URL.
+Unavailable reports, empty bars, validation failures, source digests and partial
+coverage are recorded. Missing weekdays are not asserted to be holidays. Weekend
+sessions absent from the pinned source remain outside the initial enumeration.
+Special-session times, timestamp convention and volume units need independent
+corroboration. Invalid market-data arrays are retained in private quarantine;
+they never become normalized research candles.
+
+The main-only `Breeze private history archive` workflow authenticates with the
+already authorized Actions secrets. It does not access or deploy production.
+Only AES-256-GCM CMS ciphertext is uploaded to GitHub's temporary artifacts;
+raw broker data, SDK logs and credentials are excluded. The recipient file is
+a public transport certificate. Its private key remains outside the repository
+and runner. After download, authenticate/decrypt locally, verify `SHA256SUMS`,
+and upload the exact archive plus coverage to the existing private Drive folder.
+Verify Drive metadata/checksums before claiming a permanent backup. The temporary
+transport certificate is not a permanent scheduling or credential solution.
+
+`collection_complete` fails closed on unavailable sources, empty contract-days,
+provider/validation failures or an exhausted budget. `plan_walk_completed` only
+means the requested initial enumeration finished. Neither flag proves complete
+exchange history, a full quote tape, point-in-time basket eligibility, execution
+fidelity or backtest readiness. Historical bid/ask/depth are never manufactured
+from OHLCV, and technical indicators must be derived separately from validated
+bars with explicit calculation and warm-up conventions.
+
