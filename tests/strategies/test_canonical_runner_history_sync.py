@@ -818,7 +818,9 @@ def test_futures_optional_deep_history_is_backed_off_and_revision_repaired() -> 
     requests = []
     repairs = []
     runner = StrategyRunner.__new__(StrategyRunner)
-    runner._logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    runner._logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None
+    )
     runner._normalize_symbol = str
     runner._context_required_bars = 50
     runner._active_context_symbols_for_history = lambda: [symbol]
