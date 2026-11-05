@@ -163,9 +163,7 @@ def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     runner = _runner(canonical, canonical)
     altered = [dict(row) for row in canonical]
     altered[-2]["volume"] += 125
-    runner._indicator_engine.replace_history(
-        SYMBOL, altered, source="test", min_bars=1
-    )
+    runner._indicator_engine.replace_history(SYMBOL, altered, source="test", min_bars=1)
     reseeds = []
 
     def reseed(symbol, bars, *, source="", min_bars=1):
@@ -185,9 +183,10 @@ def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     )
     assert one.success and two.success
     assert reseeds == ["parity"]
-    assert runner._indicator_engine.get_history(
-        SYMBOL, count=2, field="bars"
-    )[0]["volume"] == canonical[-2]["volume"]
+    assert (
+        runner._indicator_engine.get_history(SYMBOL, count=2, field="bars")[0]["volume"]
+        == canonical[-2]["volume"]
+    )
 
 
 def test_incremental_sync_reseeds_if_existing_volume_differs() -> None:
