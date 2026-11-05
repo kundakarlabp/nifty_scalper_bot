@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Archive identified Breeze NIFTY index/futures/options for offline research.
 
-Responsibilities: Validate identities and seal raw/normalized historical bars.
+Responsibilities: Validate identities, classify authentication failures without
+exposing provider text, and seal raw/normalized historical bars.
 Ownership: Isolated offline research importer, not a production broker adapter.
 Safety: Never place orders, infer contracts, simulate fills or promote to replay.
 """

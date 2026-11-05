@@ -33,7 +33,7 @@ from scripts.archive_breeze_history import (
 )
 
 NSE_REPO = "SantoshSrinivas79/NSE-FNO-Data-bank"
-NSE_REVISION = "ccf4aa6cb90f27428dd9f090556efb64286e5ad8"
+NSE_REVISION = "1ced87e5c776c10b56018895d97468033dae6a9d"
 NSE_TREE = (
     f"https://api.github.com/repos/{NSE_REPO}/git/trees/{NSE_REVISION}?recursive=1"
 )
