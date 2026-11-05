@@ -26,10 +26,14 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from scripts.archive_breeze_history import IST, collect_contract
+from scripts.archive_breeze_history import (
+    IST,
+    authentication_error_code,
+    collect_contract,
+)
 
 NSE_REPO = "SantoshSrinivas79/NSE-FNO-Data-bank"
-NSE_REVISION = "ccf4aa6cb90f27428dd9f090556efb64286e5ad8"
+NSE_REVISION = "1ced87e5c776c10b56018895d97468033dae6a9d"
 NSE_TREE = (
     f"https://api.github.com/repos/{NSE_REPO}/git/trees/{NSE_REVISION}?recursive=1"
 )
@@ -332,6 +336,7 @@ def main() -> None:
     outdir = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
     report = None
+    authenticated = False
     try:
         # Suppress SDK file loggers as well as console output, before import.
         logging.disable(logging.CRITICAL)
@@ -349,6 +354,7 @@ def main() -> None:
 
             sdk = BreezeConnect(api_key=values[0])
             sdk.generate_session(api_secret=values[1], session_token=values[2])
+        authenticated = True
         print("Breeze archive authentication succeeded", flush=True)
         tree = json.loads(fetch(NSE_TREE, 5_000_000))
         if tree.get("truncated") or not isinstance(tree.get("tree"), list):
@@ -377,18 +383,22 @@ def main() -> None:
             ),
             flush=True,
         )
-    except Exception:
+    except Exception as exc:
+        reason = (
+            "source_or_transport_failed"
+            if authenticated
+            else authentication_error_code(exc)
+        )
         (outdir / "acquisition-error.json").write_text(
             json.dumps(
                 {
-                    "reason": "authentication_source_or_transport_failed",
+                    "reason": reason,
                     "details_suppressed": True,
                 }
             )
         )
         raise SystemExit(
-            "Breeze acquisition stopped; private archive retains coverage; "
-            "exception details suppressed"
+            f"Breeze acquisition stopped: {reason}; exception details suppressed"
         ) from None
     if report is None or not report["collection_complete"] or report["failures"]:
         raise SystemExit(2)
