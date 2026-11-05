@@ -8,6 +8,7 @@ loss); (2) a sub-1.0 reward:risk bracket (RR 0.42) activated silently.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
@@ -74,3 +75,49 @@ def test_good_rr_not_flagged(caplog, monkeypatch, tmp_path) -> None:
     with caplog.at_level(logging.CRITICAL):
         mgr.confirm_entry_fill("e2", 100.0)
     assert not any("BRACKET_RR_BELOW_FLOOR" in r.getMessage() for r in caplog.records)
+
+
+def test_market_stop_retains_fresh_cached_book_without_extra_quote_fetch(
+    monkeypatch, tmp_path
+) -> None:
+    mgr, bracket = _mgr_with_bracket(monkeypatch, tmp_path, "e1-market-proof")
+    mgr._exit_protective_order_mode = "MARKET"
+    mgr._exit_quotes[bracket.symbol] = (177.50, 177.85, time.time() - 0.1)
+
+    def no_quote_fetch(_symbol: str):
+        raise AssertionError("hard-stop MARKET exit must not fetch a quote")
+
+    mgr._extract_exit_quote = no_quote_fetch
+    order_type, price, metadata = mgr._price_exit_order(
+        bracket=bracket,
+        symbol=bracket.symbol,
+        side="SELL",
+        reason="HARD_SL_BREACH",
+        preferred_order_type="LIMIT",
+        qty=65,
+    )
+    assert order_type == "MARKET"
+    assert price is None
+    assert metadata["bid"] == 177.50
+    assert metadata["ask"] == 177.85
+    assert 0 <= metadata["quote_age_ms"] <= mgr._exit_quote_max_age * 1000
+    assert metadata["fallback"] is False
+
+
+def test_market_stop_does_not_claim_stale_cached_book(monkeypatch, tmp_path) -> None:
+    mgr, bracket = _mgr_with_bracket(monkeypatch, tmp_path, "e1-stale-proof")
+    mgr._exit_protective_order_mode = "MARKET"
+    mgr._exit_quotes[bracket.symbol] = (177.50, 177.85, time.time() - 30.0)
+    order_type, price, metadata = mgr._price_exit_order(
+        bracket=bracket,
+        symbol=bracket.symbol,
+        side="SELL",
+        reason="HARD_SL_BREACH",
+        preferred_order_type="LIMIT",
+        qty=65,
+    )
+    assert order_type == "MARKET"
+    assert price is None
+    assert metadata["bid"] is None
+    assert metadata["ask"] is None
+    assert metadata["quote_age_ms"] is None
