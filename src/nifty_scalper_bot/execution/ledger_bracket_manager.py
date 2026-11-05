@@ -877,6 +877,9 @@ class LedgerBracketManager(CanonicalBracketManager):
             "exit_arrival_price": exit_arrival,
             "exit_quote_bid": exit_bid,
             "exit_quote_ask": exit_ask,
+            "exit_quote_age_ms": _finite(
+                getattr(bracket, "exit_quote_age_ms", None)
+            ),
             "exit_spread_points": (
                 round(exit_ask - exit_bid, 4)
                 if exit_bid is not None and exit_ask is not None
