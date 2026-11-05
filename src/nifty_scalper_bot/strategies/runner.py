@@ -6302,8 +6302,9 @@ class StrategyRunner:
             if indicator_count >= target_min_bars:
                 self._set_symbol_hydration_state(normalized_symbol, SymbolState.READY)
                 self._seed_pipeline_store(normalized_symbol)
-                # MDM already owns these bars. Reimporting derived history
-                # can rewind its tick watermark and discard live observations.
+                # Keep the canonical registry mirror, not a reverse history import.
+                if hasattr(self, "_candle_engines"):
+                    self._mirror_authoritative_candle_engine(normalized_symbol)
             else:
                 self._set_symbol_hydration_state(
                     normalized_symbol, SymbolState.DEGRADED
