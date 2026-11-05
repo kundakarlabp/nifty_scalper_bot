@@ -4,7 +4,6 @@ import datetime as dt
 import json
 
 import pytest
-
 from scripts.archive_breeze_history import collect_pair, normalize
 
 DAY = dt.date(2026, 11, 4)
