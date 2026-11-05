@@ -1,0 +1,31 @@
+# Read-only smoke. Never initialize live-bot execution.
+name: Breeze research authentication smoke
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/breeze-auth-smoke.yml
+      - scripts/archive_breeze_history.py
+
+permissions:
+  contents: read
+
+jobs:
+  authenticate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned official research SDK
+        run: python -m pip install --disable-pip-version-check 'breeze-connect==1.0.69'
+      - name: Validate only Breeze session (no orders or history downloads)
+        env:
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_API_SECRET: ${{ secrets.BREEZE_API_SECRET }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
+        run: python scripts/archive_breeze_history.py --auth-only
