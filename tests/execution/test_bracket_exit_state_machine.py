@@ -87,11 +87,13 @@ def _active_manager(
         symbol="NFO:NIFTY2660923100CE",
         side="BUY",
         qty=65,
-        price=150.65,
+        price=160.65,
         sl=157.10,
         tp=175.00,
     )
-    manager.confirm_entry_fill("entry-1", 150.65)
+    # A BUY stop must initially be below its entry; otherwise the
+    # background watchdog may fire before a test sets pending-exit state.
+    manager.confirm_entry_fill("entry-1", 160.65)
     return manager
 
 
