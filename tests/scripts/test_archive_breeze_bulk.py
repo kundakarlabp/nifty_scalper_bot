@@ -13,10 +13,23 @@ from pathlib import Path
 
 import pytest
 from scripts import archive_breeze_bulk as bulk
-from scripts.archive_breeze_history import collect_contract
+from scripts.archive_breeze_history import authentication_error_code, collect_contract
 
 DAY = dt.date(2025, 2, 3)
 EXPIRY = dt.date(2025, 2, 6)
+
+
+def test_authentication_reason_codes_never_echo_exception_material():
+    for message, expected in (
+        ("Session key is expired.", "breeze_session_expired"),
+        ("Please check session key.", "breeze_session_rejected"),
+        ("Please check api key.", "breeze_app_key_rejected"),
+        ("Unable to retrieve customer details", "breeze_customer_service_unavailable"),
+        ("unrecognized", "breeze_authentication_failed"),
+    ):
+        code = authentication_error_code(Exception(message + " private-fixture"))
+        assert code == expected
+        assert "private-fixture" not in code
 
 
 def zip_catalog(wrong_date=False):

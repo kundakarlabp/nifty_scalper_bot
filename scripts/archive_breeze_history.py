@@ -27,6 +27,22 @@ SESSION_END = dt.time(15, 30)
 FIELDS = ("open", "high", "low", "close", "volume", "open_interest")
 
 
+def authentication_error_code(error: Exception) -> str:
+    """Classify documented SDK errors without logging provider text or secrets."""
+    message = str(error).casefold()
+    if "session key is expired" in message:
+        return "breeze_session_expired"
+    if "please check session key" in message:
+        return "breeze_session_rejected"
+    if "please check api key" in message:
+        return "breeze_app_key_rejected"
+    if "unable to retrieve customer details" in message:
+        return "breeze_customer_service_unavailable"
+    if isinstance(error, OSError):
+        return "breeze_auth_transport_failed"
+    return "breeze_authentication_failed"
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -358,8 +374,10 @@ def main() -> None:
 
             client = BreezeConnect(api_key=values[0])
             client.generate_session(api_secret=values[1], session_token=values[2])
-    except Exception:
-        parser.exit(1, "Breeze authentication failed (details suppressed)\n")
+    except Exception as exc:
+        parser.exit(
+            1, f"Breeze authentication failed: {authentication_error_code(exc)}\n"
+        )
     if args.auth_only:
         print("Breeze authentication succeeded (read-only; no order sent)")
         return
