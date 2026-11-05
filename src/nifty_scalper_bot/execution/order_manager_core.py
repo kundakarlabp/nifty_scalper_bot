@@ -8197,7 +8197,7 @@ class OrderManager:
                     elif hasattr(self._positions, "update_from_order"):
                         self._positions.update_from_order(order)
                 except Exception as exc:
-                    self._logger.exception("Broker fill position sync failed", exc_info=True)
+                    self._logger.exception("Broker fill position sync failed")
                     position_sync_error = exc
 
                 self._register_virtual_bracket_for_fill(
