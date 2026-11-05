@@ -140,3 +140,86 @@ def test_reseed_same_completed_canonical_minute_retains_option_volume(
         canonical_completed_bar=canonical_completed,
     )
     assert evidence["completed_bar_parity"] == "same_minute_volume_match"
+
+
+def test_live_completed_projection_uses_canonical_volume_not_coalesced_tick() -> None:
+    """Skipped entry-evaluation updates must not silently remove traded volume."""
+    runner = StrategyRunner.__new__(StrategyRunner)
+    initial = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    canonical = [
+        {
+            "timestamp": initial + timedelta(minutes=i),
+            "open": 150.0 + i,
+            "high": 151.0 + i,
+            "low": 149.0 + i,
+            "close": 150.5 + i,
+            "volume": total,
+        }
+        for i, total in enumerate((1_480_000.0, 936_650.0))
+    ]
+    runner._candle_engines = {
+        SYMBOL: SimpleNamespace(get_completed_tail=lambda _limit: canonical)
+    }
+    runner._last_bar_ts = {}
+    runner._indicator_engine = SimpleNamespace(get_history=lambda *_a, **_k: [])
+    accepted = []
+
+    def ingest(_symbol, bar):
+        accepted.append(bar)
+        runner._last_bar_ts[_symbol] = bar.timestamp
+
+    runner._ingest_bar = ingest
+
+    # Only one coalesced worker invocation; MDM has both complete bars.
+    recent = runner._ingest_live_canonical_completed_bars(SYMBOL)
+    assert [bar.volume for bar in accepted] == [1_480_000, 936_650]
+    assert [bar.timestamp for bar in accepted] == [
+        initial,
+        initial + timedelta(minutes=1),
+    ]
+    assert recent is accepted[-1]
+    assert runner._ingest_live_canonical_completed_bars(SYMBOL) is None
+    assert len(accepted) == 2
+
+
+def test_live_completed_projection_skips_hydrated_duplicate_and_bad_bar() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    minute = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    valid = {
+        "timestamp": minute,
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1200.0,
+    }
+    malformed = {**valid, "timestamp": minute + timedelta(minutes=1), "volume": -1}
+    subsequent = {**valid, "timestamp": minute + timedelta(minutes=2), "volume": 925.0}
+    runner._candle_engines = {
+        SYMBOL: SimpleNamespace(
+            get_completed_tail=lambda _limit: [valid, malformed, subsequent]
+        )
+    }
+    runner._last_bar_ts = {}
+    runner._indicator_engine = SimpleNamespace(
+        get_history=lambda *_a, **_k: [{"timestamp": minute}]
+    )
+    accepted = []
+
+    def ingest(_symbol, bar):
+        accepted.append(bar)
+        runner._last_bar_ts[_symbol] = bar.timestamp
+
+    runner._ingest_bar = ingest
+    recent = runner._ingest_live_canonical_completed_bars(SYMBOL)
+    assert [bar.timestamp for bar in accepted] == [minute + timedelta(minutes=2)]
+    assert [bar.volume for bar in accepted] == [925]
+    assert recent is accepted[-1]
+
+
+def test_live_completed_projection_does_not_fallback_to_sampled_tick() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._candle_engines = {}
+    runner._last_bar_ts = {}
+    runner._indicator_engine = SimpleNamespace(get_history=lambda *_a, **_k: [])
+    assert runner._ingest_live_canonical_completed_bars(SYMBOL) is None
