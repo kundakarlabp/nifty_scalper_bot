@@ -1,7 +1,5 @@
 """Protective MARKET exits retain point-in-time WS book evidence without I/O."""
 
-from __future__ import annotations
-
 import time
 
 from nifty_scalper_bot.execution.bracket_core import BracketManager
