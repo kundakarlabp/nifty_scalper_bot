@@ -105,6 +105,7 @@ def test_reseed_same_completed_canonical_minute_retains_option_volume(
     runner._indicator_engine = IndicatorEngine()
     runner._set_symbol_hydration_state = lambda *_args: None
     runner._seed_pipeline_store = lambda *_args: None
+
     # A projection reseed must not feed derived bars back to MDM's canonical
     # history (or advance its queue-watermark on every parity repair).
     def reject_reverse_history_import(*_args):
