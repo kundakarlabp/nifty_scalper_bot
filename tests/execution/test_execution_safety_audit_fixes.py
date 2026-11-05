@@ -1295,6 +1295,8 @@ def test_live_entry_registers_pending_order_with_position_manager(
     was quarantined every sync, blocked all new entries, and left the position
     on a wide guard bracket. The pending-order sync must happen at submit."""
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    # Isolate protected deployment control files from CI and developer hosts.
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 
     class _Broker:
