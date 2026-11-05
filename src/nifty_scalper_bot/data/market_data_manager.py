@@ -10,8 +10,9 @@ Runtime role:
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
   drains ordered ticks on a dedicated serial worker rather than the shared
   asyncio executor, and exports bounded tick latency percentiles.
-- _capture_raw_ws_ingress records exact, pre-queue wire observations in an
-  independent bounded ReplayArchive with per-symbol/generation receipt identity;
+- _capture_raw_ws_ingress and _raw_ingress_upstream_snapshot record exact,
+  pre-queue wire observations using synchronized per-symbol/epoch receipts;
+  get_raw_ingress_capture_stats exposes immutable diagnostic snapshots;
   the established normalized decision-replay tape remains unchanged.
 
 Position in the pipeline:
@@ -7091,6 +7092,18 @@ class MarketDataManager:
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
 
+    def _raw_ingress_upstream_snapshot(self) -> dict[str, int]:
+        """Snapshot counters under the owner lock for integrity sidecars."""
+        with self._replay_capture_lock:
+            return {
+                "raw_ws_receipts": int(self._raw_ws_receipts_total),
+                "capture_errors": int(self._raw_ingress_capture_errors),
+                **{
+                    "day_receipt:" + key: value
+                    for key, value in self._raw_ingress_count_by_day.items()
+                },
+            }
+
     def _capture_raw_ws_ingress(self, raw: Mapping[str, Any]) -> None:
         """Persist pre-coalescing WS identity without changing normalized replay.
 
@@ -7156,14 +7169,7 @@ class MarketDataManager:
                         root / "replay_raw_ingress",
                         capacity=4096,
                         max_session_bytes=requested_mb * 1024 * 1024,
-                        upstream_provider=lambda: {
-                            "raw_ws_receipts": int(self._raw_ws_receipts_total),
-                            "capture_errors": int(self._raw_ingress_capture_errors),
-                            **{
-                                "day_receipt:" + key: value
-                                for key, value in self._raw_ingress_count_by_day.items()
-                            },
-                        },
+                        upstream_provider=self._raw_ingress_upstream_snapshot,
                     )
                     self._raw_ingress_day = None
 
