@@ -83,7 +83,10 @@ def normalize(
             "product_type": "OPTIONS",
             "right": "CALL" if side == "CE" else "PUT",
         }
-        if any(str(row.get(key, "")).upper() != value for key, value in expected.items()):
+        if any(
+            str(row.get(key, "")).upper() != value
+            for key, value in expected.items()
+        ):
             raise ValueError("breeze_contract_identity_mismatch")
         try:
             actual_expiry = dt.datetime.strptime(
