@@ -11,7 +11,7 @@ Runtime role:
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains active history counts and uses shared direction-context resolution.
-- Preserves MDM-trusted option interval volumes in runner candle/indicator history;
+- Reads MDM-finalized candles for LIVE indicator history (no coalesced-tick OHLCV);
   untrusted cumulative observations remain excluded.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
@@ -7001,6 +7001,75 @@ class StrategyRunner:
             # the bar-count check slowly promoted back.  Hydration state transitions
             # are the responsibility of _update_symbol_readiness, not the VWAP layer.
         return state
+
+    def _ingest_live_canonical_completed_bars(
+        self, symbol: str
+    ) -> OneMinuteBar | None:
+        """Project MDM's finalized candles, never a coalesced worker tick.
+
+        The entry worker evaluates the latest quote but does NOT receive every
+        tick. Its independent OneMinuteBarBuilder therefore cannot preserve
+        the OHLCV or per-minute volume already owned by MDM's CandleEngine.
+        Only finalized canonical bars can advance LIVE indicator history.
+        Args: symbol. Returns: most recently accepted bar or none.
+        Raises: none for absent or malformed canonical rows.
+        """
+        engine = getattr(self, "_candle_engines", {}).get(symbol)
+        get_tail = getattr(engine, "get_completed_tail", None)
+        if not callable(get_tail):
+            return None
+        last_known = getattr(self, "_last_bar_ts", {}).get(symbol)
+        get_history = getattr(
+            getattr(self, "_indicator_engine", None), "get_history", None
+        )
+        if callable(get_history):
+            history = get_history(symbol, count=1, field="bars") or []
+            if history and isinstance(history[-1], Mapping):
+                last_raw = history[-1].get("timestamp") or history[-1].get("start")
+                try:
+                    last_hist = pd.Timestamp(last_raw)
+                    if last_hist.tzinfo is not None and not pd.isna(last_hist):
+                        history_ts = last_hist.to_pydatetime().astimezone(timezone.utc)
+                        if last_known is None or history_ts > last_known:
+                            last_known = history_ts
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+        accepted: OneMinuteBar | None = None
+        for row in get_tail(8):
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                ts = pd.Timestamp(row["timestamp"])
+                if pd.isna(ts) or ts.tzinfo is None:
+                    continue
+                start = ts.to_pydatetime().astimezone(timezone.utc)
+                if last_known is not None and start <= last_known:
+                    continue
+                prices = tuple(
+                    float(row[field]) for field in ("open", "high", "low", "close")
+                )
+                volume = float(row["volume"])
+                if not all(math.isfinite(v) and v > 0 for v in prices):
+                    continue
+                if not math.isfinite(volume) or volume < 0:
+                    continue
+                bar = OneMinuteBar(
+                    open=prices[0],
+                    high=prices[1],
+                    low=prices[2],
+                    close=prices[3],
+                    volume=int(volume),
+                    start=start,
+                    end=start + timedelta(minutes=1),
+                )
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            self._ingest_bar(symbol, bar)
+            if self._last_bar_ts.get(symbol) == start:
+                accepted = bar
+                last_known = start
+        return accepted
 
     def _ingest_bar(
         self, symbol: str, bar: OneMinuteBar, is_backfill: bool = False
@@ -14509,13 +14578,21 @@ class StrategyRunner:
             # PHASE 4: BAR BUILDING (Always process, even during warmup)
             # =================================================================
 
-            builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
             try:
-                completed_bar = _update_runner_live_candle(
-                    builder, symbol, float(price), volume, timestamp
-                )
+                if is_live_mode:
+                    # Entry evaluation coalesces ticks. Never manufacture
+                    # production volume from only the sampled latest quote.
+                    completed_bar = self._ingest_live_canonical_completed_bars(symbol)
+                else:
+                    builder = self._bar_builders.setdefault(
+                        symbol, OneMinuteBarBuilder()
+                    )
+                    completed_bar = _update_runner_live_candle(
+                        builder, symbol, float(price), volume, timestamp
+                    )
+                    if completed_bar is not None:
+                        self._ingest_bar(symbol, completed_bar)
                 if completed_bar is not None:
-                    self._ingest_bar(symbol, completed_bar)
                     runner_history_count = len(
                         self._indicator_engine.get_history(symbol) or []
                     )
