@@ -2,6 +2,8 @@
 
 Responsibilities: Preserve once-per-minute rejected SMC, VWAP and ORB
 decision-time scalar evidence and selected-option volume parity in journald.
+Canonical bar callback: observe_completed_selected_pair checks paired selected
+closed minutes before calling sample_selected_option_parity; no strategy vote.
 Boundaries: ReplayArchive remains the only high-frequency full-depth quote tape;
 the existing daily log archiver mirrors samples without a second database.
 Safety: Missing or nonfinite evidence is omitted, never assumed to pass, and
