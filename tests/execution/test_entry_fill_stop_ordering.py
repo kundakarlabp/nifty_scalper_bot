@@ -22,7 +22,7 @@ from nifty_scalper_bot.execution.order_manager_core import (
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
 SYMBOL = "NFO:NIFTY26N0924350CE"
-ENTRY_ID = "2118193934424793088"
+ENTRY_ID = "entry-fill-stop-sync"
 
 
 def _runner(tmp_path):
