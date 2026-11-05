@@ -220,3 +220,52 @@ records, with no explicit per-row expiry. The existing public-data preparation
 path already filters session times and declares unverified roll/timestamp
 assumptions. It is older continuous-futures research, not a backfill for missing
 2021–2026 identified futures minutes.
+
+
+## ICICI Breeze named-contract minute archive (read-only research)
+
+The optional scripts/archive_breeze_history.py importer collects one specified
+completed trading day of NIFTY CE/PE one-minute bars using Breeze historical
+V2. This research-only source never becomes a live execution broker; it makes
+at most two history requests, well below the documented 1,000-candle limit per
+request. The official breeze-connect==1.0.69 package is installed only for
+this importer, not added to production dependencies.
+
+- Supply BREEZE_API_KEY, BREEZE_API_SECRET and BREEZE_SESSION_TOKEN via the
+  environment. Neither the values nor any derived session tokens are printed
+  or committed. GitHub Actions secrets are not automatically installed on the
+  production server, nor does their presence establish valid authentication.
+- The separate Breeze research authentication smoke workflow runs on a
+  matching main-branch push or manual dispatch and authenticates only; it
+  never retrieves candles or places an order. If GitHub-hosted runner egress
+  is disallowed, validate using the registered static IP at production.
+- Contract expiry and strike must be externally verified point-in-time
+  identities; the importer does not infer ATM or construct Zerodha tokens.
+  It validates each provider response's exchange, underlying, expiry,
+  strike, side and completed-session timestamps.
+- Explicit --timestamp-convention bar_start/bar_end is required. Provider
+  rows and normalized bar-start candles are sealed separately with SHA256
+  and an explicit gap list; changed existing data fails instead of being
+  silently overwritten. Missing candles are never interpolated.
+- Imported observations are RESEARCH_CANDIDATE only, with
+  promotion_eligible=false. They do not prove point-in-time basket
+  selection, historical lot size, underlying/futures parity, quote/depth
+  quality, executable fills, or live-equivalent replay.
+
+On an authorized archival host, with credentials set privately in the
+environment and an actual exchange-verified historical strike and expiry:
+
+~~~bash
+python -m pip install 'breeze-connect==1.0.69'
+python scripts/archive_breeze_history.py --auth-only
+python scripts/archive_breeze_history.py \
+  --day 2026-11-04 --expiry YYYY-MM-DD --strike STRIKE \
+  --timestamp-convention bar_start --outdir /private/research/breeze
+~~~
+
+Replace placeholder expiry and strike, and confirm timestamp convention with
+independent reference bars before research use. Avoid distributing proprietary
+broker-derived data through a public GitHub Actions artifact.
+
+Provider docs: https://github.com/Idirect-Tech/Breeze-Python-SDK
+and https://api.icicidirect.com/breezeapi/documents/index.html.
