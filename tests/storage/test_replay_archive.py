@@ -1,7 +1,11 @@
 import json
 from datetime import datetime, timezone
 
-from nifty_scalper_bot.storage.replay_archive import ReplayArchive, load_session
+from nifty_scalper_bot.storage.replay_archive import (
+    ReplayArchive,
+    load_session,
+    verify_raw_ingress_session,
+)
 
 
 def test_archive_preserves_depth_basket_history_and_sanitizes_config(tmp_path):
@@ -208,3 +212,78 @@ def test_replay_headroom_accepts_larger_tape_only_with_disk_reserve(
     assert fallback.stats()["max_session_bytes"] == 512 * mib
     assert fallback.stats()["capacity_guard"] == "insufficient_disk_headroom"
     fallback.close()
+
+def test_raw_wire_receipt_verifier_checks_each_symbol_epoch(tmp_path) -> None:
+    """Wire evidence must match upstream per-epoch counts and event ordering."""
+    from datetime import timedelta
+
+    key = "day_receipt:2026-11-05|NFO:OPT|7|3"
+    observed = {key: 0}
+    archive = ReplayArchive(
+        tmp_path,
+        upstream_provider=lambda: {"capture_errors": 0, **observed},
+    )
+    at = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    archive.record(
+        "snapshot",
+        {"capture_stream": "raw_ws_ingress", "version": 1},
+        at,
+    )
+    for sequence in (1, 2):
+        observed[key] = sequence
+        archive.record(
+            "tick",
+            {
+                "capture_stream": "raw_ws_ingress",
+                "receipt": {
+                    "symbol": "NFO:OPT",
+                    "token": 7,
+                    "generation": 3,
+                    "sequence": sequence,
+                },
+                "wire": {
+                    "instrument_token": 7,
+                    "last_price": 100 + sequence,
+                    "depth": {"buy": [{"price": 100, "quantity": 75}]},
+                },
+            },
+            at + timedelta(milliseconds=sequence),
+        )
+    archive.close()
+    proof = verify_raw_ingress_session(tmp_path / "2026-11-05.jsonl")
+    assert proof["verified"] is True
+    assert proof["wire_events"] == 2
+    assert proof["counts_by_run_and_contract_epoch"][archive.run_id] == {
+        "NFO:OPT|7|3": 2
+    }
+    assert len(proof["sha256"]) == 64
+
+
+def test_raw_wire_verifier_rejects_contract_sequence_holes(tmp_path) -> None:
+    import pytest
+
+    key = "day_receipt:2026-11-05|NFO:OPT|7|3"
+    archive = ReplayArchive(
+        tmp_path, upstream_provider=lambda: {"capture_errors": 0, key: 2}
+    )
+    at = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    archive.record("snapshot", {"capture_stream": "raw_ws_ingress"}, at)
+    for sequence in (1, 3):
+        archive.record(
+            "tick",
+            {
+                "capture_stream": "raw_ws_ingress",
+                "receipt": {
+                    "symbol": "NFO:OPT",
+                    "token": 7,
+                    "generation": 3,
+                    "sequence": sequence,
+                },
+                "wire": {"instrument_token": 7},
+            },
+            at,
+        )
+    archive.close()
+    with pytest.raises(ValueError, match="raw_ingress_contract_epoch_sequence_gap"):
+        verify_raw_ingress_session(tmp_path / "2026-11-05.jsonl")
+
