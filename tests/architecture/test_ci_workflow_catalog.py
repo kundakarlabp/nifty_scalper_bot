@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
     "agent-context.yml",
+    "breeze-auth-smoke.yml",
     "ci.yml",
     "failure-memory-candidates.yml",
     "orb-historical-research.yml",
