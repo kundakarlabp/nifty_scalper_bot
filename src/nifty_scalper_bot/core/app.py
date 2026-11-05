@@ -6604,9 +6604,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     def _audit_selected_bar(bar: dict[str, Any]) -> None:
         try:
-            observe_completed_selected_pair(
-                strategy_manager, bar, market_data_manager
-            )
+            observe_completed_selected_pair(strategy_manager, bar, market_data_manager)
         except Exception as exc:  # noqa: BLE001 - observation cannot block orders
             LOGGER.warning(
                 "OPTION_PARITY_OBSERVER_FAILED error_type=%s",
