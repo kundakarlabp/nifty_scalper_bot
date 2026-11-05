@@ -57,6 +57,18 @@ def test_ci_limits_write_permission_to_successful_release_proof() -> None:
     assert e2e_suite in text
 
 
+def test_ci_uses_isolated_operator_env_not_production_credentials() -> None:
+    config = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    environment = config["env"]
+    assert environment["NIFTYBOT_CONFIG_DIR"] == "/tmp/niftybot-ci"
+    assert environment["BOT_ENV_FILE"] == (
+        environment["NIFTYBOT_CONFIG_DIR"] + "/niftybot.env"
+    )
+    assert not environment["BOT_ENV_FILE"].startswith("/home/ubuntu")
+    assert environment["ALLOW_NETWORK"] == "false"
+    assert environment["ALLOW_REAL_BROKER"] == "false"
+
+
 def test_ci_uses_draft_fast_gate_before_final_full_validation() -> None:
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
