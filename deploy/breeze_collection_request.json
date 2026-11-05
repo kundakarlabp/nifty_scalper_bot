@@ -1,0 +1,10 @@
+{
+  "request_id": "breeze-private-pilot-20261106-01",
+  "first": "2025-02-03",
+  "stop_exclusive": "2025-02-04",
+  "max_requests": 16,
+  "scope": "Index, all published NIFTY futures expiries, opening-nearest paired options in the two nearest published expiries, full NIFTY EOD contract references",
+  "not_full_option_chain_intraday": true,
+  "target_first": "2024-11-06",
+  "target_stop_exclusive": "2026-11-06"
+}

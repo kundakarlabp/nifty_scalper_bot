@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Archive named Breeze NIFTY options for offline research only.
+"""Archive identified Breeze NIFTY index/futures/options for offline research.
 
-Responsibilities: Authenticate read-only and archive exact-contract minute bars.
+Responsibilities: Validate identities and seal raw/normalized historical bars.
 Ownership: Isolated offline research importer, not a production broker adapter.
 Safety: Never place orders, infer contracts, simulate fills or promote to replay.
 """
@@ -9,9 +9,12 @@ Safety: Never place orders, infer contracts, simulate fills or promote to replay
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -56,14 +59,17 @@ def normalize(
     response: Any,
     *,
     day: dt.date,
-    expiry: dt.date,
-    strike: int,
+    expiry: dt.date | None,
+    strike: int | None,
     side: str,
     timestamp_convention: str,
+    product_type: str = "options",
 ) -> tuple[list[list[Any]], list[dict[str, Any]], list[str]]:
     """Verify provider contract and observed minute; never fill missing data."""
     if timestamp_convention not in {"bar_start", "bar_end"}:
         raise ValueError("breeze_timestamp_convention_required")
+    if product_type not in {"cash", "futures", "options"}:
+        raise ValueError("breeze_product_invalid")
     if (
         not isinstance(response, dict)
         or response.get("Status") != 200
@@ -79,19 +85,25 @@ def normalize(
             raise ValueError("breeze_candle_schema_invalid")
         expected = {
             "stock_code": "NIFTY",
-            "exchange_code": "NFO",
-            "product_type": "OPTIONS",
-            "right": "CALL" if side == "CE" else "PUT",
+            "exchange_code": "NSE" if product_type == "cash" else "NFO",
         }
+        if product_type != "cash" or "product_type" in row:
+            expected["product_type"] = product_type.upper()
+        if product_type == "options":
+            expected["right"] = "CALL" if side == "CE" else "PUT"
         if any(
             str(row.get(key, "")).upper() != value for key, value in expected.items()
         ):
             raise ValueError("breeze_contract_identity_mismatch")
         try:
-            actual_expiry = dt.datetime.strptime(
-                str(row["expiry_date"]).upper(), "%d-%b-%Y"
-            ).date()
-            actual_strike = float(row["strike_price"])
+            actual_expiry = (
+                dt.datetime.strptime(str(row["expiry_date"]).upper(), "%d-%b-%Y").date()
+                if product_type != "cash"
+                else None
+            )
+            actual_strike = (
+                float(row["strike_price"]) if product_type == "options" else None
+            )
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise ValueError("breeze_contract_identity_mismatch") from exc
         if actual_expiry != expiry or actual_strike != strike:
@@ -140,6 +152,141 @@ def _write_once(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def collect_contract(
+    client: Any,
+    *,
+    day: dt.date,
+    expiry: dt.date | None,
+    strike: int | None,
+    side: str,
+    product_type: str,
+    outdir: Path,
+    timestamp_convention: str,
+) -> dict[str, Any]:
+    """Seal one named contract; cache verification never makes a broker request."""
+    if (
+        day >= dt.datetime.now(IST).date()
+        or product_type not in {"cash", "futures", "options"}
+        or product_type != "cash"
+        and (expiry is None or expiry < day)
+        or product_type == "cash"
+        and (expiry is not None or strike is not None or side != "INDEX")
+        or product_type == "futures"
+        and (strike is not None or side != "FUT")
+        or product_type == "options"
+        and (
+            type(strike) is not int
+            or strike <= 0
+            or strike % 50
+            or side not in {"CE", "PE"}
+        )
+    ):
+        raise ValueError("breeze_research_contract_or_date_invalid")
+    if timestamp_convention not in {"bar_start", "bar_end"}:
+        raise ValueError("breeze_timestamp_convention_required")
+    identity = (
+        f"NIFTY_{expiry.isoformat()}_{strike}_{side}"
+        if product_type == "options" and expiry is not None
+        else (
+            f"NIFTY_{expiry.isoformat()}_FUT"
+            if product_type == "futures" and expiry is not None
+            else "NIFTY_INDEX"
+        )
+    )
+    path = outdir / "breeze_history" / day.isoformat() / f"{identity}.json"
+    arguments = {
+        "day": day,
+        "expiry": expiry,
+        "strike": strike,
+        "side": side,
+        "product_type": product_type,
+        "timestamp_convention": timestamp_convention,
+    }
+    expected = {
+        "schema_version": 1,
+        "day": day.isoformat(),
+        "expiry": expiry.isoformat() if expiry is not None else None,
+        "strike": strike,
+        "side": side,
+        "source_timestamp_convention": timestamp_convention,
+    }
+    if path.exists():
+        cached = json.loads(path.read_text())
+        if (
+            any(cached.get(key) != value for key, value in expected.items())
+            or cached.get("product_type", "options") != product_type
+            or cached.get("provider_sha256") != _digest(cached.get("provider_rows"))
+            or cached.get("candles_sha256") != _digest(cached.get("candles"))
+        ):
+            raise ValueError("breeze_archive_conflict")
+        candles, _, missing = normalize(
+            {"Status": 200, "Error": None, "Success": cached["provider_rows"]},
+            **arguments,
+        )
+        if cached["candles"] != candles or cached["missing_minutes"] != missing:
+            raise ValueError("breeze_archive_conflict")
+        status = "cached"
+        requests_made = 0
+    else:
+        request = {
+            "interval": "1minute",
+            "from_date": f"{day.isoformat()}T09:15:00.000Z",
+            "to_date": f"{day.isoformat()}T15:29:00.000Z",
+            "stock_code": "NIFTY",
+            "exchange_code": "NSE" if product_type == "cash" else "NFO",
+            "product_type": product_type,
+        }
+        if expiry is not None:
+            request["expiry_date"] = f"{expiry.isoformat()}T07:00:00.000Z"
+            request["right"] = (
+                ("call" if side == "CE" else "put")
+                if product_type == "options"
+                else "others"
+            )
+            request["strike_price"] = str(strike) if strike is not None else "0"
+        response = client.get_historical_data_v2(**request)
+        try:
+            candles, raw_rows, missing = normalize(response, **arguments)
+        except ValueError:
+            if isinstance(response, dict) and isinstance(response.get("Success"), list):
+                _write_once(
+                    outdir / "quarantine" / day.isoformat() / f"{identity}.json",
+                    {
+                        "request": request,
+                        "provider_rows": response["Success"],
+                        "validation_failed": True,
+                        "promotion_eligible": False,
+                    },
+                )
+            raise
+        payload = {
+            **expected,
+            "source": "icici_breeze_historical_v2",
+            "product_type": product_type,
+            "interval": "1minute",
+            "source_timezone": "Asia/Kolkata",
+            "source_timezone_verified": False,
+            "source_timestamp_convention_verified": False,
+            "normalized_timestamp_convention": "bar_start",
+            "provider_rows": raw_rows,
+            "provider_sha256": _digest(raw_rows),
+            "candles": candles,
+            "candles_sha256": _digest(candles),
+            "missing_minutes": missing,
+            "promotion_eligible": False,
+        }
+        _write_once(path, payload)
+        status = "collected" if candles else "no_data"
+        requests_made = 1
+    return {
+        "path": str(path.relative_to(outdir)),
+        "bars": len(candles),
+        "missing_minutes": len(missing),
+        "status": status,
+        "requests_made": requests_made,
+    }
+
+
 def collect_pair(
     client: Any,
     *,
@@ -149,18 +296,7 @@ def collect_pair(
     outdir: Path,
     timestamp_convention: str,
 ) -> dict[str, Any]:
-    """At most two read-only V2 requests for one completed session."""
-    if (
-        day >= dt.datetime.now(IST).date()
-        or expiry < day
-        or type(strike) is not int
-        or strike <= 0
-        or strike % 50
-    ):
-        raise ValueError("breeze_research_contract_or_date_invalid")
-    if timestamp_convention not in {"bar_start", "bar_end"}:
-        raise ValueError("breeze_timestamp_convention_required")
-    root = outdir / "breeze_history" / day.isoformat()
+    """Preserve the original option-pair CLI and archive contract."""
     report: dict[str, Any] = {
         "source": "icici_breeze_historical_v2",
         "day": day.isoformat(),
@@ -174,79 +310,19 @@ def collect_pair(
         "requests_made": 0,
         "contracts": {},
     }
-    for side, right in (("CE", "call"), ("PE", "put")):
-        path = root / f"NIFTY_{expiry.isoformat()}_{strike}_{side}.json"
-        if path.exists():
-            cached = json.loads(path.read_text())
-            if (
-                cached.get("schema_version") != 1
-                or cached.get("side") != side
-                or cached.get("day") != day.isoformat()
-                or cached.get("expiry") != expiry.isoformat()
-                or cached.get("strike") != strike
-                or cached.get("source_timestamp_convention") != timestamp_convention
-                or cached.get("provider_sha256") != _digest(cached.get("provider_rows"))
-                or cached.get("candles_sha256") != _digest(cached.get("candles"))
-            ):
-                raise ValueError("breeze_archive_conflict")
-            candles, _, missing = normalize(
-                {"Status": 200, "Error": None, "Success": cached["provider_rows"]},
-                day=day,
-                expiry=expiry,
-                strike=strike,
-                side=side,
-                timestamp_convention=timestamp_convention,
-            )
-            if cached["candles"] != candles or cached["missing_minutes"] != missing:
-                raise ValueError("breeze_archive_conflict")
-            status = "cached"
-        else:
-            report["requests_made"] += 1
-            response = client.get_historical_data_v2(
-                interval="1minute",
-                from_date=f"{day.isoformat()}T09:15:00.000Z",
-                to_date=f"{day.isoformat()}T15:29:00.000Z",
-                stock_code="NIFTY",
-                exchange_code="NFO",
-                product_type="options",
-                expiry_date=f"{expiry.isoformat()}T07:00:00.000Z",
-                right=right,
-                strike_price=str(strike),
-            )
-            candles, raw_rows, missing = normalize(
-                response,
-                day=day,
-                expiry=expiry,
-                strike=strike,
-                side=side,
-                timestamp_convention=timestamp_convention,
-            )
-            payload = {
-                "schema_version": 1,
-                "source": "icici_breeze_historical_v2",
-                "day": day.isoformat(),
-                "expiry": expiry.isoformat(),
-                "strike": strike,
-                "side": side,
-                "interval": "1minute",
-                "source_timezone": "Asia/Kolkata",
-                "source_timestamp_convention": timestamp_convention,
-                "normalized_timestamp_convention": "bar_start",
-                "provider_rows": raw_rows,
-                "provider_sha256": _digest(raw_rows),
-                "candles": candles,
-                "candles_sha256": _digest(candles),
-                "missing_minutes": missing,
-                "promotion_eligible": False,
-            }
-            _write_once(path, payload)
-            status = "collected" if candles else "no_data"
-        report["contracts"][side] = {
-            "path": str(path.relative_to(outdir)),
-            "bars": len(candles),
-            "missing_minutes": len(missing),
-            "status": status,
-        }
+    for side in ("CE", "PE"):
+        result = collect_contract(
+            client,
+            day=day,
+            expiry=expiry,
+            strike=strike,
+            side=side,
+            product_type="options",
+            outdir=outdir,
+            timestamp_convention=timestamp_convention,
+        )
+        report["requests_made"] += result.pop("requests_made")
+        report["contracts"][side] = result
     return report
 
 
@@ -272,10 +348,16 @@ def main() -> None:
             "--day, --expiry, --strike, --timestamp-convention, --outdir required"
         )
     try:
-        from breeze_connect import BreezeConnect
+        # Official SDK loggers can write outside redirected stdout/stderr.
+        logging.disable(logging.CRITICAL)
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            from breeze_connect import BreezeConnect
 
-        client = BreezeConnect(api_key=values[0])
-        client.generate_session(api_secret=values[1], session_token=values[2])
+            client = BreezeConnect(api_key=values[0])
+            client.generate_session(api_secret=values[1], session_token=values[2])
     except Exception:
         parser.exit(1, "Breeze authentication failed (details suppressed)\n")
     if args.auth_only:
