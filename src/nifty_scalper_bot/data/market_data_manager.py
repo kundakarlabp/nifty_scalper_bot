@@ -10,6 +10,9 @@ Runtime role:
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
   drains ordered ticks on a dedicated serial worker rather than the shared
   asyncio executor, and exports bounded tick latency percentiles.
+- _capture_raw_ws_ingress records exact, pre-queue wire observations in an
+  independent bounded ReplayArchive with per-symbol/generation receipt identity;
+  the established normalized decision-replay tape remains unchanged.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -433,6 +436,9 @@ class MarketDataManager:
         self._external_tick_handler: Callable[[dict[str, Any]], None] | None = None
         self._replay_capture_lock = threading.RLock()
         self._replay_archive: Any | None = None
+        self._raw_ingress_archive: Any | None = None
+        self._raw_ingress_sequence: dict[str, int] = {}
+        self._raw_ingress_capture_errors = 0
         self._raw_ws_receipts_total = 0
         self._replay_snapshot_key: tuple[str, str] | None = None
         self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
@@ -2177,6 +2183,9 @@ class MarketDataManager:
         archive = getattr(self, "_replay_archive", None)
         if archive is not None:
             archive.close()
+        raw_archive = getattr(self, "_raw_ingress_archive", None)
+        if raw_archive is not None:
+            raw_archive.close()
         self._stop_candle_flush_task()
         stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
         if callable(stop_fallback_worker):
@@ -7032,6 +7041,7 @@ class MarketDataManager:
         payload = dict(raw_tick)
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(payload, raw_receive_mono)
+        self._capture_raw_ws_ingress(payload)
         payload.setdefault("_enqueued_monotonic", raw_receive_mono)
         loop = self._main_loop
         if loop is None or not loop.is_running():
@@ -7063,6 +7073,7 @@ class MarketDataManager:
             return
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(tick_payload, raw_receive_mono)
+        self._capture_raw_ws_ingress(tick_payload)
         tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
 
         loop = self._main_loop
@@ -7077,6 +7088,134 @@ class MarketDataManager:
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
+
+    def _capture_raw_ws_ingress(self, raw: Mapping[str, Any]) -> None:
+        """Persist pre-coalescing WS identity without changing normalized replay.
+
+        Only the LIVE default or an explicit test/operator opt-in records raw
+        quotes. An unavailable or full recorder marks research evidence
+        incomplete; it never blocks protective execution or fabricates data.
+        """
+        enabled = str(os.getenv("REPLAY_RAW_INGRESS_ENABLED", "auto")).lower()
+        if enabled in {"false", "0", "off", "no"}:
+            return
+        if enabled == "auto" and not (
+            str(os.getenv("EXECUTION_MODE", "")).upper() == "LIVE"
+            and any(
+                str(os.getenv(name, "")).lower() in {"true", "1", "yes", "on"}
+                for name in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
+            )
+        ):
+            return
+        lock = getattr(self, "_replay_capture_lock", None)
+        if lock is None:
+            return
+        with lock:
+            try:
+                from shutil import disk_usage
+
+                from nifty_scalper_bot.config.paths import get_data_dir
+                from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+                if getattr(self, "_raw_ingress_archive", None) is None:
+                    root = get_data_dir()
+                    try:
+                        requested_mb = max(
+                            128,
+                            min(1024, int(os.getenv("REPLAY_RAW_MAX_SESSION_MB", "512"))),
+                        )
+                    except (TypeError, ValueError):
+                        requested_mb = 512
+                    # Two independent tapes must leave a 2 GiB emergency
+                    # reserve; do not silently consume free host storage.
+                    normalized_mb = max(
+                        512, int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
+                    )
+                    required_free = (
+                        requested_mb + normalized_mb + 2048
+                    ) * 1024 * 1024
+                    if disk_usage(root).free < required_free:
+                        self._raw_ingress_capture_errors += 1
+                        log_throttled(
+                            self._logger,
+                            "raw_ws_capture_no_headroom",
+                            "RAW_WS_CAPTURE_UNAVAILABLE reason=disk_reserve",
+                            interval_sec=60.0,
+                            level=logging.ERROR,
+                        )
+                        return
+                    self._raw_ingress_archive = ReplayArchive(
+                        root / "replay_raw_ingress",
+                        capacity=4096,
+                        max_session_bytes=requested_mb * 1024 * 1024,
+                        upstream_provider=lambda: {
+                            "raw_ws_receipts": int(self._raw_ws_receipts_total),
+                            **{
+                                "receipt:" + key: value
+                                for key, value in self._raw_ingress_sequence.items()
+                            },
+                        },
+                    )
+                    self._raw_ingress_day = None
+
+                archive = self._raw_ingress_archive
+                observed = datetime.now(timezone.utc)
+                day = observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+                if getattr(self, "_raw_ingress_day", None) != day:
+                    archive.record(
+                        "snapshot",
+                        {"capture_stream": "raw_ws_ingress", "version": 1},
+                        observed,
+                    )
+                    self._raw_ingress_day = day
+
+                symbol = self._resolve_tick_symbol_for_priority(raw)
+                token_value = raw.get("instrument_token") or raw.get("token")
+                try:
+                    token = int(token_value) if token_value is not None else None
+                except (TypeError, ValueError):
+                    token = None
+                generation = self._generation_for_raw_ingress(
+                    symbol if symbol != "UNKNOWN" else None, token
+                )
+                identity = f"{symbol}|{token}|{generation}"
+                next_sequence = self._raw_ingress_sequence.get(identity, 0) + 1
+                self._raw_ingress_sequence[identity] = next_sequence
+                archive.record(
+                    "tick",
+                    {
+                        "capture_stream": "raw_ws_ingress",
+                        "receipt": {
+                            "symbol": symbol,
+                            "token": token,
+                            "generation": generation,
+                            "sequence": next_sequence,
+                        },
+                        "wire": dict(raw),
+                    },
+                    observed,
+                )
+            except Exception as exc:  # noqa: BLE001 - research cannot block trading
+                self._raw_ingress_capture_errors += 1
+                log_throttled(
+                    self._logger,
+                    "raw_ws_capture_failure",
+                    "RAW_WS_CAPTURE_UNAVAILABLE error_type=%s",
+                    type(exc).__name__,
+                    interval_sec=60.0,
+                    level=logging.ERROR,
+                )
+
+    def get_raw_ingress_capture_stats(self) -> dict[str, Any]:
+        """Return per-symbol/epoch receipts and bounded recorder loss evidence."""
+        with self._replay_capture_lock:
+            archive = getattr(self, "_raw_ingress_archive", None)
+            return {
+                "raw_ws_receipts_total": int(self._raw_ws_receipts_total),
+                "capture_errors": int(self._raw_ingress_capture_errors),
+                "received_by_symbol_epoch": dict(self._raw_ingress_sequence),
+                "archive": archive.stats() if archive is not None else None,
+            }
 
     def _raw_receive_evidence(
         self, received_mono: float, generation: int | None
