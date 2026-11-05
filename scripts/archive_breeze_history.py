@@ -204,8 +204,8 @@ def collect_pair(
             report["requests_made"] += 1
             response = client.get_historical_data_v2(
                 interval="1minute",
-                from_date=f"{day.isoformat()}T00:00:00.000Z",
-                to_date=f"{day.isoformat()}T23:59:59.000Z",
+                from_date=f"{day.isoformat()}T09:15:00.000Z",
+                to_date=f"{day.isoformat()}T15:29:00.000Z",
                 stock_code="NIFTY",
                 exchange_code="NFO",
                 product_type="options",
@@ -290,8 +290,21 @@ def main() -> None:
             outdir=args.outdir,
             timestamp_convention=args.timestamp_convention,
         )
+    except ValueError as exc:
+        known_codes = {
+            "breeze_provider_error",
+            "breeze_contract_identity_mismatch",
+            "breeze_candle_schema_invalid",
+            "breeze_candle_values_invalid",
+            "breeze_timestamp_invalid",
+            "breeze_archive_conflict",
+            "breeze_partial_archive_exists",
+        }
+        code = str(exc)
+        code = code if code in known_codes else "breeze_validation_failed"
+        parser.exit(1, f"Breeze history collection failed: {code}\n")
     except Exception:
-        parser.exit(1, "Breeze history collection failed (details suppressed)\n")
+        parser.exit(1, "Breeze history SDK/transport failed (details suppressed)\n")
     print(json.dumps(report, indent=2))
 
 

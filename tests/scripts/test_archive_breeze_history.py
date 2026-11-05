@@ -71,6 +71,11 @@ def test_exact_pair_archive_and_deterministic_cache(tmp_path):
     assert len(client.calls) == 2
     assert [call["right"] for call in client.calls] == ["call", "put"]
     assert all(call["interval"] == "1minute" for call in client.calls)
+    assert all(
+        call["from_date"] == "2026-11-04T09:15:00.000Z"
+        and call["to_date"] == "2026-11-04T15:29:00.000Z"
+        for call in client.calls
+    )
     assert result["contracts"]["CE"]["missing_minutes"] == 374
     file = tmp_path / result["contracts"]["CE"]["path"]
     data = json.loads(file.read_text())
