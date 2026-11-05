@@ -183,6 +183,11 @@ def test_admin_login_button_accepts_canonical_broker_alias(monkeypatch) -> None:
             "EXECUTION_MODE": "LIVE",
         },
     )
+    # operating_control holds an independent imported _read_env reference.
+    # Keep CI away from the private host configuration file.
+    monkeypatch.setattr(
+        operating_control, "_read_env", lambda: {"BOT_OPERATING_MODE": "AUTO"}
+    )
     response = client().get("/admin")
     assert response.status_code == 200
     assert "Open official Zerodha login" in response.text
@@ -201,6 +206,9 @@ def test_zerodha_login_and_callback_use_same_canonical_key(monkeypatch) -> None:
             "KITE_API_KEY": "older-key",
             "KITE_API_SECRET": "older-secret",
         },
+    )
+    monkeypatch.setattr(
+        operating_control, "_read_env", lambda: {"BOT_OPERATING_MODE": "AUTO"}
     )
     calls = []
     monkeypatch.setattr(
