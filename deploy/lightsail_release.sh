@@ -24,6 +24,7 @@ RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
 RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
 RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
+ALLOW_INTRADAY_RELEASE=false
 AUTO_MODE=false
 WAIT_FOR_LOCK=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -38,12 +39,34 @@ for arg in "$@"; do
   case "$arg" in
     --force|--force-restart) FORCE_RESTART=true ;;
     --auto) AUTO_MODE=true ;;
+    --emergency-intraday) ALLOW_INTRADAY_RELEASE=true ;;
     --wait-for-lock) WAIT_FOR_LOCK=true ;;
     *) printf '[lightsail-release] unknown argument: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
 
 log() { printf '[lightsail-release] %s\n' "$*"; }
+
+# Record non-secret restart provenance; never block protective services for logging.
+record_release_restart() {
+  local stage="$1" old_sha="$2" new_sha="$3" events_file="$APP_DIR/data/release_restart_events.jsonl"
+  mkdir -p "$(dirname "$events_file")" || { log "WARNING: release provenance directory unavailable"; return 0; }
+  printf '{"version":1,"at_ist":"%s","stage":"%s","previous_sha":"%s","candidate_sha":"%s","auto":%s,"emergency_intraday":%s}\n' \
+    "$(TZ=Asia/Kolkata date -Is)" "$stage" "$old_sha" "$new_sha" \
+    "$AUTO_MODE" "$ALLOW_INTRADAY_RELEASE" >> "$events_file" || \
+    log "WARNING: release restart provenance could not be persisted"
+  logger -t niftybot-deploy "RELEASE_RESTART_PROVENANCE stage=$stage previous_sha=${old_sha:0:12} candidate_sha=${new_sha:0:12} auto=$AUTO_MODE emergency_intraday=$ALLOW_INTRADAY_RELEASE" 2>/dev/null || true
+}
+
+# Conservative Mon-Fri IST envelope: no routine engine restarts in the
+# opening window, active session, or immediate post-close safety interval.
+routine_market_window_ist() {
+  local weekday hour_minute
+  weekday="$(TZ=Asia/Kolkata date +%u)"
+  hour_minute="$(TZ=Asia/Kolkata date +%H%M)"
+  [ "$weekday" -le 5 ] || return 1
+  [ "$((10#$hour_minute))" -ge 900 ] && [ "$((10#$hour_minute))" -lt 1545 ]
+}
 
 write_status() {
   local state="$1" message="$2" escaped
@@ -730,6 +753,18 @@ if [ "$AUTO_MODE" = true ]; then
     write_status fetch_failed "git fetch failed"; exit 1;
   }
   AFTER="$(git rev-parse origin/main)"
+  # A healthy process must not be interrupted for a routine update during
+  # market hours. Emergency releases remain explicitly opt-in and still pass
+  # exact-SHA CI, entry hold, two broker-flat snapshots and rollback gates.
+  if [ "$ALLOW_INTRADAY_RELEASE" != true ] \
+    && routine_market_window_ist \
+    && { [ "$BEFORE" != "$AFTER" ] || [ -f "$RESTART_PENDING_FILE" ] || [ "$FORCE_RESTART" = true ]; } \
+    && service_healthy_confirmed "$BEFORE"; then
+    write_status deferred_market_window "healthy engine ${BEFORE:0:7}; routine candidate ${AFTER:0:7} queued until after 15:45 IST"
+    log "Routine engine restart deferred within IST market window"
+    poll_research_request
+    exit 0
+  fi
   if auto_release_should_defer; then
     # Never start a different/partially installed revision to recover a live process.
     # A missing or differing runtime provenance requires operator reconciliation.
@@ -1072,8 +1107,10 @@ if auto_release_should_defer; then
   poll_research_request
   exit 0
 fi
+record_release_restart requested "$BEFORE" "$AFTER"
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
+  record_release_restart verified_healthy "$BEFORE" "$AFTER"
   rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"
   # Auxiliary networking hardening happens only after the guarded engine
   # restart passed release checks. It never restarts or reconfigures trading.
@@ -1152,6 +1189,7 @@ if [ "$BEFORE" != "$AFTER" ]; then
   sudo systemctl restart "$SERVICE"
   restart_admin || true
   restart_streamlit || true
+  record_release_restart rolled_back "$AFTER" "$BEFORE"
   write_status rolled_back "bot health check failed; restored ${BEFORE:0:7}"
 else
   write_status restart_failed "current revision failed readiness after restart"
