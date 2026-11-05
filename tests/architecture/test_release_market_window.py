@@ -47,14 +47,11 @@ def test_routine_market_deferral_is_before_checkout_and_protects_ci_gate() -> No
     ci = script.index('verify_release_ci.py" "$AFTER"')
     checkout = script.index('git reset --hard --quiet "$AFTER"')
     assert defer < ci < checkout
-    assert 'ALLOW_INTRADAY_RELEASE=false' in script
-    assert '--emergency-intraday) ALLOW_INTRADAY_RELEASE=true' in script
+    assert "ALLOW_INTRADAY_RELEASE=false" in script
+    assert "--emergency-intraday) ALLOW_INTRADAY_RELEASE=true" in script
     assert 'service_healthy_confirmed "$BEFORE"' in script
-    assert 'intraday_flat_broker_confirmed' in script
-    assert 'acquire_release_entry_hold' in script
+    assert "intraday_flat_broker_confirmed" in script
+    assert "acquire_release_entry_hold" in script
     assert 'record_release_restart requested "$BEFORE" "$AFTER"' in script
     assert 'record_release_restart verified_healthy "$BEFORE" "$AFTER"' in script
-    assert (
-        subprocess.run(["bash", "-n", str(RELEASE)], check=False).returncode
-        == 0
-    )
+    assert subprocess.run(["bash", "-n", str(RELEASE)], check=False).returncode == 0
