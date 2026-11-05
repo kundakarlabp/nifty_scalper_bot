@@ -1,22 +1,20 @@
 """Protective MARKET exits retain point-in-time WS book evidence without I/O."""
 
-import time
-
-from nifty_scalper_bot.execution.bracket_core import BracketManager
+from nifty_scalper_bot.execution import bracket_core
 
 
 SYMBOL = "NFO:NIFTY26N0924350CE"
 
 
-def _manager() -> BracketManager:
-    manager = BracketManager.__new__(BracketManager)
+def _manager() -> bracket_core.BracketManager:
+    manager = bracket_core.BracketManager.__new__(bracket_core.BracketManager)
     manager._exit_protective_order_mode = "MARKET"
     manager._exit_quote_max_age = 2.0
     manager._exit_quotes = {}
     return manager
 
 
-def _price(manager: BracketManager):
+def _price(manager: bracket_core.BracketManager):
     return manager._price_exit_order(
         bracket=None,
         symbol=SYMBOL,
@@ -29,7 +27,7 @@ def _price(manager: BracketManager):
 
 def test_market_stop_uses_fresh_cached_book_for_evidence_only() -> None:
     manager = _manager()
-    manager._exit_quotes[SYMBOL] = (177.50, 177.85, time.time() - 0.1)
+    manager._exit_quotes[SYMBOL] = (177.50, 177.85, bracket_core.time.time() - 0.1)
 
     def no_quote_fetch(_symbol: str):
         raise AssertionError("protective MARKET exit must not fetch a quote")
@@ -47,7 +45,7 @@ def test_market_stop_uses_fresh_cached_book_for_evidence_only() -> None:
 
 def test_stale_cached_book_does_not_masquerade_as_fresh_exit_quote() -> None:
     manager = _manager()
-    manager._exit_quotes[SYMBOL] = (177.50, 177.85, time.time() - 30.0)
+    manager._exit_quotes[SYMBOL] = (177.50, 177.85, bracket_core.time.time() - 30.0)
     order_type, price, metadata = _price(manager)
 
     assert order_type == "MARKET"
