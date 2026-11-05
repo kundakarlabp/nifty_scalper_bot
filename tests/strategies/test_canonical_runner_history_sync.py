@@ -808,6 +808,7 @@ def test_recent_history_timestamp_samples_are_bounded_and_read_only() -> None:
     assert sample["indicator"] == sample["runner"]
     assert runner._symbol_history[symbol] == before
 
+
 def test_futures_optional_deep_history_is_backed_off_and_revision_repaired() -> None:
     """Minimum-ready context is not fetched every 30 seconds for optional 400 bars."""
     import time
@@ -863,4 +864,3 @@ def test_futures_optional_deep_history_is_backed_off_and_revision_repaired() -> 
     assert len(requests) == 1
     assert requests[0]["target_bars"] == 400
     assert requests[0]["required_bars"] == 50
-
