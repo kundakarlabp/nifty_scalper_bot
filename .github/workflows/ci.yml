@@ -24,6 +24,7 @@ env:
   ALLOW_REAL_BROKER: "false"
   # CI must never inspect deployment-host release controls. All jobs are isolated.
   NIFTYBOT_CONFIG_DIR: "/tmp/niftybot-ci"
+  BOT_ENV_FILE: "/tmp/niftybot-ci/niftybot.env"
 
 jobs:
   draft-fast-check:
