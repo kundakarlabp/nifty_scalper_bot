@@ -89,8 +89,12 @@ def test_market_stop_retains_fresh_cached_book_without_extra_quote_fetch(
 
     mgr._extract_exit_quote = no_quote_fetch
     order_type, price, metadata = mgr._price_exit_order(
-        bracket=bracket, symbol=bracket.symbol, side="SELL",
-        reason="HARD_SL_BREACH", preferred_order_type="LIMIT", qty=65,
+        bracket=bracket,
+        symbol=bracket.symbol,
+        side="SELL",
+        reason="HARD_SL_BREACH",
+        preferred_order_type="LIMIT",
+        qty=65,
     )
     assert order_type == "MARKET"
     assert price is None
@@ -105,8 +109,12 @@ def test_market_stop_does_not_claim_stale_cached_book(monkeypatch, tmp_path) -> 
     mgr._exit_protective_order_mode = "MARKET"
     mgr._exit_quotes[bracket.symbol] = (177.50, 177.85, time.time() - 30.0)
     order_type, price, metadata = mgr._price_exit_order(
-        bracket=bracket, symbol=bracket.symbol, side="SELL",
-        reason="HARD_SL_BREACH", preferred_order_type="LIMIT", qty=65,
+        bracket=bracket,
+        symbol=bracket.symbol,
+        side="SELL",
+        reason="HARD_SL_BREACH",
+        preferred_order_type="LIMIT",
+        qty=65,
     )
     assert order_type == "MARKET"
     assert price is None
