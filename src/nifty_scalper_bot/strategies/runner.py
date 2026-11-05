@@ -2376,6 +2376,54 @@ class StrategyRunner:
             if (stamp := self._history_row_timestamp(row)) is not None
         ]
         runner_tail_duplicated = len(recent_minutes) != len(set(recent_minutes))
+        # Counts and last-minute timestamps cannot establish content parity:
+        # an independently built runner/indicator bar can retain old volume
+        # after the canonical CandleEngine has finalized or reconciled it.
+        # Compare a bounded completed tail; never read forming candles.
+        def _tail_ohlcv(history_rows: Sequence[Any]) -> dict[datetime, tuple[float, ...]]:
+            tail: dict[datetime, tuple[float, ...]] = {}
+            for row in history_rows[-5:]:
+                stamp = self._history_row_timestamp(row)
+                if stamp is None:
+                    continue
+                values = (
+                    [row.get(field) for field in ("open", "high", "low", "close", "volume")]
+                    if isinstance(row, Mapping)
+                    else [getattr(row, field, None) for field in ("open", "high", "low", "close", "volume")]
+                )
+                try:
+                    numbers = tuple(float(value) for value in values)
+                except (TypeError, ValueError):
+                    continue
+                if all(math.isfinite(value) for value in numbers):
+                    tail[stamp] = numbers
+            return tail
+
+        canonical_tail = _tail_ohlcv(rows)
+        runner_tail = _tail_ohlcv(runner_rows)
+        try:
+            indicator_tail = _tail_ohlcv(
+                list(self._indicator_engine.get_history(normalized, count=5, field="bars") or [])
+            )
+        except Exception:
+            indicator_tail = {}
+
+        def _diverges(other: Mapping[datetime, tuple[float, ...]]) -> bool:
+            return any(
+                minute in other
+                and any(
+                    not math.isclose(left, right, rel_tol=0.0, abs_tol=0.000001)
+                    for left, right in zip(ohlcv, other[minute])
+                )
+                for minute, ohlcv in canonical_tail.items()
+            )
+
+        content_diverged = _diverges(runner_tail) or _diverges(indicator_tail)
+        if content_diverged:
+            self._logger.warning(
+                "RUNNER_CANONICAL_OHLCV_DIVERGENCE symbol=%s role=%s action=reseed",
+                normalized, role,
+            )
         indicator_count = indicator_before
         source_ready = source_count >= required_count
         indicator_ready = indicator_count >= required_count
@@ -2417,6 +2465,7 @@ class StrategyRunner:
         )
         can_incremental = bool(
             incremental_rows
+            and not content_diverged
             and len(incremental_rows) <= incremental_limit
             and indicator_count + len(incremental_rows) >= source_count
         )
@@ -2429,6 +2478,7 @@ class StrategyRunner:
                 or not indicator_current
                 or not runner_current
                 or runner_tail_duplicated
+                or content_diverged
             )
         )
         if can_incremental:
