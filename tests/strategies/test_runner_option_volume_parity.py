@@ -105,7 +105,12 @@ def test_reseed_same_completed_canonical_minute_retains_option_volume(
     runner._indicator_engine = IndicatorEngine()
     runner._set_symbol_hydration_state = lambda *_args: None
     runner._seed_pipeline_store = lambda *_args: None
-    runner._seed_candle_engine_from_history = lambda *_args: None
+    # A projection reseed must not feed derived bars back to MDM's canonical
+    # history (or advance its queue-watermark on every parity repair).
+    def reject_reverse_history_import(*_args):
+        raise AssertionError("canonical history must not be reimported")
+
+    runner._seed_candle_engine_from_history = reject_reverse_history_import
     runner._maybe_promote_pending_active_basket = lambda **_kwargs: None
 
     current = datetime(2026, 11, 3, 7, 2, tzinfo=timezone.utc)
