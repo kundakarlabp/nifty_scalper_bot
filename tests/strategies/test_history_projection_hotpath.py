@@ -185,7 +185,9 @@ def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     )
     assert one.success and two.success
     assert reseeds == ["parity"]
-    assert any("projection=indicator" in line and "field=volume" in line for line in warnings)
+    assert any(
+        "projection=indicator" in line and "field=volume" in line for line in warnings
+    )
     assert (
         runner._indicator_engine.get_history(SYMBOL, count=2, field="bars")[0]["volume"]
         == canonical[-2]["volume"]
