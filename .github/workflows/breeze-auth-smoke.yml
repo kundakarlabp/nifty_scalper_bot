@@ -1,4 +1,6 @@
-# Read-only smoke. Never initialize live-bot execution.
+# File purpose: Authenticate a Breeze research session in isolation.
+# Key responsibilities: Validate the configured GitHub Actions secret-backed login.
+# Operational constraints: Read-only only, no orders, data, or live-bot imports.
 name: Breeze research authentication smoke
 
 on:
