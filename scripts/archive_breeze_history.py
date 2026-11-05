@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Archive named Breeze NIFTY options for offline research only.
 
-No broker orders, production adapter, contract inference, fill simulation or
-promotion to canonical recorded-feed replay are permitted here.
+Responsibilities: Authenticate read-only and archive exact-contract minute bars.
+Ownership: Isolated offline research importer, not a production broker adapter.
+Safety: Never place orders, infer contracts, simulate fills or promote to replay.
 """
 
 from __future__ import annotations
