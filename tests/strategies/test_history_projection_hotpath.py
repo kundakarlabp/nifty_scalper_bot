@@ -188,3 +188,29 @@ def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
     assert runner._indicator_engine.get_history(
         SYMBOL, count=2, field="bars"
     )[0]["volume"] == canonical[-2]["volume"]
+
+
+def test_incremental_sync_reseeds_if_existing_volume_differs() -> None:
+    canonical = _bars(51)
+    projected = [dict(row) for row in canonical[:-1]]
+    projected[-2]["volume"] += 45
+    runner = _runner(canonical, projected)
+    reseeds = []
+
+    def reseed(symbol, bars, *, source="", min_bars=1):
+        reseeds.append(source)
+        rows = list(bars)
+        runner._symbol_history[symbol] = rows
+        return runner._indicator_engine.replace_history(
+            symbol, rows, source=source, min_bars=min_bars
+        )
+
+    runner.reseed_history_from_bars = reseed
+    result = runner.sync_history_from_mdm(
+        SYMBOL, required_bars=30, reason="parity_overlap", request_if_short=False
+    )
+    assert result.success
+    assert reseeds == ["parity_overlap"]
+    assert [row["volume"] for row in runner._symbol_history[SYMBOL][-3:]] == [
+        row["volume"] for row in canonical[-3:]
+    ]
