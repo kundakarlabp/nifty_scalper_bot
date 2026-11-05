@@ -3,6 +3,7 @@
 The 2026-11-05 09:39:22 IST live incident sent the exchange SL to the
 reduce-only gate before PositionManager applied the filled 65-unit entry.
 """
+
 from __future__ import annotations
 
 import logging
@@ -76,9 +77,7 @@ def test_confirmed_entry_position_precedes_bracket_and_exchange_sl(
         if quantity == 65:
             # The exact pre-fix failure was exit_without_open_position.
             assert (
-                manager._validate_option_exit_quantity(
-                    SYMBOL, "SELL", 65, "EXIT"
-                )
+                manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
                 is None
             )
 
@@ -115,9 +114,7 @@ def test_position_sync_failure_still_activates_software_bracket_and_fails_closed
     def on_bracket(order, *, source):
         bracket_attempts.append(order.order_id)
         # No position evidence: exchange stop must NOT bypass reduce-only.
-        decision = manager._validate_option_exit_quantity(
-            SYMBOL, "SELL", 65, "EXIT"
-        )
+        decision = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
         assert decision is not None
         assert decision["reason"] == "exit_without_open_position"
 
