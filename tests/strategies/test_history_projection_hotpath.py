@@ -156,3 +156,35 @@ def test_sync_reseeds_duplicate_runner_minutes_from_canonical_history() -> None:
     assert result.runner_bars == result.mdm_bars == 40
     timestamps = [row["timestamp"] for row in runner._symbol_history[SYMBOL]]
     assert len(timestamps) == len(set(timestamps))
+
+
+def test_same_minute_indicator_volume_divergence_requires_reseed() -> None:
+    canonical = _bars(50)
+    runner = _runner(canonical, canonical)
+    altered = [dict(row) for row in canonical]
+    altered[-2]["volume"] += 125
+    runner._indicator_engine.replace_history(
+        SYMBOL, altered, source="test", min_bars=1
+    )
+    reseeds = []
+
+    def reseed(symbol, bars, *, source="", min_bars=1):
+        reseeds.append(source)
+        rows = list(bars)
+        runner._symbol_history[symbol] = rows
+        return runner._indicator_engine.replace_history(
+            symbol, rows, source=source, min_bars=min_bars
+        )
+
+    runner.reseed_history_from_bars = reseed
+    one = runner.sync_history_from_mdm(
+        SYMBOL, required_bars=30, reason="parity", request_if_short=False
+    )
+    two = runner.sync_history_from_mdm(
+        SYMBOL, required_bars=30, reason="parity", request_if_short=False
+    )
+    assert one.success and two.success
+    assert reseeds == ["parity"]
+    assert runner._indicator_engine.get_history(
+        SYMBOL, count=2, field="bars"
+    )[0]["volume"] == canonical[-2]["volume"]
