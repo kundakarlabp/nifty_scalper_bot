@@ -2,7 +2,8 @@
 
 Responsibilities: CandleEngine ingests normalized ticks, merges history/backfill,
 validates OHLC and timestamps, and detects/repairs bar gaps and conflicts.
-Key interfaces: CandleEngine, sanitize, validate_dataframe, import_candle_history.
+Key interfaces: CandleEngine, sanitize, validate_dataframe, import_candle_history,
+get_history_correction_revision (monotonic, only real REST overlap corrections).
 Boundaries: MarketDataManager owns feed subscriptions and historical fetch policy;
 DataHub only reads bars; do not create a parallel trading-bar authority.
 Safety: Never use an incomplete, future-dated or conflicting bar as confirmed.
