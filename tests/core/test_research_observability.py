@@ -200,7 +200,6 @@ def test_rejection_stores_trend_evidence_without_depth_or_secrets(caplog) -> Non
     assert "never_archive_in_journal" not in caplog.text
 
 
-
 def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() -> None:
     next_minute = STAMP + timedelta(minutes=1)
     indicator = {
