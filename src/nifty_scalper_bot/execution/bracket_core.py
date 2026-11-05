@@ -4157,11 +4157,27 @@ class BracketManager:
         ask: float | None = None
         ltp: float | None = None
         fallback = False
+        quote_age_ms: float | None = None
         if protective:
             configured = self._exit_protective_order_mode
             mode = (
                 "MARKET" if configured not in {"AGGRESSIVE_LIMIT", "LIMIT"} else "LIMIT"
             )
+            if mode == "MARKET":
+                # Use only an already-captured, fresh WS book for execution
+                # evidence. Never make a broker/data call in a hard-stop exit.
+                cached = getattr(self, "_exit_quotes", {}).get(symbol)
+                if cached is not None:
+                    cached_bid, cached_ask, captured_at = cached
+                    age_s = time.time() - captured_at
+                    if (
+                        0.0 <= age_s <= self._exit_quote_max_age
+                        and math.isfinite(cached_bid)
+                        and math.isfinite(cached_ask)
+                        and 0.0 < cached_bid <= cached_ask
+                    ):
+                        bid, ask = float(cached_bid), float(cached_ask)
+                        quote_age_ms = round(age_s * 1000.0, 3)
             if configured == "AGGRESSIVE_LIMIT":
                 bid, ask, ltp = self._extract_exit_quote(symbol)
                 tick_size = 0.05
@@ -4278,6 +4294,7 @@ class BracketManager:
                 "bid": bid,
                 "ask": ask,
                 "ltp": ltp,
+                "quote_age_ms": quote_age_ms,
                 "fallback": fallback,
             },
         )
@@ -4330,6 +4347,7 @@ class BracketManager:
             bracket.exit_arrival_price = float(executable or ltp or 0.0) or None
             bracket.exit_quote_bid = float(bid or 0.0) or None
             bracket.exit_quote_ask = float(ask or 0.0) or None
+            bracket.exit_quote_age_ms = pricing_meta.get("quote_age_ms")
             bracket.exit_order_type = str(order_type or "").upper() or None
             bracket.exit_market_fallback = bool(pricing_meta.get("fallback"))
         if pricing_meta.get("quote_missing"):
