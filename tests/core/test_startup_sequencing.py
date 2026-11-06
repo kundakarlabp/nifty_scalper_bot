@@ -4,6 +4,7 @@ token pending vs missing)."""
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from nifty_scalper_bot.core.app import classify_basket_commit, resolve_active_basket_tokens
 
@@ -74,3 +75,21 @@ def test_token_missing_after_im_ready_is_error(caplog) -> None:
         "ACTIVE_BASKET_TOKEN_MISSING" in rec.message and rec.levelno >= logging.ERROR
         for rec in caplog.records
     )
+
+
+def test_message_bus_is_wired_before_websocket_start() -> None:
+    source = (
+        Path(__file__).resolve().parents[2] / "src/nifty_scalper_bot/core/app.py"
+    ).read_text(encoding="utf-8")
+    assert source.index("_wire_and_start_message_bus(ctx)") < source.index(
+        "start_websocket()"
+    )
+
+
+def test_startup_logs_mandatory_token_integrity_failures() -> None:
+    source = (
+        Path(__file__).resolve().parents[2] / "src/nifty_scalper_bot/core/app.py"
+    ).read_text(encoding="utf-8")
+    assert "LIVE_TOKEN_INTEGRITY_BLOCKED" in source
+    assert "mandatory_symbols" in source
+    assert "mandatory_tokens_missing" in source

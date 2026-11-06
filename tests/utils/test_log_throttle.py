@@ -2,6 +2,7 @@ import logging
 import os
 
 from nifty_scalper_bot.utils.log_throttle import LogThrottle, log_throttled
+from nifty_scalper_bot.utils.logging import LogThrottle as CompatibilityLogThrottle
 
 
 def test_same_key_suppresses_within_interval(caplog):
@@ -92,3 +93,9 @@ def test_summary_emits_single_aggregate_line(caplog):
         throttle.maybe_emit_summary(logger, interval_seconds=0.0, top_n=10)
     summaries = [r for r in caplog.records if r.message.startswith("LOG_THROTTLE_SUMMARY")]
     assert len(summaries) == 1
+
+
+def test_compatibility_logging_throttle_suppresses_repeat() -> None:
+    throttle = CompatibilityLogThrottle(cooldown_seconds=1.0)
+    assert throttle.should_log("k") is True
+    assert throttle.should_log("k") is False
