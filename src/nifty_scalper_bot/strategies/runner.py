@@ -11469,7 +11469,13 @@ class StrategyRunner:
                 "intrabar_eval_env_disabled"
             )
             return None
-        if self._data_phase.get(symbol) != "LIVE":
+        # A selected option can have a current-generation WS quote and warm
+        # history before its first *locally completed* live candle. Keep the
+        # candle provenance unchanged, but do not starve same-bar evaluation.
+        if self._data_phase.get(symbol) != "LIVE" and not (
+            self._is_selected_option_symbol(symbol)
+            and self._is_option_symbol_tick_fresh(symbol)
+        ):
             self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
                 "intrabar_eval_non_live_phase"
             )
@@ -15208,7 +15214,12 @@ class StrategyRunner:
             if signal is None and self._required_candles:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
-                if phase != "LIVE":
+                if phase != "LIVE" and not (
+                    # Activation was already proven fresh, hydrated and
+                    # subscribed above; it is a live quote, not polling fallback.
+                    route == EntryEvaluationRoute.OPTION_CANDIDATE
+                    and self._is_selected_option_symbol(symbol)
+                ):
                     fallback_enabled = bool(
                         getattr(self, "_fallback_enabled", False)
                         or getattr(self, "_allow_polling_fallback", True)
