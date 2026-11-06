@@ -279,7 +279,7 @@ def get_entry_eval_lifecycle_snapshot(self: Any) -> dict[str, Any]:
         ),
         "last_selected_candidate_eval_completed_at": selected_eval_at or None,
         # A worker can complete without ever reaching StrategyManager.
-        # Keep these separate to distinguish legitimate no-votes from pre-gate starvation.
+        # Keep these separate to distinguish no-votes from pre-gate starvation.
         "selected_strategy_manager_eval_count": int(
             getattr(self, "_selected_strategy_manager_eval_count", 0) or 0
         ),
