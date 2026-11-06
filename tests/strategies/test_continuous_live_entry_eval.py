@@ -182,8 +182,8 @@ def test_no_signal_produces_no_order(monkeypatch):
 def test_pre_gate_worker_completion_is_not_counted_as_strategy_evaluation(
     monkeypatch,
 ):
-    runner_obj, strategy_manager, _risk, _order, selected_ce = (
-        _selected_option_runner(monkeypatch)
+    runner_obj, strategy_manager, _risk, _order, selected_ce = _selected_option_runner(
+        monkeypatch
     )
     # A worker can return without reaching the strategy manager (e.g. a
     # same-bar/readiness gate). This must never masquerade as a strategy call.
