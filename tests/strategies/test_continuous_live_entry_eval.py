@@ -8,6 +8,7 @@ not another watchdog detector test.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from unittest.mock import Mock
 
 from nifty_scalper_bot.strategies.runner import EntryEvaluationRoute
@@ -150,6 +151,10 @@ def test_no_signal_produces_no_order(monkeypatch):
         _selected_option_runner(monkeypatch)
     )
     strategy_manager.generate_signal = Mock(return_value=None)
+    # A valid completed-bar anchor is required to reach StrategyManager.
+    # The synthetic MDM has no book, so bypass that pre-gate only in this test.
+    runner_obj._last_bar_ts[selected_ce] = datetime.now(timezone.utc)
+    monkeypatch.setenv("REQUIRE_BID_ASK_FOR_OPTION_EVAL", "false")
     loop, thread = _run_loop_in_thread()
     runner_obj._main_loop = loop
     runner_obj._runtime_loop_attached = True
