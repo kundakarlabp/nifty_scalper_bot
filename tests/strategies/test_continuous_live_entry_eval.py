@@ -167,6 +167,47 @@ def test_no_signal_produces_no_order(monkeypatch):
             timeout=3.0,
         )
         assert order_manager.submit.call_count == 0
+        # A completed worker callback alone does not prove strategy execution.
+        assert strategy_manager.generate_signal.call_count >= 1
+        snapshot = runner_obj.get_entry_eval_lifecycle_snapshot()
+        assert (
+            snapshot["selected_strategy_manager_eval_count"]
+            == strategy_manager.generate_signal.call_count
+        )
+        assert snapshot["selected_strategy_manager_eval_age_s"] is not None
+    finally:
+        _stop_loop(loop, thread)
+
+
+def test_pre_gate_worker_completion_is_not_counted_as_strategy_evaluation(
+    monkeypatch,
+):
+    runner_obj, strategy_manager, _risk, _order, selected_ce = (
+        _selected_option_runner(monkeypatch)
+    )
+    # A worker can return without reaching the strategy manager (e.g. a
+    # same-bar/readiness gate). This must never masquerade as a strategy call.
+    runner_obj._on_tick = Mock(return_value=None)
+    loop, thread = _run_loop_in_thread()
+    runner_obj._main_loop = loop
+    runner_obj._runtime_loop_attached = True
+    try:
+        runner_obj._on_tick_safe(
+            {
+                "symbol": selected_ce,
+                "last_price": 112.0,
+                "timestamp": time.time(),
+                "source": "ws",
+            }
+        )
+        assert _wait_until(
+            lambda: int(runner_obj._selected_candidate_eval_completed_count) >= 1,
+            timeout=3.0,
+        )
+        snapshot = runner_obj.get_entry_eval_lifecycle_snapshot()
+        assert snapshot["selected_strategy_manager_eval_count"] == 0
+        assert snapshot["selected_strategy_manager_eval_age_s"] is None
+        strategy_manager.generate_signal.assert_not_called()
     finally:
         _stop_loop(loop, thread)
 
