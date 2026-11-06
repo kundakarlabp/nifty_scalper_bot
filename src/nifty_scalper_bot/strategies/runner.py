@@ -9828,12 +9828,27 @@ class StrategyRunner:
             verbose_all = str(
                 os.getenv("RUNNER_EVAL_LOG_INFO", "false") or "false"
             ).strip().lower() in {"1", "true", "yes", "on"}
+            # Surface one selected-option pre-gate reason per minute in
+            # routine archives, without enabling noisy all-symbol DEBUG logs.
+            selected_gate_info = bool(
+                not allowed
+                and stage == "phase9"
+                and symbol
+                in {
+                    getattr(self, "_active_selected_ce", None),
+                    getattr(self, "_active_selected_pe", None),
+                }
+                and self._should_log_throttled(
+                    f"selected_phase9_gate_info:{symbol}:{reason_str}", 60.0
+                )
+            )
             log_level = (
                 logging.INFO
                 if (
                     verbose_all
                     or reason_str in _info_reasons
                     or stage == "signal_forward"
+                    or selected_gate_info
                 )
                 else logging.DEBUG
             )
@@ -16287,6 +16302,24 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        # Count successful StrategyManager calls separately from
+                        # entry-worker completions (which can return at a pre-gate).
+                        if (
+                            route == EntryEvaluationRoute.OPTION_CANDIDATE
+                            and self._is_selected_option_symbol(symbol)
+                        ):
+                            self._selected_strategy_manager_eval_count = (
+                                int(
+                                    getattr(
+                                        self, "_selected_strategy_manager_eval_count", 0
+                                    )
+                                    or 0
+                                )
+                                + 1
+                            )
+                            self._last_selected_strategy_manager_eval_ts = (
+                                time.monotonic()
+                            )
                         if (
                             signal is not None
                             and route == EntryEvaluationRoute.UNDERLYING
