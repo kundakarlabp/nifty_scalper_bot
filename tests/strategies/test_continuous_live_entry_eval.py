@@ -116,14 +116,45 @@ def test_hydrated_selected_option_with_fresh_ws_quote_evaluates_without_live_bar
                 timeout=3.0,
             )
         assert strategy_manager.generate_signal.call_count == 2
-        assert runner_obj.get_entry_eval_lifecycle_snapshot()[
-            "selected_strategy_manager_eval_count"
-        ] == 2
+        assert (
+            runner_obj.get_entry_eval_lifecycle_snapshot()[
+                "selected_strategy_manager_eval_count"
+            ]
+            == 2
+        )
         assert runner_obj._data_phase[selected_ce] == "HYDRATION"
         assert selected_ce not in runner_obj._live_bar_seen
         assert order_manager.submit.call_count == 0
     finally:
         _stop_loop(loop, thread)
+
+
+def test_hydration_intrabar_never_promotes_stale_or_nonselected_options(
+    monkeypatch,
+):
+    """Only fresh selected contracts are eligible for the hydration exception."""
+    runner_obj, _strategy, _risk, _order, selected_ce = _selected_option_runner(
+        monkeypatch
+    )
+    nonselected_ce = "NFO:NIFTY26JUN24100CE"
+    for symbol, is_fresh in ((selected_ce, False), (nonselected_ce, True)):
+        runner_obj._data_phase[symbol] = "HYDRATION"
+        runner_obj._is_option_symbol_tick_fresh = (
+            lambda _symbol, fresh=is_fresh: fresh
+        )
+        reason = StrategyRunner._same_bar_eval_reason(
+            runner_obj,
+            symbol=symbol,
+            price=112.0,
+            tick={"bid": 111.0, "ask": 113.0},
+            candle_count=100,
+            now_ts=time.time(),
+        )
+        assert reason is None
+        assert (
+            runner_obj._last_same_bar_eval_block_reason_by_symbol[symbol]
+            == "intrabar_eval_non_live_phase"
+        )
 
 
 def test_context_only_eval_does_not_count_as_selected_candidate_eval(monkeypatch):
