@@ -139,9 +139,7 @@ def test_hydration_intrabar_never_promotes_stale_or_nonselected_options(
     nonselected_ce = "NFO:NIFTY26JUN24100CE"
     for symbol, is_fresh in ((selected_ce, False), (nonselected_ce, True)):
         runner_obj._data_phase[symbol] = "HYDRATION"
-        runner_obj._is_option_symbol_tick_fresh = (
-            lambda _symbol, fresh=is_fresh: fresh
-        )
+        runner_obj._is_option_symbol_tick_fresh = lambda _symbol, fresh=is_fresh: fresh
         reason = StrategyRunner._same_bar_eval_reason(
             runner_obj,
             symbol=symbol,
