@@ -219,6 +219,9 @@ def get_entry_eval_lifecycle_snapshot(self: Any) -> dict[str, Any]:
     selected_eval_at = float(
         getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
     )
+    selected_strategy_at = float(
+        getattr(self, "_last_selected_strategy_manager_eval_ts", 0.0) or 0.0
+    )
     last_eval_at = float(getattr(self, "_last_entry_eval_completed_at", 0.0) or 0.0)
     stall_s = float(getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0)
     evaluation_alive = bool(liveness.get("evaluation_alive"))
@@ -275,6 +278,16 @@ def get_entry_eval_lifecycle_snapshot(self: Any) -> dict[str, Any]:
             getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
         ),
         "last_selected_candidate_eval_completed_at": selected_eval_at or None,
+        # A worker can complete without ever reaching StrategyManager.
+        # Keep these separate to distinguish no-votes from pre-gate starvation.
+        "selected_strategy_manager_eval_count": int(
+            getattr(self, "_selected_strategy_manager_eval_count", 0) or 0
+        ),
+        "selected_strategy_manager_eval_age_s": (
+            round(max(0.0, now - selected_strategy_at), 1)
+            if selected_strategy_at > 0.0
+            else None
+        ),
         "last_selected_option_tick_age_s": (
             round(max(0.0, now - selected_tick_at), 1)
             if selected_tick_at > 0.0
