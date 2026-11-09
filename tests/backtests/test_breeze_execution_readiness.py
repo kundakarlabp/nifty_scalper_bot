@@ -1,4 +1,5 @@
 """Aggregate historical audit output never upgrades OHLCV to execution evidence."""
+
 import pytest
 
 from scripts.audit_breeze_execution_readiness import audit_reports
@@ -47,5 +48,7 @@ def test_integrity_mismatch_blocks_readiness(broken):
 
 def test_backfill_mismatch_rejected():
     with pytest.raises(ValueError,match="targeted_repair_integrity_unverified"):
-        audit_reports(coverage(),validation(),{"original_windows":24,"repair_requested":158,
+        audit_reports(
+            coverage(), validation(),
+            {"original_windows": 24, "repair_requested": 158,
                                                  "invalid_candle_hashes":0})
