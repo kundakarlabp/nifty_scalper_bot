@@ -145,3 +145,10 @@ def test_evidence_gate_never_auto_promotes():
                           five_level_quotes=True,actual_broker_fills=True,
                           exit_ledger_verified=True,chronological_oos=True)
     assert b["execution_grade_ready"] and not b["automatic_live_promotion"]
+
+
+def test_long_option_exit_requires_position_ledger_not_short_margin():
+    exit_intent = intent(side="SELL", position_effect="CLOSE")
+    assert run(order=exit_intent).reason == "closing_position_ledger_unverified"
+    res = run(order=replace(exit_intent, closing_position_verified=True))
+    assert res.status == "MODELED_DEPTH" and res.price == pytest.approx(100.0)
