@@ -6,7 +6,8 @@ Runtime role:
 - Owns the startup sequence: broker auth, instrument load, subsystem bring-up,
   the data-hydration/readiness pipeline, and the live-arming gate.
 - Computes the canonical readiness/arming decision (history + quote freshness)
-  and pushes it to the runner.
+  and pushes it to the runner, synchronizing DataHub and regime indicator
+  readiness as genuine selected-option history becomes sufficient or regresses.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
