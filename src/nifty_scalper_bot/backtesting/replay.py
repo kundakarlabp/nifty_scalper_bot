@@ -1,9 +1,11 @@
-"""Minute-bar replay harness for exercising the live trading stack.
+"""Minute-bar historical replay and opt-in strict execution evidence gate.
 
-Responsibilities: Feed causal, availability-aligned market observations and
-supply historical time to PaperFillEngine even without an injected clock.
-Boundaries: Reuses production tick ingress and paper execution; no broker IO.
-Safety: Never dispatch a completed bar before its availability timestamp.
+Responsibilities: Feed causal, availability-aligned market observations, supply
+historical time to PaperFillEngine, and expose ReplayResult evidence labels.
+Ownership: Canonical offline backtesting/replay, not production broker IO.
+Safety: Never dispatch before a completed bar becomes available. Setting
+strict_execution_evidence=True on ReplayHarness makes all OHLCV-derived quotes
+untradable, disallowing paper fills fabricated from historical last prices.
 """
 
 from __future__ import annotations
