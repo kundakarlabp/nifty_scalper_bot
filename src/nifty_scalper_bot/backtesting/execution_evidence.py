@@ -49,6 +49,8 @@ class OrderIntent:
     quantity: int
     latency_ms: int
     short_margin_verified: bool = False
+    position_effect: Literal["OPEN", "CLOSE"] = "OPEN"
+    closing_position_verified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +152,7 @@ def replay_market_order(
     if (
         not _aware(intent.decision_at) or not intent.symbol or not intent.token
         or intent.side not in ("BUY", "SELL")
+        or intent.position_effect not in ("OPEN", "CLOSE")
         or type(intent.quantity) is not int or intent.quantity <= 0
         or type(intent.lot_size) is not int or intent.lot_size <= 0
         or intent.quantity % intent.lot_size != 0
@@ -167,7 +170,12 @@ def replay_market_order(
         or limit_price is not None and not _positive(limit_price)
     ):
         return reject("invalid_order_or_contract_identity")
-    if intent.side == "SELL" and not intent.short_margin_verified:
+    if intent.position_effect == "CLOSE" and not intent.closing_position_verified:
+        return reject("closing_position_ledger_unverified")
+    if (
+        intent.side == "SELL" and intent.position_effect == "OPEN"
+        and not intent.short_margin_verified
+    ):
         return reject("short_margin_evidence_missing")
     if not books:
         return reject("no_historical_quote_depth")
