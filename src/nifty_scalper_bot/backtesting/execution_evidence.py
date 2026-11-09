@@ -6,12 +6,13 @@ Ownership: Canonical offline backtesting evidence, not runtime execution.
 Safety: Never place broker orders, infer OHLCV bid/ask, or grant LIVE promotion;
 depth-modeled fills are never confirmed exchange/broker fills.
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Literal, Sequence
 
 Side = Literal["BUY", "SELL"]
@@ -71,7 +72,11 @@ def _positive(value: object) -> bool:
 
 
 def _aware(value: datetime) -> bool:
-    return isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
 
 
 def _valid_book(book: ObservedBook) -> bool:
@@ -85,7 +90,12 @@ def _valid_book(book: ObservedBook) -> bool:
     ):
         return False
     for levels in (book.bid, book.ask):
-        if any(not _positive(x.price) or type(x.quantity) is not int or x.quantity <= 0 for x in levels):
+        if any(
+            not _positive(x.price)
+            or type(x.quantity) is not int
+            or x.quantity <= 0
+            for x in levels
+        ):
             return False
     return (
         all(book.bid[i].price > book.bid[i + 1].price for i in range(4))
@@ -114,7 +124,8 @@ def historical_option_fee(
     ):
         raise ValueError("historical_fee_inputs_unverified")
     turnover = price * quantity
-    stt = turnover * (0.001 if day < date(2026, 4, 1) else 0.0015) if side == "SELL" else 0.0
+    stt_rate = 0.001 if day < date(2026, 4, 1) else 0.0015
+    stt = turnover * stt_rate if side == "SELL" else 0.0
     exchange = turnover * exchange_rate
     sebi = turnover * 0.000001
     gst = (brokerage + exchange + sebi) * 0.18
@@ -147,7 +158,9 @@ def replay_market_order(
     claim atomic multi-leg execution, or synthesize option strikes.
     """
     def reject(reason: str) -> ModeledExecution:
-        return ModeledExecution("UNRESOLVED", reason, remaining_quantity=max(intent.quantity, 0))
+        return ModeledExecution(
+            "UNRESOLVED", reason, remaining_quantity=max(intent.quantity, 0)
+        )
 
     if (
         not _aware(intent.decision_at) or not intent.symbol or not intent.token
@@ -237,7 +250,11 @@ def replay_market_order(
             return reject("insufficient_cash_including_fees")
     return ModeledExecution(
         status="MODELED_DEPTH" if outstanding == 0 else "PARTIAL",
-        reason="observed_depth_model_only" if outstanding == 0 else "insufficient_observed_depth",
+        reason=(
+            "observed_depth_model_only"
+            if outstanding == 0
+            else "insufficient_observed_depth"
+        ),
         filled_quantity=filled,
         remaining_quantity=outstanding,
         price=round(average, 8),
@@ -282,9 +299,15 @@ def classify_barrier(
     )
 
 
-def execution_readiness(*, point_in_time_contracts: bool, verified_clocks: bool,
-                        five_level_quotes: bool, actual_broker_fills: bool,
-                        exit_ledger_verified: bool, chronological_oos: bool) -> dict[str, object]:
+def execution_readiness(
+    *,
+    point_in_time_contracts: bool,
+    verified_clocks: bool,
+    five_level_quotes: bool,
+    actual_broker_fills: bool,
+    exit_ledger_verified: bool,
+    chronological_oos: bool,
+) -> dict[str, object]:
     missing = [
         key for key, ok in {
             "point_in_time_contract_identity": point_in_time_contracts,
