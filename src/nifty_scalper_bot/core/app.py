@@ -4392,12 +4392,17 @@ def _sync_indicator_readiness(ctx: BotContext, *, data_hard_ready: bool) -> bool
     ready = bool(data_hard_ready and _compute_indicator_readiness(ctx))
     hub = getattr(ctx, "data_hub", None)
     previous = getattr(hub, "indicators_ready", None)
-    if hub is not None:
+    hub_writable = hub is not None and (
+        hasattr(hub, "indicators_ready") or hasattr(hub, "__dict__")
+    )
+    if hub_writable:
         hub.indicators_ready = ready
     regime = getattr(ctx, "market_regime_manager", None)
-    if regime is not None:
+    if regime is not None and (
+        hasattr(regime, "indicators_ready") or hasattr(regime, "__dict__")
+    ):
         regime.indicators_ready = ready
-    if hub is not None and previous is not ready:
+    if hub_writable and previous is not ready:
         LOGGER.info(
             "INDICATOR_READINESS_SYNC ready=%s source=runtime_recompute",
             ready,
