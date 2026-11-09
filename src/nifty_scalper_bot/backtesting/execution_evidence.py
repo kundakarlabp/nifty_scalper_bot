@@ -1,8 +1,10 @@
-"""Fail-closed, research-only NIFTY option execution against OBSERVED full-depth quotes.
+"""Fail-closed, read-only NIFTY option execution model.
 
-This module does not connect to brokers or production orders. A depth-modelled
-fill is never a confirmed exchange or broker fill. OHLCV cannot be substituted
-for bid/ask, historical instrument identities, quote timestamps, or market depth.
+Responsibilities: Model marketable orders only from observed five-level quotes,
+historical fee inputs, causal latency, and exact point-in-time contract identity.
+Ownership: Canonical offline backtesting evidence, not runtime execution.
+Safety: Never place broker orders, infer OHLCV bid/ask, or grant LIVE promotion;
+depth-modeled fills are never confirmed exchange/broker fills.
 """
 from __future__ import annotations
 
