@@ -9,7 +9,7 @@ Safety: Marketable model fills never improve on the observed best bid/ask.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import List, Literal
 
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
