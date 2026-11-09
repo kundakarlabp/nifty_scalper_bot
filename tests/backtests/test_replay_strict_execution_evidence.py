@@ -1,4 +1,5 @@
 """Reject execution-grade claims from OHLCV-only replay at the ingress boundary."""
+
 from datetime import datetime, timezone
 
 from nifty_scalper_bot.backtesting.replay import ReplayHarness, ReplayResult

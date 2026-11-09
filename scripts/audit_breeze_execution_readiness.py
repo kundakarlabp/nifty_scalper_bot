@@ -61,10 +61,12 @@ def audit_reports(
             coverage.get("all_failed_contracts", [])
         ),
         "empty_contract_days": len(coverage.get("all_empty_contracts", [])),
-        "missing_minute_contract_days_before_special_session_correction":
-            len(coverage.get("all_missing_minute_contracts", [])),
-        "source_unavailable_dates_pre_exchange_calendar_reconciliation":
-            len(coverage.get("all_source_unavailable", [])),
+        "missing_minute_contract_days_before_special_session_correction": len(
+            coverage.get("all_missing_minute_contracts", [])
+        ),
+        "source_unavailable_dates_pre_exchange_calendar_reconciliation": len(
+            coverage.get("all_source_unavailable", [])
+        ),
         "archive_integrity": "SHA256_AND_OHLC_STRUCTURE_PASSED",
         "timestamps_broker_convention_independently_verified": False,
         "historical_strike_listing_and_lot_size_verified": False,
@@ -98,16 +100,23 @@ def main() -> None:
     validation = json.loads(args.validation.read_text())
     repair = (
         json.loads(args.repair_comparison.read_text())
-        if args.repair_comparison is not None else None
+        if args.repair_comparison is not None
+        else None
     )
     report = audit_reports(coverage, validation, repair)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({
-        "observed_bars": report["observed_bars"],
-        "execution_grade_ready": report["evidence_gate"]["execution_grade_ready"],
-        "promotion_eligible": False,
-    }))
+    print(
+        json.dumps(
+            {
+                "observed_bars": report["observed_bars"],
+                "execution_grade_ready": report["evidence_gate"][
+                    "execution_grade_ready"
+                ],
+                "promotion_eligible": False,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -81,19 +81,22 @@ def _aware(value: datetime) -> bool:
 
 def _valid_book(book: ObservedBook) -> bool:
     if (
-        not book.symbol or not book.token or not _aware(book.observed_at)
-        or not book.full_depth_captured or not book.historical_identity_verified
+        not book.symbol
+        or not book.token
+        or not _aware(book.observed_at)
+        or not book.full_depth_captured
+        or not book.historical_identity_verified
         or not book.clock_convention_verified
         or book.source not in {"ARCHIVED_FULL", "BROKER_FULL"}
-        or type(book.lot_size) is not int or book.lot_size <= 0
-        or len(book.bid) != 5 or len(book.ask) != 5
+        or type(book.lot_size) is not int
+        or book.lot_size <= 0
+        or len(book.bid) != 5
+        or len(book.ask) != 5
     ):
         return False
     for levels in (book.bid, book.ask):
         if any(
-            not _positive(x.price)
-            or type(x.quantity) is not int
-            or x.quantity <= 0
+            not _positive(x.price) or type(x.quantity) is not int or x.quantity <= 0
             for x in levels
         ):
             return False
@@ -105,8 +108,14 @@ def _valid_book(book: ObservedBook) -> bool:
 
 
 def historical_option_fee(
-    *, day: date, side: Side, price: float, quantity: int,
-    exchange_rate: float, broker: str = "ZERODHA", brokerage: float = 20.0,
+    *,
+    day: date,
+    side: Side,
+    price: float,
+    quantity: int,
+    exchange_rate: float,
+    broker: str = "ZERODHA",
+    brokerage: float = 20.0,
 ) -> float:
     """Fee for one NSE option order, not exercise or final contract-note cost.
 
@@ -116,11 +125,16 @@ def historical_option_fee(
     No unsupported assumption about when the exchange fee changed.
     """
     if (
-        broker != "ZERODHA" or day < date(2024, 11, 6)
+        broker != "ZERODHA"
+        or day < date(2024, 11, 6)
         or side not in ("BUY", "SELL")
-        or not _positive(price) or type(quantity) is not int or quantity <= 0
-        or not _positive(brokerage) or type(exchange_rate) not in (int, float)
-        or not math.isfinite(exchange_rate) or not 0 < exchange_rate < 0.01
+        or not _positive(price)
+        or type(quantity) is not int
+        or quantity <= 0
+        or not _positive(brokerage)
+        or type(exchange_rate) not in (int, float)
+        or not math.isfinite(exchange_rate)
+        or not 0 < exchange_rate < 0.01
     ):
         raise ValueError("historical_fee_inputs_unverified")
     turnover = price * quantity
@@ -157,36 +171,48 @@ def replay_market_order(
     Does not extrapolate beyond level five, infer queue priority, fill from LTP,
     claim atomic multi-leg execution, or synthesize option strikes.
     """
+
     def reject(reason: str) -> ModeledExecution:
         return ModeledExecution(
             "UNRESOLVED", reason, remaining_quantity=max(intent.quantity, 0)
         )
 
     if (
-        not _aware(intent.decision_at) or not intent.symbol or not intent.token
+        not _aware(intent.decision_at)
+        or not intent.symbol
+        or not intent.token
         or intent.side not in ("BUY", "SELL")
         or intent.position_effect not in ("OPEN", "CLOSE")
-        or type(intent.quantity) is not int or intent.quantity <= 0
-        or type(intent.lot_size) is not int or intent.lot_size <= 0
+        or type(intent.quantity) is not int
+        or intent.quantity <= 0
+        or type(intent.lot_size) is not int
+        or intent.lot_size <= 0
         or intent.quantity % intent.lot_size != 0
-        or type(intent.latency_ms) is not int or intent.latency_ms < 0
-        or type(max_quote_delay_ms) is not int or max_quote_delay_ms < 0
+        or type(intent.latency_ms) is not int
+        or intent.latency_ms < 0
+        or type(max_quote_delay_ms) is not int
+        or max_quote_delay_ms < 0
         or not _positive(tick_size)
         or not isinstance(intent.expiry, date)
         or intent.expiry < intent.decision_at.date()
         or type(adverse_slippage_bps) not in (int, float)
-        or not math.isfinite(adverse_slippage_bps) or adverse_slippage_bps < 0
-        or cash_available is not None and (
+        or not math.isfinite(adverse_slippage_bps)
+        or adverse_slippage_bps < 0
+        or cash_available is not None
+        and (
             type(cash_available) not in (int, float)
-            or not math.isfinite(cash_available) or cash_available < 0
+            or not math.isfinite(cash_available)
+            or cash_available < 0
         )
-        or limit_price is not None and not _positive(limit_price)
+        or limit_price is not None
+        and not _positive(limit_price)
     ):
         return reject("invalid_order_or_contract_identity")
     if intent.position_effect == "CLOSE" and not intent.closing_position_verified:
         return reject("closing_position_ledger_unverified")
     if (
-        intent.side == "SELL" and intent.position_effect == "OPEN"
+        intent.side == "SELL"
+        and intent.position_effect == "OPEN"
         and not intent.short_margin_verified
     ):
         return reject("short_margin_evidence_missing")
@@ -200,8 +226,10 @@ def replay_market_order(
         if not _valid_book(book):
             return reject("invalid_or_unverified_depth")
         if (
-            book.symbol != intent.symbol or book.token != intent.token
-            or book.expiry != intent.expiry or book.lot_size != intent.lot_size
+            book.symbol != intent.symbol
+            or book.token != intent.token
+            or book.expiry != intent.expiry
+            or book.lot_size != intent.lot_size
         ):
             return reject("point_in_time_contract_mismatch")
         if book.observed_at in seen:
@@ -221,14 +249,17 @@ def replay_market_order(
             break
         adjusted = level.price * (
             1 + adverse_slippage_bps / 10000.0
-            if intent.side == "BUY" else 1 - adverse_slippage_bps / 10000.0
+            if intent.side == "BUY"
+            else 1 - adverse_slippage_bps / 10000.0
         )
         if adjusted <= 0:
             break
         price = _tick_outward(adjusted, intent.side, tick_size)
         if limit_price is not None and (
-            intent.side == "BUY" and price > limit_price
-            or intent.side == "SELL" and price < limit_price
+            intent.side == "BUY"
+            and price > limit_price
+            or intent.side == "SELL"
+            and price < limit_price
         ):
             break
         piece = min(outstanding, level.quantity)
@@ -240,8 +271,11 @@ def replay_market_order(
     average = sum(n * p for n, p in pieces) / filled
     try:
         fee = historical_option_fee(
-            day=intent.decision_at.date(), side=intent.side,
-            price=average, quantity=filled, exchange_rate=historical_exchange_rate
+            day=intent.decision_at.date(),
+            side=intent.side,
+            price=average,
+            quantity=filled,
+            exchange_rate=historical_exchange_rate,
         )
     except ValueError:
         return reject("historical_exchange_fee_unverified")
@@ -264,13 +298,21 @@ def replay_market_order(
 
 
 def classify_barrier(
-    *, opening: float, high: float, low: float, closing: float,
-    stop: float, target: float, direction: Literal["LONG", "SHORT"] = "LONG",
+    *,
+    opening: float,
+    high: float,
+    low: float,
+    closing: float,
+    stop: float,
+    target: float,
+    direction: Literal["LONG", "SHORT"] = "LONG",
 ) -> str:
     """OHLC cannot establish target-vs-stop intraminute ordering or exit fills."""
     if (
         any(not _positive(v) for v in (opening, high, low, closing, stop, target))
-        or low > min(opening, closing) or high < max(opening, closing) or low > high
+        or low > min(opening, closing)
+        or high < max(opening, closing)
+        or low > high
     ):
         raise ValueError("invalid_bar")
     if direction == "LONG":
@@ -292,10 +334,13 @@ def classify_barrier(
     else:
         raise ValueError("invalid_direction")
     return (
-        "AMBIGUOUS_UNRESOLVED" if st and tg
-        else "STOP_TOUCHED_UNPRICED" if st
-        else "TARGET_TOUCHED_UNPRICED" if tg
-        else "NO_TOUCH"
+        "AMBIGUOUS_UNRESOLVED"
+        if st and tg
+        else (
+            "STOP_TOUCHED_UNPRICED"
+            if st
+            else "TARGET_TOUCHED_UNPRICED" if tg else "NO_TOUCH"
+        )
     )
 
 
@@ -309,14 +354,20 @@ def execution_readiness(
     chronological_oos: bool,
 ) -> dict[str, object]:
     missing = [
-        key for key, ok in {
+        key
+        for key, ok in {
             "point_in_time_contract_identity": point_in_time_contracts,
             "verified_timestamp_and_latency": verified_clocks,
             "observed_five_level_quotes": five_level_quotes,
             "actual_order_ack_and_partial_fills": actual_broker_fills,
             "completed_exit_cost_ledger": exit_ledger_verified,
             "chronological_out_of_sample": chronological_oos,
-        }.items() if not ok
+        }.items()
+        if not ok
     ]
-    return {"execution_grade_ready": not missing, "missing_evidence": missing,
-            "ohlcv_may_substitute_for_quotes": False, "automatic_live_promotion": False}
+    return {
+        "execution_grade_ready": not missing,
+        "missing_evidence": missing,
+        "ohlcv_may_substitute_for_quotes": False,
+        "automatic_live_promotion": False,
+    }

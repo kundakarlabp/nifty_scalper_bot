@@ -56,7 +56,8 @@ def aggregate_breeze_session(
     A missing source minute causes the WHOLE 5m/15m bar to be unavailable.
     """
     if (
-        type(interval_minutes) is not int or interval_minutes not in {1, 5, 15}
+        type(interval_minutes) is not int
+        or interval_minutes not in {1, 5, 15}
         or session_start >= session_end
         or not isinstance(day, date)
     ):
@@ -82,22 +83,25 @@ def aggregate_breeze_session(
         except (ValueError, TypeError, OverflowError) as exc:
             raise ValueError("invalid_candle_data") from exc
         if (
-            stamp.tzinfo is None or stamp.utcoffset() != timedelta(hours=5, minutes=30)
-            or stamp.second or stamp.microsecond or not first <= stamp < stop
+            stamp.tzinfo is None
+            or stamp.utcoffset() != timedelta(hours=5, minutes=30)
+            or stamp.second
+            or stamp.microsecond
+            or not first <= stamp < stop
             or stamp in observed
             or not all(math.isfinite(x) and x > 0 for x in prices)
             or prices[1] < max(prices[0], prices[3])
             or prices[2] > min(prices[0], prices[3])
-            or not math.isfinite(vol) or vol < 0 or not vol.is_integer()
+            or not math.isfinite(vol)
+            or vol < 0
+            or not vol.is_integer()
             or (
                 oi is not None
                 and (not math.isfinite(oi) or oi < 0 or not oi.is_integer())
             )
         ):
             raise ValueError("invalid_or_conflicting_candle")
-        observed[stamp] = (
-            *prices, int(vol), None if oi is None else int(oi)
-        )
+        observed[stamp] = (*prices, int(vol), None if oi is None else int(oi))
     out: list[ResearchBar] = []
     missing: list[str] = []
     window = timedelta(minutes=interval_minutes)
@@ -109,16 +113,18 @@ def aggregate_breeze_session(
             missing.append(cursor.isoformat())
         else:
             complete = [row for row in rows if row is not None]
-            out.append(ResearchBar(
-                start=cursor,
-                available_at=cursor + window,
-                open=complete[0][0],
-                high=max(row[1] for row in complete),
-                low=min(row[2] for row in complete),
-                close=complete[-1][3],
-                volume=sum(row[4] for row in complete),
-                open_interest=complete[-1][5],
-                source_minutes=interval_minutes,
-            ))
+            out.append(
+                ResearchBar(
+                    start=cursor,
+                    available_at=cursor + window,
+                    open=complete[0][0],
+                    high=max(row[1] for row in complete),
+                    low=min(row[2] for row in complete),
+                    close=complete[-1][3],
+                    volume=sum(row[4] for row in complete),
+                    open_interest=complete[-1][5],
+                    source_minutes=interval_minutes,
+                )
+            )
         cursor += window
     return ResampleAudit(tuple(out), tuple(missing))
