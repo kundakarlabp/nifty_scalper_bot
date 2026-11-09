@@ -4386,6 +4386,28 @@ def _compute_indicator_readiness(ctx: BotContext) -> bool:
     return False
 
 
+def _sync_runtime_indicator_readiness(
+    ctx: BotContext, *, data_hard_ready: bool
+) -> bool:
+    """Refresh the startup-only hub flag from current canonical runtime readiness."""
+    ready = bool(data_hard_ready and _compute_indicator_readiness(ctx))
+    hub = getattr(ctx, "data_hub", None)
+    previous = getattr(hub, "indicators_ready", None)
+    if hub is not None:
+        hub.indicators_ready = ready
+    regime = getattr(ctx, "market_regime_manager", None)
+    if regime is not None:
+        regime.indicators_ready = ready
+    if hub is not None and previous is not ready:
+        LOGGER.info(
+            "INDICATOR_READINESS_SYNC ready=%s source=runtime_recompute",
+            ready,
+            extra={"event": "INDICATOR_READINESS_SYNC", "ready": ready,
+                   "source": "runtime_recompute"},
+        )
+    return ready
+
+
 def _build_canonical_active_basket(
     *,
     instrument_manager: InstrumentManager | None,
@@ -10256,6 +10278,9 @@ async def _recompute_and_push_runtime_readiness(
     )
     ctx.data_hard_ready = data_hard_ready
     ctx.evaluation_ready = evaluation_ready
+    # Startup may set DataHub.indicators_ready=False before selected options
+    # collect enough bars; refresh it whenever live readiness is recomputed.
+    _sync_runtime_indicator_readiness(ctx, data_hard_ready=data_hard_ready)
     ctx.live_orders_armed = live_orders_armed
     ctx.trading_ready = evaluation_ready
     ctx.live_block_reason = block_reason
