@@ -1,4 +1,10 @@
-"""Microstructure-aware execution simulation backed by canonical live costs."""
+"""Microstructure-aware paper execution simulation with executable-book bounds.
+
+Responsibilities: Model book-size-constrained fills, adverse bid/ask tick rounding
+and canonical option order fees for offline/PAPER executions.
+Ownership: Paper/quote simulation only; no live broker order placement.
+Safety: Marketable model fills never improve on the observed best bid/ask.
+"""
 
 from __future__ import annotations
 
