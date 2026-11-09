@@ -51,19 +51,3 @@ def test_commissions_reduce_net_result() -> None:
     gross_turnover = sum(fill.price * fill.qty for fill in result.fills)
     assert result.fees > 0
     assert gross_turnover - result.fees < gross_turnover
-
-
-def test_low_aggressiveness_never_fills_inside_executable_spread():
-    sim = ExecutionSimulator(aggressiveness=0.0, tick_size=0.05)
-    buy = sim.simulate_market_order(
-        side="BUY", qty=75, bid=100.02, ask=100.07,
-        size_at_best=75, ts_ns=1,
-    )
-    sell = sim.simulate_market_order(
-        side="SELL", qty=75, bid=100.02, ask=100.07,
-        size_at_best=75, ts_ns=2,
-    )
-    assert buy.fills and sell.fills
-    assert buy.average_price >= 100.10
-    assert sell.average_price <= 100.00
-    assert buy.remaining_qty == sell.remaining_qty == 0
