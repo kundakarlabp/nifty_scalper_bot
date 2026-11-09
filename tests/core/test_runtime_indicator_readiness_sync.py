@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from nifty_scalper_bot.core import app
+from nifty_scalper_bot.core.app import _sync_runtime_indicator_readiness
 
 
 SELECTED_CE = "NFO:NIFTY26NOV24900CE"
@@ -34,32 +34,32 @@ def _ctx(bars: list[int]) -> SimpleNamespace:
 def test_runtime_indicator_flag_rearms_when_live_history_becomes_ready() -> None:
     bars = [25]
     ctx = _ctx(bars)
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
     assert ctx.data_hub.indicators_ready is False
 
     # After five genuine closed candles, the authoritative per-symbol
     # indicator count crosses the existing 30-bar threshold.
     bars[0] = 30
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
     assert ctx.data_hub.indicators_ready is True
     assert ctx.market_regime_manager.indicators_ready is True
     # Updating the indicator flag never itself arms execution.
     assert ctx.live_orders_armed is False
 
 
-def test_runtime_indicator_flag_fails_closed_on_history_or_readiness_regression() -> None:
+def test_runtime_indicator_flag_fails_closed_on_regression() -> None:
     bars = [30]
     ctx = _ctx(bars)
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
 
     # Good local indicators cannot override a failed canonical data-hard gate.
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=False) is False
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=False) is False
     assert ctx.data_hub.indicators_ready is False
     assert ctx.market_regime_manager.indicators_ready is False
 
     # And loss of actual indicator history must revoke readiness.
     bars[0] = 29
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
 
 
 def test_runtime_indicator_flag_requires_runner_and_indicator_engine() -> None:
@@ -68,5 +68,5 @@ def test_runtime_indicator_flag_requires_runner_and_indicator_engine() -> None:
         indicator_engine=None,
         data_hub=SimpleNamespace(indicators_ready=True),
     )
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert _sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
     assert ctx.data_hub.indicators_ready is False
