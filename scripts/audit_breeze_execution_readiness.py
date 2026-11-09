@@ -6,6 +6,7 @@ Ownership: Offline research reporting only; never imports raw broker market data
 Safety: Missing executable quotes/depth/fill proof always blocks execution-grade
 backtest certification and live promotion.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -56,7 +57,9 @@ def audit_reports(
         "observed_futures_bars": int(coverage.get("total_futures_bars", 0)),
         "observed_selected_option_bars": int(coverage.get("total_option_bars", 0)),
         "contract_days": int(coverage.get("total_contract_days", 0)),
-        "provider_or_validation_failed_contracts": len(coverage.get("all_failed_contracts", [])),
+        "provider_or_validation_failed_contracts": len(
+            coverage.get("all_failed_contracts", [])
+        ),
         "empty_contract_days": len(coverage.get("all_empty_contracts", [])),
         "missing_minute_contract_days_before_special_session_correction":
             len(coverage.get("all_missing_minute_contracts", [])),
@@ -72,7 +75,9 @@ def audit_reports(
             "identical_series": int(
                 (repair_comparison or {}).get("hash_states", {}).get("identical", 0)
             ),
-            "net_additional_candles": int((repair_comparison or {}).get("net_bar_delta", 0)),
+            "net_additional_candles": int(
+                (repair_comparison or {}).get("net_bar_delta", 0)
+            ),
             "failed_requests": int((repair_comparison or {}).get("retry_failed", 0)),
         },
         "evidence_gate": evidence,
