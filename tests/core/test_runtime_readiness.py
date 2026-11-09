@@ -41,3 +41,51 @@ async def test_fresh_basket_selection_overrides_stale_ctx_selected_symbols():
     ctx=SimpleNamespace(settings=SimpleNamespace(execution_mode='LIVE'),market_data_manager=mdm,strategy_runner=r,broker_client=object(),order_manager=object(),selected_ce='OLDCE',selected_pe='OLDPE',active_trading_universe={'spot_symbol':'NSE:NIFTY','selected_ce':'NEWCE','selected_pe':'NEWPE','option_symbols':['NEWCE','NEWPE']})
     await app._recompute_and_push_runtime_readiness(ctx, reason='t')
     assert ctx.selected_ce=='NEWCE' and ctx.selected_pe=='NEWPE'
+
+
+def _indicator_sync_ctx(bars: list[int]) -> SimpleNamespace:
+    symbol = "NFO:NIFTY26NOV24900CE"
+    return SimpleNamespace(
+        strategy_runner=SimpleNamespace(
+            _required_candles=30,
+            _active_symbols={symbol},
+        ),
+        indicator_engine=SimpleNamespace(
+            has_min_bars=lambda sym, required: sym == symbol and bars[0] >= required,
+            get_history=lambda sym: [object()] * bars[0] if sym == symbol else [],
+        ),
+        data_hub=SimpleNamespace(indicators_ready=False),
+        market_regime_manager=SimpleNamespace(indicators_ready=False),
+        live_orders_armed=False,
+    )
+
+
+def test_live_indicator_sync_rearms_only_after_real_history_and_hard_readiness():
+    bars = [25]
+    ctx = _indicator_sync_ctx(bars)
+    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+
+    bars[0] = 30
+    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
+    assert ctx.data_hub.indicators_ready is True
+    assert ctx.market_regime_manager.indicators_ready is True
+    assert ctx.live_orders_armed is False
+
+    # A failed canonical readiness gate must revoke the global indicator flag.
+    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=False) is False
+    assert ctx.data_hub.indicators_ready is False
+    assert ctx.market_regime_manager.indicators_ready is False
+
+    # Regressing indicator history also revokes readiness.
+    bars[0] = 29
+    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+
+
+def test_live_indicator_sync_fails_closed_when_runner_missing():
+    ctx = SimpleNamespace(
+        strategy_runner=None,
+        indicator_engine=None,
+        data_hub=SimpleNamespace(indicators_ready=True),
+    )
+    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert ctx.data_hub.indicators_ready is False
