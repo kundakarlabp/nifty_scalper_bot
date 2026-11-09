@@ -4,6 +4,7 @@ Responsibilities: Create causal 5m/15m OHLCV bars without filling missing minute
 Ownership: Offline historical research data normalization, not production DataHub.
 Safety: No inferred bid/ask, expiry, historical lot size or executable fills.
 """
+
 from __future__ import annotations
 
 import math
@@ -60,6 +61,11 @@ def aggregate_breeze_session(
         or not isinstance(day, date)
     ):
         raise ValueError("invalid_session_or_interval")
+    # Published 2025 Muhurat session is not a normal 375-minute trading day.
+    if day == date(2025, 10, 21) and (
+        session_start != time(13, 45) or session_end != time(14, 45)
+    ):
+        raise ValueError("invalid_or_conflicting_candle")
     first = datetime.combine(day, session_start, tzinfo=IST)
     stop = datetime.combine(day, session_end, tzinfo=IST)
     if (stop - first) < timedelta(minutes=interval_minutes):
@@ -80,9 +86,13 @@ def aggregate_breeze_session(
             or stamp.second or stamp.microsecond or not first <= stamp < stop
             or stamp in observed
             or not all(math.isfinite(x) and x > 0 for x in prices)
-            or prices[1] < max(prices[0], prices[3]) or prices[2] > min(prices[0], prices[3])
+            or prices[1] < max(prices[0], prices[3])
+            or prices[2] > min(prices[0], prices[3])
             or not math.isfinite(vol) or vol < 0 or not vol.is_integer()
-            or oi is not None and (not math.isfinite(oi) or oi < 0 or not oi.is_integer())
+            or (
+                oi is not None
+                and (not math.isfinite(oi) or oi < 0 or not oi.is_integer())
+            )
         ):
             raise ValueError("invalid_or_conflicting_candle")
         observed[stamp] = (
