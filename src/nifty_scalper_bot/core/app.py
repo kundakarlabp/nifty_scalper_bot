@@ -4387,9 +4387,7 @@ def _compute_indicator_readiness(ctx: BotContext) -> bool:
     return False
 
 
-def _sync_runtime_indicator_readiness(
-    ctx: BotContext, *, data_hard_ready: bool
-) -> bool:
+def _sync_runtime_indicator_readiness(ctx: BotContext, *, data_hard_ready: bool) -> bool:
     """Refresh the startup-only hub flag from current canonical runtime readiness."""
     ready = bool(data_hard_ready and _compute_indicator_readiness(ctx))
     hub = getattr(ctx, "data_hub", None)
@@ -4403,8 +4401,11 @@ def _sync_runtime_indicator_readiness(
         LOGGER.info(
             "INDICATOR_READINESS_SYNC ready=%s source=runtime_recompute",
             ready,
-            extra={"event": "INDICATOR_READINESS_SYNC", "ready": ready,
-                   "source": "runtime_recompute"},
+            extra={
+                "event": "INDICATOR_READINESS_SYNC",
+                "ready": ready,
+                "source": "runtime_recompute",
+            },
         )
     return ready
 
