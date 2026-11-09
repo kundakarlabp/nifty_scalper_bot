@@ -4395,7 +4395,7 @@ def _sync_indicator_readiness(ctx: BotContext, *, data_hard_ready: bool) -> bool
     hub_writable = hub is not None and (
         hasattr(hub, "indicators_ready") or hasattr(hub, "__dict__")
     )
-    if hub_writable:
+    if hub_writable and hub is not None:
         hub.indicators_ready = ready
     regime = getattr(ctx, "market_regime_manager", None)
     if regime is not None and (
