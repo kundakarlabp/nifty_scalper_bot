@@ -83,7 +83,11 @@ def test_sequential_hedge_first_and_short_first_exit():
             i >= 2 and intent.side == "SELL"
         )
         b.apply_paper_fill(
-            intent, quote(b.legs[intent.role]), quantity=65, event_id=f"entry-{i}", at=NOW
+            intent,
+            quote(b.legs[intent.role]),
+            quantity=65,
+            event_id=f"entry-{i}",
+            at=NOW,
         )
     assert roles == ["long_call", "long_put", "short_call", "short_put"]
     assert b.next_intent() is None
@@ -94,7 +98,11 @@ def test_sequential_hedge_first_and_short_first_exit():
         intent = b.next_intent()
         exits.append(intent.role)
         b.apply_paper_fill(
-            intent, quote(b.legs[intent.role]), quantity=65, event_id=f"exit-{i}", at=NOW
+            intent,
+            quote(b.legs[intent.role]),
+            quantity=65,
+            event_id=f"exit-{i}",
+            at=NOW,
         )
     assert exits == ["short_call", "short_put", "long_call", "long_put"]
     assert b.next_intent() is None
@@ -141,20 +149,33 @@ def test_cancelled_partial_cannot_continue_entry_and_must_exit():
     close = b.next_intent()
     assert close.role == first.role and close.side == "SELL"
     assert close.quantity == 25
-    b.apply_paper_fill(close, quote(b.legs[close.role]), quantity=25, event_id="flat", at=NOW)
+    b.apply_paper_fill(
+        close, quote(b.legs[close.role]), quantity=25, event_id="flat", at=NOW
+    )
     assert b.next_intent() is None and b.phase == "FLAT"
 
 
 def test_atomic_all_or_none_depth_and_skew():
     b = engine()
     qs = {role: quote(leg) for role, leg in b.legs.items()}
-    assert not b.simulate_atomic_snapshot(qs, at=NOW, exchange_all_or_none_capability=False)
+    assert not b.simulate_atomic_snapshot(
+        qs, at=NOW, exchange_all_or_none_capability=False
+    )
     short_leg = b.legs["short_call"]
     missing_depth = {**qs, "short_call": replace(quote(short_leg), bid_quantity=20)}
-    assert not b.simulate_atomic_snapshot(missing_depth, at=NOW, exchange_all_or_none_capability=True)
+    assert not b.simulate_atomic_snapshot(
+        missing_depth, at=NOW, exchange_all_or_none_capability=True
+    )
     assert sum(b.entry.values()) == 0
-    skew = {**qs, "short_call": replace(quote(short_leg), observed_at=NOW - timedelta(seconds=1))}
-    assert not b.simulate_atomic_snapshot(skew, at=NOW, exchange_all_or_none_capability=True)
+    skew = {
+        **qs,
+        "short_call": replace(
+            quote(short_leg), observed_at=NOW - timedelta(seconds=1)
+        ),
+    }
+    assert not b.simulate_atomic_snapshot(
+        skew, at=NOW, exchange_all_or_none_capability=True
+    )
     assert b.simulate_atomic_snapshot(qs, at=NOW, exchange_all_or_none_capability=True)
     assert b.phase == "OPEN" and len(b.fills) == 4
     b.request_group_exit()
@@ -173,7 +194,9 @@ def test_quote_fail_closed_on_stale_or_wrong_symbol():
         replace(valid, bid=103),
         replace(valid, ask_quantity=0),
     ):
-        with pytest.raises(ValueError, match="paper_quote_unverified|paper_depth_insufficient"):
+        with pytest.raises(
+            ValueError, match="paper_quote_unverified|paper_depth_insufficient"
+        ):
             b.apply_paper_fill(intent, invalid, quantity=65, event_id="bad", at=NOW)
     assert sum(b.entry.values()) == 0
 
@@ -189,7 +212,11 @@ def test_budget_or_live_mode_fail_closed():
     ):
         with pytest.raises(ValueError, match="paper_margin_or_risk_unverified"):
             PaperBasketRehearsal(
-                parent_id="p", structure="IRON_CONDOR", legs=condor_legs(), budget=bad, at=NOW
+                parent_id="p",
+                structure="IRON_CONDOR",
+                legs=condor_legs(),
+                budget=bad,
+                at=NOW,
             )
 
 
@@ -204,6 +231,13 @@ def test_spreads_and_wrong_geometry():
         "long_put": leg("long_put", "BUY", 24050, "PE", 4),
     }
     assert engine("BEAR_PUT_SPREAD", put_spread).next_intent().role == "long_put"
-    wrong = {**call_spread, "short_call": replace(call_spread["short_call"], strike=23950, symbol="NFO:NIFTY26NOV23950CE")}
+    wrong = {
+        **call_spread,
+        "short_call": replace(
+            call_spread["short_call"],
+            strike=23950,
+            symbol="NFO:NIFTY26NOV23950CE",
+        ),
+    }
     with pytest.raises(ValueError, match="paper_strike_geometry_invalid"):
         engine("BULL_CALL_SPREAD", wrong)
