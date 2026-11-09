@@ -63,22 +63,22 @@ def _indicator_sync_ctx(bars: list[int]) -> SimpleNamespace:
 def test_live_indicator_sync_rearms_only_after_real_history_and_hard_readiness():
     bars = [25]
     ctx = _indicator_sync_ctx(bars)
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert app._sync_indicator_readiness(ctx, data_hard_ready=True) is False
 
     bars[0] = 30
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is True
+    assert app._sync_indicator_readiness(ctx, data_hard_ready=True) is True
     assert ctx.data_hub.indicators_ready is True
     assert ctx.market_regime_manager.indicators_ready is True
     assert ctx.live_orders_armed is False
 
     # A failed canonical readiness gate must revoke the global indicator flag.
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=False) is False
+    assert app._sync_indicator_readiness(ctx, data_hard_ready=False) is False
     assert ctx.data_hub.indicators_ready is False
     assert ctx.market_regime_manager.indicators_ready is False
 
     # Regressing indicator history also revokes readiness.
     bars[0] = 29
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert app._sync_indicator_readiness(ctx, data_hard_ready=True) is False
 
 
 def test_live_indicator_sync_fails_closed_when_runner_missing():
@@ -87,5 +87,5 @@ def test_live_indicator_sync_fails_closed_when_runner_missing():
         indicator_engine=None,
         data_hub=SimpleNamespace(indicators_ready=True),
     )
-    assert app._sync_runtime_indicator_readiness(ctx, data_hard_ready=True) is False
+    assert app._sync_indicator_readiness(ctx, data_hard_ready=True) is False
     assert ctx.data_hub.indicators_ready is False
