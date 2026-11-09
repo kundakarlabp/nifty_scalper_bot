@@ -40,6 +40,10 @@ class ReplayResult:
     orders: list[dict[str, Any]]
     fill_calibration: Mapping[str, float | int | None] | None = None
     execution_costs: float = 0.0
+    # A bar replay cannot certify contemporaneous executable quotes or fills.
+    execution_evidence_tier: str = "BAR_PROXY_ONLY"
+    execution_grade_ready: bool = False
+    live_promotion_eligible: bool = False
 
     def format_summary(self) -> str:
         """Return a human-readable summary suitable for Telegram."""
@@ -110,6 +114,7 @@ class ReplayHarness:
         clock: ReplayClock | None = None,
         contract_catalog: HistoricalContractCatalog | None = None,
         calibration_outcomes: Sequence[Mapping[str, Any]] | None = None,
+        strict_execution_evidence: bool = False,
     ) -> None:
         runtime_proof = core.install_runtime_hardening()
         if not isinstance(runtime_proof, Mapping) or not runtime_proof:
@@ -124,6 +129,9 @@ class ReplayHarness:
             )
 
         self._runner = runner
+        # Explicit opt-in refuses paper fills from OHLC bars even if an LTP exists.
+        # A recorded FULL-depth feed uses runtime_research, not this bar adapter.
+        self._strict_execution_evidence = strict_execution_evidence
         self._paper = paper_engine
         self._option_symbol = option_symbol
         self._index_symbol = index_symbol
@@ -227,6 +235,9 @@ class ReplayHarness:
             "source": "historical_replay",
             "trace_id": f"replay:{tick['timestamp'].isoformat()}:{symbol}",
         }
+        if self._strict_execution_evidence:
+            payload["tradable_quote"] = False
+            payload["replay_reject_reason"] = "historical_ohlcv_not_executable"
         self._publish_quote(symbol, payload)
         process_quote = getattr(self._paper, "process_quote", None)
         if callable(process_quote):
