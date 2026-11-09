@@ -75,11 +75,20 @@ class PaperFill:
 
 
 def _positive_finite(value: float) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
 
 
 def _aware(value: datetime) -> bool:
-    return isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.utcoffset() is not None
+    )
 
 
 def _role_sets(structure: str) -> dict[str, tuple[Side, str]]:
@@ -148,7 +157,9 @@ def _check_legs(structure: str, legs: Mapping[str, PaperLeg]) -> None:
         raise ValueError("paper_strike_geometry_invalid")
 
 
-def _check_quote(leg: PaperLeg, quote: PaperQuote, side: Side, now: datetime, quantity: int) -> float:
+def _check_quote(
+    leg: PaperLeg, quote: PaperQuote, side: Side, now: datetime, quantity: int
+) -> float:
     if (
         not _aware(now)
         or not isinstance(quote, PaperQuote)
@@ -230,9 +241,19 @@ class PaperBasketRehearsal:
     def next_intent(self) -> PaperIntent | None:
         if self.pending is not None:
             role = self.pending.role
-            target = self.legs[role].quantity if self.phase == "ENTRY" else self.entry[role]
+            target = (
+                self.legs[role].quantity
+                if self.phase == "ENTRY"
+                else self.entry[role]
+            )
             done = self.entry[role] if self.phase == "ENTRY" else self.exit[role]
-            return PaperIntent(self.pending.intent_id, role, self.pending.side, target - done, self.pending.phase)
+            return PaperIntent(
+                self.pending.intent_id,
+                role,
+                self.pending.side,
+                target - done,
+                self.pending.phase,
+            )
         if self.phase not in {"ENTRY", "EXIT"}:
             return None
         # Deterministic hedge-first entry, short-first close ordering.
@@ -249,9 +270,19 @@ class PaperBasketRehearsal:
                 hedge_role = "long_put" if leg.option_type == "PE" else "long_call"
                 if self.entry[hedge_role] < total:
                     raise ValueError("paper_short_hedge_unverified")
-            side: Side = leg.side if self.phase == "ENTRY" else ("SELL" if leg.side == "BUY" else "BUY")
+            side: Side = (
+                leg.side
+                if self.phase == "ENTRY"
+                else ("SELL" if leg.side == "BUY" else "BUY")
+            )
             self._sequence += 1
-            self.pending = PaperIntent(f"{self.parent_id}:{self._sequence}", role, side, total - done, self.phase)
+            self.pending = PaperIntent(
+                f"{self.parent_id}:{self._sequence}",
+                role,
+                side,
+                total - done,
+                self.phase,
+            )
             return self.pending
         self.phase = "OPEN" if self.phase == "ENTRY" else "FLAT"
         return None
@@ -276,7 +307,9 @@ class PaperBasketRehearsal:
         if type(quantity) is not int or not 0 < quantity <= current.quantity:
             raise ValueError("paper_fill_quantity_invalid")
         price = _check_quote(self.legs[current.role], quote, current.side, at, quantity)
-        fill = PaperFill(event_id, intent.intent_id, current.role, current.side, quantity, price, at)
+        fill = PaperFill(
+            event_id, intent.intent_id, current.role, current.side, quantity, price, at
+        )
         if self.phase == "ENTRY":
             self.entry[current.role] += quantity
         else:
@@ -322,7 +355,11 @@ class PaperBasketRehearsal:
                 remaining -= self.exit[role]
             if phase == "ENTRY" and self.entry[role] != 0:
                 return False
-            side: Side = leg.side if phase == "ENTRY" else ("BUY" if leg.side == "SELL" else "SELL")
+            side: Side = (
+                leg.side
+                if phase == "ENTRY"
+                else ("BUY" if leg.side == "SELL" else "SELL")
+            )
             if remaining <= 0 or role not in quotes:
                 return False
             try:
