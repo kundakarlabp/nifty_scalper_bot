@@ -77,7 +77,12 @@ def aggregate_breeze_session(
             raise ValueError("invalid_candle_width")
         try:
             stamp = datetime.fromisoformat(str(values[0]))
-            prices = tuple(float(x) for x in values[1:5])
+            prices = (
+                float(values[1]),
+                float(values[2]),
+                float(values[3]),
+                float(values[4]),
+            )
             vol = float(values[5])
             oi = None if values[6] is None else float(values[6])
         except (ValueError, TypeError, OverflowError) as exc:
