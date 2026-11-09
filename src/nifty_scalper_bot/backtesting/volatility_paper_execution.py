@@ -1,8 +1,10 @@
 """Deterministic, broker-free basket fill rehearsal for offline volatility research.
 
-This module never sends/cancels orders, certifies broker margin or permits LIVE.
-All generated fills have PAPER provenance. Real production linked-parent state,
-broker execution and risk controls remain owned by their existing modules.
+Responsibilities: Rehearse basket leg ordering, conditional fill transitions,
+partial fills, recoveries and atomic quote-depth snapshots entirely offline.
+Boundaries: No execution broker, persisted trading state or live order commands.
+Safety: Never place/cancel real orders, certify broker margin or permit LIVE.
+All fills are explicitly PAPER; production positions and limits remain separate.
 """
 
 from __future__ import annotations
