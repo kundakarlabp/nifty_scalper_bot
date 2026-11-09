@@ -1,4 +1,5 @@
 """Regression guards for strict quote-verified replay; no broker/network use."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -7,8 +8,13 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from nifty_scalper_bot.backtesting.execution_evidence import (
-    BookLevel, ObservedBook, OrderIntent, classify_barrier,
-    execution_readiness, historical_option_fee, replay_market_order,
+    BookLevel,
+    ObservedBook,
+    OrderIntent,
+    classify_barrier,
+    execution_readiness,
+    historical_option_fee,
+    replay_market_order,
 )
 
 DAY = date(2025, 3, 6)
@@ -37,7 +43,8 @@ def intent(*, side="BUY", qty=75, latency_ms=100, **overrides):
 
 
 def run(order=None, quotes=None, **kw):
-    return replay_market_order(order or intent(), [book()] if quotes is None else quotes,
+    return replay_market_order(
+        order or intent(), [book()] if quotes is None else quotes,
                                historical_exchange_rate=0.0003503, **kw)
 
 
@@ -64,7 +71,10 @@ def test_no_depth_never_fills_from_ohlcv_or_ltp():
     {"ask": tuple(BookLevel(99.0 + i * .05, 75) for i in range(5))},
 ])
 def test_invalid_source_depth_or_crossed_book_blocks(defect):
-    assert run(quotes=[replace(book(), **defect)]).reason == "invalid_or_unverified_depth"
+    assert (
+        run(quotes=[replace(book(), **defect)]).reason
+        == "invalid_or_unverified_depth"
+    )
 
 
 def test_order_after_latency_only_cannot_lookahead():
@@ -77,7 +87,10 @@ def test_order_after_latency_only_cannot_lookahead():
 
 
 def test_quotes_beyond_deadline_do_not_fill():
-    assert run(quotes=[book(observed_at=T0+timedelta(seconds=3))]).status == "UNRESOLVED"
+    assert (
+        run(quotes=[book(observed_at=T0 + timedelta(seconds=3))]).status
+        == "UNRESOLVED"
+    )
 
 
 def test_duplicate_quote_clock_order_unresolved():
@@ -106,7 +119,10 @@ def test_tick_rounding_and_adverse_slippage_never_improve_market_price():
     stress = run(adverse_slippage_bps=25)
     assert stress.price > baseline.price
     sell0 = run(order=intent(side="SELL",short_margin_verified=True))
-    sell1 = run(order=intent(side="SELL",short_margin_verified=True), adverse_slippage_bps=25)
+    sell1 = run(
+        order=intent(side="SELL", short_margin_verified=True),
+        adverse_slippage_bps=25,
+    )
     assert sell1.price < sell0.price
 
 
@@ -130,9 +146,24 @@ def test_historical_stt_repricing_at_2026_04_01():
 
 
 def test_unverified_price_on_intrabar_double_touch_is_unresolved():
-    assert classify_barrier(opening=100, high=112, low=92, closing=103, stop=95, target=110) == "AMBIGUOUS_UNRESOLVED"
-    assert classify_barrier(opening=90,high=112,low=87,closing=100,stop=95,target=110) == "STOP_GAP"
-    assert classify_barrier(opening=100,high=110,low=99,closing=101,stop=95,target=110) == "TARGET_TOUCHED_UNPRICED"
+    assert (
+        classify_barrier(
+            opening=100, high=112, low=92, closing=103, stop=95, target=110
+        )
+        == "AMBIGUOUS_UNRESOLVED"
+    )
+    assert (
+        classify_barrier(
+            opening=90, high=112, low=87, closing=100, stop=95, target=110
+        )
+        == "STOP_GAP"
+    )
+    assert (
+        classify_barrier(
+            opening=100, high=110, low=99, closing=101, stop=95, target=110
+        )
+        == "TARGET_TOUCHED_UNPRICED"
+    )
 
 
 def test_evidence_gate_never_auto_promotes():
