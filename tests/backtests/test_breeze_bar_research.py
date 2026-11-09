@@ -1,5 +1,6 @@
 """One-minute Breeze aggregation is causal, session-aware and never fills gaps."""
-from datetime import date, time, datetime, timedelta
+
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
