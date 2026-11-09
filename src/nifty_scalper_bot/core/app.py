@@ -6,7 +6,8 @@ Runtime role:
 - Owns the startup sequence: broker auth, instrument load, subsystem bring-up,
   the data-hydration/readiness pipeline, and the live-arming gate.
 - Computes the canonical readiness/arming decision (history + quote freshness)
-  and pushes it to the runner.
+  and pushes it to the runner, synchronizing DataHub and regime indicator
+  readiness as genuine selected-option history becomes sufficient or regresses.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
@@ -4384,6 +4385,34 @@ def _compute_indicator_readiness(ctx: BotContext) -> bool:
         except Exception:
             continue
     return False
+
+
+def _sync_indicator_readiness(ctx: BotContext, *, data_hard_ready: bool) -> bool:
+    """Refresh the startup-only hub flag from current canonical runtime readiness."""
+    ready = bool(data_hard_ready and _compute_indicator_readiness(ctx))
+    hub = getattr(ctx, "data_hub", None)
+    previous = getattr(hub, "indicators_ready", None)
+    hub_writable = hub is not None and (
+        hasattr(hub, "indicators_ready") or hasattr(hub, "__dict__")
+    )
+    if hub_writable and hub is not None:
+        hub.indicators_ready = ready
+    regime = getattr(ctx, "market_regime_manager", None)
+    if regime is not None and (
+        hasattr(regime, "indicators_ready") or hasattr(regime, "__dict__")
+    ):
+        regime.indicators_ready = ready
+    if hub_writable and previous is not ready:
+        LOGGER.info(
+            "INDICATOR_READINESS_SYNC ready=%s source=runtime_recompute",
+            ready,
+            extra={
+                "event": "INDICATOR_READINESS_SYNC",
+                "ready": ready,
+                "source": "runtime_recompute",
+            },
+        )
+    return ready
 
 
 def _build_canonical_active_basket(
@@ -10256,6 +10285,9 @@ async def _recompute_and_push_runtime_readiness(
     )
     ctx.data_hard_ready = data_hard_ready
     ctx.evaluation_ready = evaluation_ready
+    # Startup may set DataHub.indicators_ready=False before selected options
+    # collect enough bars; refresh it whenever live readiness is recomputed.
+    _sync_indicator_readiness(ctx, data_hard_ready=data_hard_ready)
     ctx.live_orders_armed = live_orders_armed
     ctx.trading_ready = evaluation_ready
     ctx.live_block_reason = block_reason
