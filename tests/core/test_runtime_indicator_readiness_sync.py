@@ -1,7 +1,5 @@
 """The post-hydration indicator safety flag must follow current live readiness."""
 
-from __future__ import annotations
-
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.app import _sync_runtime_indicator_readiness
