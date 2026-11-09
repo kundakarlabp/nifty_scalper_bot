@@ -79,9 +79,7 @@ def test_sequential_hedge_first_and_short_first_exit():
     for i in range(4):
         intent = b.next_intent()
         roles.append(intent.role)
-        assert (i < 2 and intent.side == "BUY") or (
-            i >= 2 and intent.side == "SELL"
-        )
+        assert (i < 2 and intent.side == "BUY") or (i >= 2 and intent.side == "SELL")
         b.apply_paper_fill(
             intent,
             quote(b.legs[intent.role]),
@@ -121,9 +119,12 @@ def test_partial_fill_same_intent_and_idempotent_replay():
     same = b.next_intent()
     assert same.intent_id == first.intent_id
     assert same.quantity == 40
-    assert b.apply_paper_fill(
-        first, quote(b.legs[first.role]), quantity=25, event_id="p1", at=NOW
-    ) == filled
+    assert (
+        b.apply_paper_fill(
+            first, quote(b.legs[first.role]), quantity=25, event_id="p1", at=NOW
+        )
+        == filled
+    )
     assert b.entry[first.role] == 25
     b.apply_paper_fill(
         same, quote(b.legs[first.role]), quantity=40, event_id="p2", at=NOW
@@ -169,9 +170,7 @@ def test_atomic_all_or_none_depth_and_skew():
     assert sum(b.entry.values()) == 0
     skew = {
         **qs,
-        "short_call": replace(
-            quote(short_leg), observed_at=NOW - timedelta(seconds=1)
-        ),
+        "short_call": replace(quote(short_leg), observed_at=NOW - timedelta(seconds=1)),
     }
     assert not b.simulate_atomic_snapshot(
         skew, at=NOW, exchange_all_or_none_capability=True
