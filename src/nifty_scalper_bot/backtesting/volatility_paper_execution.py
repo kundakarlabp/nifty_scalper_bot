@@ -221,9 +221,8 @@ class PaperBasketRehearsal:
                 )
             )
             or budget.required_margin > budget.available_margin
-            or budget.stress_loss_including_costs > min(
-                budget.remaining_trade_risk, budget.remaining_daily_risk
-            )
+            or budget.stress_loss_including_costs
+            > min(budget.remaining_trade_risk, budget.remaining_daily_risk)
         ):
             raise ValueError("paper_margin_or_risk_unverified")
         self.parent_id = parent_id
@@ -242,9 +241,7 @@ class PaperBasketRehearsal:
         if self.pending is not None:
             role = self.pending.role
             target = (
-                self.legs[role].quantity
-                if self.phase == "ENTRY"
-                else self.entry[role]
+                self.legs[role].quantity if self.phase == "ENTRY" else self.entry[role]
             )
             done = self.entry[role] if self.phase == "ENTRY" else self.exit[role]
             return PaperIntent(
