@@ -1,15 +1,8 @@
-"""Microstructure-aware paper execution simulation with executable-book bounds.
-
-Responsibilities: Model book-size-constrained fills, adverse bid/ask tick rounding
-and canonical option order fees for offline/PAPER executions.
-Ownership: Paper/quote simulation only; no live broker order placement.
-Safety: Marketable model fills never improve on the observed best bid/ask.
-"""
+"""Microstructure-aware execution simulation backed by canonical live costs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import List, Literal
 
 from nifty_scalper_bot.risk.cost_model import estimate_order_cost
@@ -92,15 +85,7 @@ class ExecutionSimulator:
             max(0.0, minimum_impact),
         )
         direction = 1.0 if side == "BUY" else -1.0
-        # Marketable fills cannot improve on the visible executable side.
-        # Round outwards; nearest-tick rounding can accidentally invent a
-        # better price than the observed best bid/ask.
-        raw_price = mid + direction * adjustment
-        raw_price = max(ask, raw_price) if side == "BUY" else min(bid, raw_price)
-        tick = Decimal(str(self.tick_size))
-        units = Decimal(str(raw_price)) / tick
-        rounding = ROUND_CEILING if side == "BUY" else ROUND_FLOOR
-        price = float(units.to_integral_value(rounding=rounding) * tick)
+        price = round((mid + direction * adjustment) / self.tick_size) * self.tick_size
         filled_qty = min(qty, max(size_at_best, 0))
         fills = (
             [FillEvent(qty=filled_qty, price=price, ts_ns=ts_ns)]
