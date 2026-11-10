@@ -9,6 +9,8 @@ EXPECTED_WORKFLOWS = {
     "agent-context.yml",
     "breeze-auth-smoke.yml",
     "breeze-history-archive.yml",
+    "breeze-2yr-sharded.yml",
+    "breeze-targeted-backfill.yml",
     "ci.yml",
     "failure-memory-candidates.yml",
     "orb-historical-research.yml",
