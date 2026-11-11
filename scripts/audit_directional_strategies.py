@@ -60,7 +60,7 @@ def run_directional_research_bundle(directory: Path) -> dict[str, Any]:
         "limitations": [
             "These studies share a source archive, not always identical fill cohorts",
             "The option archive is not a synchronized executable historical quote book",
-            "Chronological untouched out-of-sample and prospective shadow are not supplied",
+            "Untouched out-of-sample and prospective SHADOW evidence absent",
             "No isolated component result can authorize live execution",
         ],
     }
