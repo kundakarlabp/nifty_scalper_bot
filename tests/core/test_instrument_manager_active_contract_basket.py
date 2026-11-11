@@ -66,6 +66,22 @@ def test_active_contract_basket_uses_independent_option_expiry_and_maps_tokens()
     assert dict(basket.symbol_by_token)[basket.selected_pe_token] == basket.selected_pe
 
 
+
+def test_canonical_live_basket_opts_into_otm_distance_ties(monkeypatch) -> None:
+    """Only the InstrumentManager's capped basket opts into OTM tie priority."""
+    monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "8")
+    rows, _weekly, _monthly = _dump()
+    basket = InstrumentManager(KiteDump(rows)).get_active_nifty_contracts(25000)
+    options = set(basket.option_symbols)
+    assert len(options) == 8
+    assert basket.selected_ce in options
+    assert basket.selected_pe in options
+    assert "NFO:NIFTYW25100CE" in options
+    assert "NFO:NIFTYW24900PE" in options
+    assert "NFO:NIFTYW24900CE" not in options
+    assert "NFO:NIFTYW25100PE" not in options
+
+
 def test_active_contract_basket_future_missing_is_soft_but_atm_missing_is_hard():
     rows, _weekly, _monthly = _dump(include_future=False)
     mgr = InstrumentManager(KiteDump(rows))
