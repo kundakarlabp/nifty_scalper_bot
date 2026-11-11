@@ -242,8 +242,8 @@ def run_failed_breakout_smc_comparison(directory: Path) -> dict[str, Any]:
         "selected_for_live": None,
         "scenarios": scenarios,
         "limitations": [
-            "SMC may signal on another candle; same-minute fill is not full setup attribution",
-            "Missing next-minute fill cannot distinguish no-vote from rejected or pending",
+            "SMC may signal on another candle; same-minute fills are incomplete attribution",
+            "Missing fill cannot distinguish no-vote, rejection or pending entry",
             "Weekly-ATM proximity is not actual historical contract selection",
             "Archived OHLC lacks executable bid/ask depth and real broker queue/fills",
             "Replay omits live arbitration, contract rotation and some exits",
