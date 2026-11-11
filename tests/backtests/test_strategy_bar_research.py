@@ -974,15 +974,15 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
 
     report = run_orb_comparison(tmp_path)
 
-    assert report["candidate_count"] == 11
+    assert report["candidate_count"] == 13
     assert report["slippage_scenario_count"] == 3
-    assert len(calls) == 33
+    assert len(calls) == 39
     assert all(call["components"] == {"ORBPro"} for call in calls)
     assert all(call["compact_orb_context"] is True for call in calls)
     assert sum(call["range_transition"] == "true" for call in calls) == 3
-    assert sum(call["range_transition"] == "false" for call in calls) == 30
+    assert sum(call["range_transition"] == "false" for call in calls) == 36
     assert sum(call["strict_retest_wick"] == "true" for call in calls) == 3
-    assert sum(call["strict_retest_wick"] == "false" for call in calls) == 30
+    assert sum(call["strict_retest_wick"] == "false" for call in calls) == 36
 
 
 def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
