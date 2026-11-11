@@ -12,9 +12,13 @@ def test_bundle_uses_one_archive_and_restores_vwap_experiment_flag(monkeypatch):
     seen = []
 
     def vwap(directory):
-        seen.append(("vwap", directory, audit.os.getenv(
-            "VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY"
-        )))
+        seen.append(
+            (
+                "vwap",
+                directory,
+                audit.os.getenv("VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY"),
+            )
+        )
         return {"data_sha256": "same-source"}
 
     def orb(directory):
@@ -48,9 +52,7 @@ def test_bundle_fails_closed_on_source_drift_and_live_mode(monkeypatch):
     monkeypatch.setattr(
         audit, "run_vwap_comparison", lambda _: {"data_sha256": "first"}
     )
-    monkeypatch.setattr(
-        audit, "run_orb_comparison", lambda _: {"data_sha256": "other"}
-    )
+    monkeypatch.setattr(audit, "run_orb_comparison", lambda _: {"data_sha256": "other"})
     monkeypatch.setattr(
         audit,
         "run_failed_breakout_smc_comparison",
