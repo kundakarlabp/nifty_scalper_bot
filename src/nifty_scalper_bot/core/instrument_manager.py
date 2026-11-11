@@ -3,6 +3,7 @@
 Runtime role:
 - SSOT for NIFTY instrument identity, symbol-token mapping, and active contract selection.
 - Owns NIFTY spot token, active future, selected ATM CE/PE, nearby option universe.
+- Under capped live baskets, prefers OTM strikes at equal ATM distance.
 - Other modules must consume ActiveContractBasket and must not regenerate symbols.
 """
 
@@ -705,6 +706,7 @@ class InstrumentManager:
                 selected_pe=self._exchange_qualified(selected_pe[4]),
                 atm_strike=float(atm),
                 max_options=max_options,
+                prefer_otm_on_ties=True,
             )
             kept_tokens = {item[1] for item in capped}
             full_count = len(selected_options)
