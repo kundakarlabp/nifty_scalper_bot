@@ -224,9 +224,7 @@ def test_live_balance_fallback_requires_cost_inclusive_risk_budget(
     )
     assert decisions[preferred.symbol]["capacity_blocker"] == "cash"
     assert decisions[preferred.symbol]["required"] == pytest.approx(15_626.0)
-    assert decisions[fallback.symbol]["executable_capacity"] == pytest.approx(
-        13_919.4
-    )
+    assert decisions[fallback.symbol]["executable_capacity"] == pytest.approx(13_919.4)
     assert decisions[fallback.symbol]["effective_one_lot_risk_budget"] == pytest.approx(
         773.30
     )
