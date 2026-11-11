@@ -178,6 +178,62 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
     assert decisions[fallback.symbol]["affordable"] is True
 
 
+@pytest.mark.parametrize(
+    ("fallback_stop", "expected_affordable"),
+    [(195.0, True), (180.0, False)],
+)
+def test_live_balance_fallback_requires_cost_inclusive_risk_budget(
+    fallback_stop: float, expected_affordable: bool
+) -> None:
+    """11 Nov 2026 balance: cheap strike is not automatically an executable trade."""
+    available = 15_466.0
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=available)
+    risk = runner._order_manager._risk_manager
+    risk.settings.per_trade_risk_pct = 5.0
+    risk._switches.max_day_loss = 773.30
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: available
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=available)
+    runner._capital_block_counter = 0
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    preferred = SimpleNamespace(
+        symbol="NFO:NIFTY26N1725200CE", entry_price=240.40, stop_loss=237.40
+    )
+    fallback = SimpleNamespace(
+        symbol="NFO:NIFTY26N1725250CE",
+        entry_price=200.00,
+        stop_loss=fallback_stop,
+    )
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[fallback, preferred],
+        candidate_snapshots=[
+            {"symbol": preferred.symbol, "bid": 240.30, "ask": 240.40},
+            {"symbol": fallback.symbol, "bid": 199.90, "ask": 200.00},
+        ],
+        is_live_mode=True,
+        trace_id="2026-11-11-lot-risk",
+        preferred_symbol=preferred.symbol,
+        preferred_entry_price=240.40,
+        preferred_stop_loss=237.40,
+    )
+    assert decisions[preferred.symbol]["capacity_blocker"] == "cash"
+    assert decisions[preferred.symbol]["required"] == pytest.approx(15_626.0)
+    assert decisions[fallback.symbol]["executable_capacity"] == pytest.approx(
+        13_919.4
+    )
+    assert decisions[fallback.symbol]["effective_one_lot_risk_budget"] == pytest.approx(
+        773.30
+    )
+    assert decisions[fallback.symbol]["plan_risk_affordable"] is expected_affordable
+    assert selected is (fallback if expected_affordable else None)
+
+
 def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
