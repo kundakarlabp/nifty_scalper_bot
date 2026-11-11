@@ -1056,7 +1056,7 @@ def test_bounded_comparison_restores_environment_and_never_promotes_small_sample
     before = dict(os.environ)
     report = run_orb_comparison(tmp_path)
     assert dict(os.environ) == before
-    assert len(report["candidates"]) == 11
+    assert len(report["candidates"]) == 13
     assert report["selection"]["promotion_eligible"] is False
     assert report["selection"]["selected_for_live"] is None
     assert report["retrospective_check_is_untouched"] is False
