@@ -17,8 +17,8 @@ Runtime role:
 - Delegates position sizing and ATR-based trailing to execution owners.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
-- Checks independently parsed original/replacement expiries using the pure
-  _strict_replacement_expiry_block_reason helper before a strict substitution.
+- Checks independent original/replacement expiry, strike, side, premium,
+  and basket eligibility before affordability and again before final order routing.
 - Rejects changed-contract premium plans whose materialized stop widens beyond
   the selected candidate or lacks finite, same-contract entry/exit geometry.
 - Pins each live candidate decision to one active basket generation and reports
@@ -4773,6 +4773,111 @@ class StrategyRunner:
         self._execution_reject_cooldown_ts[reject_key] = now_epoch
         return reject_reason
 
+    def _candidate_replacement_contract_guard(
+        self,
+        *,
+        original_symbol: str,
+        selected_symbol: str,
+        original_trade_price: float,
+        candidate_trade_price: float,
+    ) -> tuple[str | None, dict[str, object]]:
+        """Apply the same static contract restrictions before and after ranking.
+
+        The final readiness and order-preflight checks remain mandatory and
+        are never replaced by this static eligibility check.
+        """
+        original_symbol = normalize_symbol(original_symbol)
+        selected_symbol = normalize_symbol(selected_symbol)
+        allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=True)
+        strict_replace = _env_flag("STRICT_CANDIDATE_REPLACEMENT", default=True)
+        max_strike_dist = float(
+            os.getenv(
+                "MAX_REPLACEMENT_STRIKE_DISTANCE",
+                os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50"),
+            )
+            or "50"
+        )
+        max_premium_pct = float(
+            os.getenv(
+                "MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT",
+                os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35"),
+            )
+            or "35"
+        )
+        policy: dict[str, object] = {
+            "allow_candidate_replacement": allow_replace,
+            "strict_candidate_replacement": strict_replace,
+            "max_replacement_strike_distance": max_strike_dist,
+            "max_replacement_premium_deviation_pct": max_premium_pct,
+        }
+        if original_symbol == selected_symbol:
+            return None, policy
+        if not allow_replace:
+            return "config_disabled", policy
+
+        orig_side = self._contract_side_from_symbol(original_symbol)
+        new_side = self._contract_side_from_symbol(selected_symbol)
+        if orig_side not in {"CE", "PE"} or new_side not in {"CE", "PE"}:
+            return "side_unverified", policy
+        if orig_side != new_side:
+            return "side_mismatch", policy
+
+        def expiry_key(symbol: str) -> str | None:
+            normalized = normalize_symbol(symbol).split(":", 1)[-1]
+            side = self._contract_side_from_symbol(normalized)
+            strike = self._extract_strike_from_symbol(normalized)
+            if side in {"CE", "PE"} and strike is not None:
+                suffix = f"{int(strike)}{side}"
+                if normalized.endswith(suffix):
+                    return normalized[: -len(suffix)]
+            match = re.search(
+                r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
+                normalized,
+            )
+            return match.group(1) if match else None
+
+        expiry_reason = _strict_replacement_expiry_block_reason(
+            expiry_key(original_symbol),
+            expiry_key(selected_symbol),
+            strict=strict_replace,
+        )
+        if expiry_reason is not None:
+            return expiry_reason, policy
+
+        orig_strike = self._extract_strike_from_symbol(original_symbol)
+        new_strike = self._extract_strike_from_symbol(selected_symbol)
+        if orig_strike is None or new_strike is None:
+            return "strike_unverified", policy
+        if abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
+            return "strike_jump", policy
+        if (
+            original_trade_price > 0.0
+            and candidate_trade_price > 0.0
+            and abs(candidate_trade_price - original_trade_price)
+            / original_trade_price
+            * 100.0
+            > max_premium_pct
+        ):
+            return "premium_jump", policy
+
+        active_symbols = {
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_option_symbols", set()) or set())
+        }
+        active_symbols.update(
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_basket_all_symbols", set()) or set())
+        )
+        active_symbols.update(
+            normalize_symbol(str(item))
+            for item in (
+                getattr(self, "_active_basket_token_by_symbol", {}) or {}
+            ).keys()
+        )
+        if active_symbols and selected_symbol not in active_symbols:
+            return "not_in_active_basket", policy
+        return None, policy
+
     def _select_capital_eligible_candidate(
         self,
         *,
@@ -4834,6 +4939,38 @@ class StrategyRunner:
 
         for ranked in ordered_candidates:
             ranked_symbol = normalize_symbol(str(ranked.symbol))
+            if is_live_mode and preferred and ranked_symbol != preferred:
+                replacement_blocker, replacement_policy = (
+                    self._candidate_replacement_contract_guard(
+                        original_symbol=preferred,
+                        selected_symbol=ranked_symbol,
+                        original_trade_price=float(preferred_entry_price or 0.0),
+                        candidate_trade_price=float(
+                            getattr(ranked, "entry_price", 0.0) or 0.0
+                        ),
+                    )
+                )
+                if replacement_blocker is not None:
+                    decisions[ranked_symbol] = {
+                        "symbol": ranked_symbol,
+                        "original_symbol": preferred,
+                        "reason": "replacement_not_permitted",
+                        "replacement_blocker": replacement_blocker,
+                        "trace_id": trace_id,
+                        **replacement_policy,
+                    }
+                    self._logger.info(
+                        "CANDIDATE_REPLACEMENT_PREFILTER_BLOCKED original_symbol=%s selected_symbol=%s reason=%s trace_id=%s",
+                        preferred,
+                        ranked_symbol,
+                        replacement_blocker,
+                        trace_id,
+                        extra={
+                            "event": "CANDIDATE_REPLACEMENT_PREFILTER_BLOCKED",
+                            **decisions[ranked_symbol],
+                        },
+                    )
+                    continue
             ready_before = self._is_symbol_execution_ready(ranked_symbol)
             ready_after = bool(
                 ready_before
@@ -18922,112 +19059,16 @@ class StrategyRunner:
                 original_trade_price = float(trade_price or 0.0)
                 replacement_blocked_reason: str | None = None
                 if selected_symbol != original_symbol:
-                    allow_replace = _env_flag(
-                        "ALLOW_CANDIDATE_REPLACEMENT", default=True
-                    )
-                    strict_replace = _env_flag(
-                        "STRICT_CANDIDATE_REPLACEMENT", default=True
-                    )
-                    max_strike_dist = float(
-                        os.getenv(
-                            "MAX_REPLACEMENT_STRIKE_DISTANCE",
-                            os.getenv(
-                                "CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50"
+                    replacement_blocked_reason, replacement_policy = (
+                        self._candidate_replacement_contract_guard(
+                            original_symbol=original_symbol,
+                            selected_symbol=selected_symbol,
+                            original_trade_price=original_trade_price,
+                            candidate_trade_price=float(
+                                getattr(candidate, "entry_price", 0.0) or 0.0
                             ),
                         )
-                        or "50"
                     )
-                    max_premium_pct = float(
-                        os.getenv(
-                            "MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT",
-                            os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35"),
-                        )
-                        or "35"
-                    )
-                    replacement_blocked_reason = (
-                        "config_disabled" if not allow_replace else None
-                    )
-
-                    orig_side = self._contract_side_from_symbol(original_symbol)
-                    new_side = self._contract_side_from_symbol(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and orig_side in {"CE", "PE"}
-                        and new_side in {"CE", "PE"}
-                        and orig_side != new_side
-                    ):
-                        replacement_blocked_reason = "side_mismatch"
-
-                    def _expiry_key(sym: str) -> str | None:
-                        normalized = normalize_symbol(sym).split(":", 1)[-1]
-                        side = self._contract_side_from_symbol(normalized)
-                        strike = self._extract_strike_from_symbol(normalized)
-                        if side in {"CE", "PE"} and strike is not None:
-                            strike_text = str(int(strike))
-                            suffix = f"{strike_text}{side}"
-                            if normalized.endswith(suffix):
-                                return normalized[: -len(suffix)]
-                        match = re.search(
-                            r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
-                            normalized,
-                        )
-                        return match.group(1) if match else None
-
-                    orig_expiry = _expiry_key(original_symbol)
-                    new_expiry = _expiry_key(selected_symbol)
-                    if replacement_blocked_reason is None:
-                        replacement_blocked_reason = (
-                            _strict_replacement_expiry_block_reason(
-                                orig_expiry,
-                                new_expiry,
-                                strict=strict_replace,
-                            )
-                        )
-                    orig_strike = self._extract_strike_from_symbol(original_symbol)
-                    new_strike = self._extract_strike_from_symbol(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and orig_strike is not None
-                        and new_strike is not None
-                        and abs(float(new_strike) - float(orig_strike))
-                        > max_strike_dist
-                    ):
-                        replacement_blocked_reason = "strike_jump"
-                    new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
-                    if (
-                        replacement_blocked_reason is None
-                        and original_trade_price > 0.0
-                        and new_premium > 0.0
-                        and abs(new_premium - original_trade_price)
-                        / original_trade_price
-                        * 100.0
-                        > max_premium_pct
-                    ):
-                        replacement_blocked_reason = "premium_jump"
-                    active_symbols = {
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_option_symbols", set()) or set()
-                        )
-                    }
-                    active_symbols.update(
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_basket_all_symbols", set()) or set()
-                        )
-                    )
-                    active_symbols.update(
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_basket_token_by_symbol", {}) or {}
-                        ).keys()
-                    )
-                    if (
-                        replacement_blocked_reason is None
-                        and active_symbols
-                        and selected_symbol not in active_symbols
-                    ):
-                        replacement_blocked_reason = "not_in_active_basket"
                     if replacement_blocked_reason is None:
                         replacement_readiness = (
                             self._ensure_symbol_execution_ready_result(
@@ -19050,10 +19091,7 @@ class StrategyRunner:
                                 "original_symbol": original_symbol,
                                 "selected_symbol": selected_symbol,
                                 "reason": replacement_blocked_reason,
-                                "allow_candidate_replacement": allow_replace,
-                                "strict_candidate_replacement": strict_replace,
-                                "max_replacement_strike_distance": max_strike_dist,
-                                "max_replacement_premium_deviation_pct": max_premium_pct,
+                                **replacement_policy,
                             },
                         )
                         selected_symbol = original_symbol

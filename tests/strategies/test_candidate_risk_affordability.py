@@ -178,6 +178,172 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
     assert decisions[fallback.symbol]["affordable"] is True
 
 
+@pytest.mark.parametrize(
+    ("entry", "expected_affordable"),
+    [(200.0, False), (100.0, True)],
+)
+def test_live_balance_uses_actual_strategy_candidate_stop_geometry(
+    monkeypatch, entry: float, expected_affordable: bool
+) -> None:
+    """Today's ₹773.30 budget must apply to the selector-generated stop."""
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, "ok"))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, "ok"))
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.delenv("ENABLE_LIVE", raising=False)
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    monkeypatch.setenv("NIFTY_LOT_SIZE", "65")
+    selector = TradeCandidateSelector(
+        min_option_premium=40.0,
+        max_option_premium=650.0,
+        max_tick_age_s=2.5,
+        max_option_spread_pct=1.0,
+        require_real_ticks_last_60s=2,
+    )
+    symbol = "NFO:NIFTY26N1725250CE"
+    snapshot = {
+        "symbol": symbol,
+        "side": "CE",
+        "strike": 25250,
+        "bid": entry - 0.10,
+        "ask": entry,
+        "ltp": entry - 0.05,
+        "tick_age_ms": 100.0,
+        "real_ticks_last_60s": 5,
+        "atr_option": 2.0,
+    }
+    ranked = selector.select_ranked_candidates(
+        direction_bias="CE",
+        atm_strike=25200,
+        snapshots=[snapshot],
+        gross_rr=2.0,
+    )
+    assert len(ranked) == 1
+    candidate = ranked[0]
+    assert candidate.entry_price - candidate.stop_loss + 0.001 >= (
+        candidate.entry_price * 0.08
+    )
+
+    available = 15_466.0
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=available)
+    risk = runner._order_manager._risk_manager
+    risk.settings.per_trade_risk_pct = 5.0
+    risk._switches.max_day_loss = 773.30
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: available
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=available)
+    runner._capital_block_counter = 0
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=ranked,
+        candidate_snapshots=[snapshot],
+        is_live_mode=True,
+        trace_id="2026-11-11-real-stop",
+        preferred_symbol=candidate.symbol,
+        preferred_entry_price=candidate.entry_price,
+        preferred_stop_loss=candidate.stop_loss,
+    )
+    details = decisions[candidate.symbol]
+    assert details["executable_capacity"] == pytest.approx(13_919.40)
+    assert details["effective_one_lot_risk_budget"] == pytest.approx(773.30)
+    assert details["plan_risk_affordable"] is expected_affordable
+    assert selected is (candidate if expected_affordable else None)
+
+
+def test_replacement_prefilter_skips_affordable_plus_100_before_plus_50(
+    monkeypatch,
+) -> None:
+    """An illegal liquid fallback must not starve a valid, risk-safe fallback."""
+    monkeypatch.setenv("ALLOW_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("STRICT_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("MAX_REPLACEMENT_STRIKE_DISTANCE", "50")
+    monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=20_000.0)
+    risk = runner._order_manager._risk_manager
+    risk.settings.per_trade_risk_pct = 3.0
+    risk._switches.max_day_loss = 600.0
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 20_000.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=20_000.0)
+    runner._capital_block_counter = 0
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
+    preferred = SimpleNamespace(
+        symbol="NFO:NIFTY2691523500CE", entry_price=80.0, stop_loss=65.0
+    )
+    outside = SimpleNamespace(
+        symbol="NFO:NIFTY2691523600CE", entry_price=60.0, stop_loss=55.2
+    )
+    permitted = SimpleNamespace(
+        symbol="NFO:NIFTY2691523550CE", entry_price=65.0, stop_loss=59.8
+    )
+    runner._active_option_symbols = {preferred.symbol, outside.symbol, permitted.symbol}
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[outside, permitted, preferred],
+        candidate_snapshots=[
+            {"symbol": preferred.symbol, "bid": 79.9, "ask": 80.0},
+            {"symbol": outside.symbol, "bid": 59.9, "ask": 60.0},
+            {"symbol": permitted.symbol, "bid": 64.9, "ask": 65.0},
+        ],
+        is_live_mode=True,
+        trace_id="allowed-plus-50-not-plus-100",
+        preferred_symbol=preferred.symbol,
+        preferred_entry_price=80.0,
+        preferred_stop_loss=65.0,
+    )
+    assert selected is permitted
+    assert decisions[outside.symbol]["reason"] == "replacement_not_permitted"
+    assert decisions[outside.symbol]["replacement_blocker"] == "strike_jump"
+    assert decisions[preferred.symbol]["capacity_blocker"] == "risk"
+    assert decisions[permitted.symbol]["plan_risk_affordable"] is True
+
+
+@pytest.mark.parametrize(
+    ("candidate", "price", "expected_reason"),
+    [
+        ("NFO:NIFTY2691523500PE", 65.0, "side_mismatch"),
+        ("NFO:NIFTY2692223550CE", 65.0, "expiry_mismatch"),
+        ("NFO:NIFTY2691523600CE", 65.0, "strike_jump"),
+        ("NFO:NIFTY2691523550CE", 40.0, "premium_jump"),
+        ("NFO:NIFTY2691523450CE", 65.0, "not_in_active_basket"),
+    ],
+)
+def test_replacement_contract_policy_is_fail_closed(
+    monkeypatch, candidate: str, price: float, expected_reason: str
+) -> None:
+    monkeypatch.setenv("STRICT_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("ALLOW_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("MAX_REPLACEMENT_STRIKE_DISTANCE", "50")
+    monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
+    runner = object.__new__(StrategyRunner)
+    runner._active_option_symbols = {
+        "NFO:NIFTY2691523500CE",
+        "NFO:NIFTY2691523550CE",
+        "NFO:NIFTY2691523600CE",
+        "NFO:NIFTY2692223550CE",
+        "NFO:NIFTY2691523500PE",
+    }
+    blocked, _policy = runner._candidate_replacement_contract_guard(
+        original_symbol="NFO:NIFTY2691523500CE",
+        selected_symbol=candidate,
+        original_trade_price=80.0,
+        candidate_trade_price=price,
+    )
+    assert blocked == expected_reason
+
+
 def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
