@@ -85,7 +85,6 @@ def test_tight_cap_prioritizes_same_distance_otm_without_dropping_atm() -> None:
     ]
 
 
-
 def test_archive_cap_preserves_balanced_strike_pairs_by_default() -> None:
     """Research archive should retain paired strikes, not OTM-side preferences."""
     capped = cap_option_universe(
