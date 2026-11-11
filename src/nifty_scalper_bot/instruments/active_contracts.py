@@ -1,6 +1,5 @@
 """Runtime role:
 - Parsing/canonicalization utilities for active contract diagnostics.
-- Optional live-basket OTM tie-break preserves research archive pair coverage.
 - Runtime active contract selection belongs to InstrumentManager.
 - Must not derive live futures from selected options."""
 
@@ -228,14 +227,10 @@ def cap_option_universe(
     selected_pe: str,
     atm_strike: float,
     max_options: int,
-    prefer_otm_on_ties: bool = False,
 ) -> list[tuple[str, int, float, str]]:
     """Args: (symbol, token, strike, side) items, selected pair, atm, cap.
     Returns: capped list always containing selected CE/PE, remaining slots
-    filled by strikes nearest to ATM alternating CE/PE. When opted in by
-    the live instrument owner, equal-distance ties favour OTM options.
-    Default distance-only stable ordering preserves archival strike pairs.
-    This does not prove liquidity or permit an entry. Raises: none.
+    filled by strikes nearest to ATM alternating CE/PE. Raises: none.
 
     Single global cap for the active option universe. Applying it where the
     basket is built means DataHub, MDM, WS subscriptions, runner registration,
@@ -252,23 +247,13 @@ def cap_option_universe(
             capped.append(item)
             seen.add(sel)
     remaining = [item for item in option_items if item[0] not in seen]
-
-    def distance_rank(item: tuple[str, int, float, str]) -> tuple[float, int]:
-        distance = abs(item[2] - atm_strike)
-        if not prefer_otm_on_ties:
-            return (distance, 0)
-        otm = (item[3] == "CE" and item[2] > atm_strike) or (
-            item[3] == "PE" and item[2] < atm_strike
-        )
-        return (distance, 0 if otm else 1)
-
     ce_ranked = sorted(
         (i for i in remaining if i[3] == "CE"),
-        key=distance_rank,
+        key=lambda i: abs(i[2] - atm_strike),
     )
     pe_ranked = sorted(
         (i for i in remaining if i[3] == "PE"),
-        key=distance_rank,
+        key=lambda i: abs(i[2] - atm_strike),
     )
     take_ce = True
     while len(capped) < max_options and (ce_ranked or pe_ranked):
