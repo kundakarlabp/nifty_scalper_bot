@@ -69,9 +69,12 @@ def completed_reversal_event_cohort(
             option_bar = histories.get(symbol, {}).get(timestamp)
             if option_bar is None or float(option_bar.get("volume", 0)) <= 0:
                 continue
-            if _archived_weekly_atm_rejection(
-                instrument, timestamp, float(spot["close"])
-            ) is not None:
+            if (
+                _archived_weekly_atm_rejection(
+                    instrument, timestamp, float(spot["close"])
+                )
+                is not None
+            ):
                 continue
             observed.append(
                 {
@@ -126,12 +129,10 @@ def compare_smc_reversal_events(
     if set(strategies) != set(_COMPONENTS):
         raise ValueError("reversal_matched_component_set_invalid")
     resolved = {
-        name: _trade_index(strategies[name], unresolved=False)
-        for name in _COMPONENTS
+        name: _trade_index(strategies[name], unresolved=False) for name in _COMPONENTS
     }
     missing_exit = {
-        name: _trade_index(strategies[name], unresolved=True)
-        for name in _COMPONENTS
+        name: _trade_index(strategies[name], unresolved=True) for name in _COMPONENTS
     }
     event_keys: set[tuple[str, str]] = set()
     paired: list[dict[str, Any]] = []
