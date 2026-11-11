@@ -76,12 +76,8 @@ def test_common_reversal_event_cohort_is_confirmed_and_has_no_next_bar_lookahead
     event = rows[0]
     assert event["side"] == "PE"
     assert event["symbol"] == PE
-    assert event["event_bar_start"] == (
-        START + timedelta(minutes=44)
-    ).isoformat()
-    assert event["earliest_entry"] == (
-        START + timedelta(minutes=45)
-    ).isoformat()
+    assert event["event_bar_start"] == (START + timedelta(minutes=44)).isoformat()
+    assert event["earliest_entry"] == (START + timedelta(minutes=45)).isoformat()
     # The next minute is absent from every source. Eligibility is still causal.
     assert START + timedelta(minutes=45) not in histories[FUTURE]
     assert START + timedelta(minutes=45) not in histories[PE]
@@ -137,9 +133,12 @@ def test_exact_next_minute_contract_matching_preserves_abstentions_and_costs():
             },
         },
     }
-    assert audit.compare_smc_reversal_events(cohort, changed)["resolved_fills"][
-        "FailedBreakoutResearch"
-    ] == 0
+    assert (
+        audit.compare_smc_reversal_events(cohort, changed)["resolved_fills"][
+            "FailedBreakoutResearch"
+        ]
+        == 0
+    )
 
 
 def test_unresolved_exit_and_duplicate_trade_do_not_become_profit():
