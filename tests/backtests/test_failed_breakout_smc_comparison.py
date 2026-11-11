@@ -125,7 +125,10 @@ def test_exact_next_minute_contract_matching_preserves_abstentions_and_costs():
     assert smc["absence_means_no_signal"] is False
     assert smc["net_pnl"] is None
 
-    late = {**trade, "entry_time": (datetime.fromisoformat(entry) + timedelta(minutes=1)).isoformat()}
+    late = {
+        **trade,
+        "entry_time": (datetime.fromisoformat(entry) + timedelta(minutes=1)).isoformat(),
+    }
     changed = {
         **scenario,
         "strategies": {
