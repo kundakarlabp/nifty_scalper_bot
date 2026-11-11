@@ -1,4 +1,4 @@
-"""Purpose: Compare independent failed-breakout reversal against SMC on matched historical events.
+"""Compare failed-breakout reversal against SMC on matched historical events.
 
 Responsibilities: Build a causal futures-confirmation cohort, replay both strategy
 classes through the existing costed component simulator, and reconcile identical
@@ -242,11 +242,11 @@ def run_failed_breakout_smc_comparison(directory: Path) -> dict[str, Any]:
         "selected_for_live": None,
         "scenarios": scenarios,
         "limitations": [
-            "SMC may have signaled at a different candle; same-minute fill is not full setup attribution",
-            "No recorded next-minute fill does not distinguish no-vote from a rejected or pending entry",
-            "Retrospective weekly-ATM proximity is not the actual historical selected basket",
+            "SMC may signal on another candle; same-minute fill is not full setup attribution",
+            "Missing next-minute fill cannot distinguish no-vote from rejected or pending",
+            "Weekly-ATM proximity is not actual historical contract selection",
             "Archived OHLC lacks executable bid/ask depth and real broker queue/fills",
-            "The historical replay omits live arbitration, contract rotation and some exits",
+            "Replay omits live arbitration, contract rotation and some exits",
             "No untouched chronological holdout or prospective paper confirmation",
         ],
     }
