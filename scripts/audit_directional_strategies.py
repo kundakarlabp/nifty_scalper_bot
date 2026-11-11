@@ -41,10 +41,7 @@ def run_directional_research_bundle(directory: Path) -> dict[str, Any]:
             os.environ["VWAP_RESEARCH_COMPARE_RETEST_REBREAK_ONLY"] = existing
     orb = run_orb_comparison(directory)
     reversal = run_failed_breakout_smc_comparison(directory)
-    digests = {
-        str(result["data_sha256"])
-        for result in (vwap, orb, reversal)
-    }
+    digests = {str(result["data_sha256"]) for result in (vwap, orb, reversal)}
     if len(digests) != 1 or not next(iter(digests)):
         raise ValueError("directional_research_source_drift")
     return {
