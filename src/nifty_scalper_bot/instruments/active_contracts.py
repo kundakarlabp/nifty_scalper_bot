@@ -252,6 +252,7 @@ def cap_option_universe(
             capped.append(item)
             seen.add(sel)
     remaining = [item for item in option_items if item[0] not in seen]
+
     def distance_rank(item: tuple[str, int, float, str]) -> tuple[float, int]:
         distance = abs(item[2] - atm_strike)
         if not prefer_otm_on_ties:
