@@ -344,7 +344,6 @@ def test_replacement_contract_policy_is_fail_closed(
     assert blocked == expected_reason
 
 
-
 def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
