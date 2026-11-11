@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-
 from scripts import audit_directional_strategies as audit
 
 
