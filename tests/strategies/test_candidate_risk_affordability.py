@@ -289,9 +289,7 @@ def test_replacement_prefilter_skips_affordable_plus_100_before_plus_50(
     permitted = SimpleNamespace(
         symbol="NFO:NIFTY2691523550CE", entry_price=65.0, stop_loss=59.8
     )
-    runner._active_option_symbols = {
-        preferred.symbol, outside.symbol, permitted.symbol
-    }
+    runner._active_option_symbols = {preferred.symbol, outside.symbol, permitted.symbol}
     selected, decisions = runner._select_capital_eligible_candidate(
         ranked_candidates=[outside, permitted, preferred],
         candidate_snapshots=[
@@ -331,8 +329,10 @@ def test_replacement_contract_policy_is_fail_closed(
     monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
     runner = object.__new__(StrategyRunner)
     runner._active_option_symbols = {
-        "NFO:NIFTY2691523500CE", "NFO:NIFTY2691523550CE",
-        "NFO:NIFTY2691523600CE", "NFO:NIFTY2692223550CE",
+        "NFO:NIFTY2691523500CE",
+        "NFO:NIFTY2691523550CE",
+        "NFO:NIFTY2691523600CE",
+        "NFO:NIFTY2692223550CE",
         "NFO:NIFTY2691523500PE",
     }
     blocked, _policy = runner._candidate_replacement_contract_guard(
