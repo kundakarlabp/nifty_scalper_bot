@@ -55,9 +55,9 @@ def test_orb_research_resets_inherited_toggles_and_restores_environment(monkeypa
 
     monkeypatch.setattr(research, "_scenario", fake_scenario)
     result = research.run_orb_comparison(Path("/unused"))
-    assert result["candidate_count"] == 11
+    assert result["candidate_count"] == 13
     assert result["selection"]["promotion_eligible"] is False
-    assert len(seen) == 11 * 3
+    assert len(seen) == 13 * 3
     assert [entry["slippage"] for entry in seen[:3]] == [10.0, 25.0, 50.0]
 
     # Every reference starts from declared defaults, not operator leftovers.
@@ -73,6 +73,22 @@ def test_orb_research_resets_inherited_toggles_and_restores_environment(monkeypa
         assert entry["momentum"] == "false"
         assert entry["entry_window"] is None
         assert entry["target_rr"] is None
+
+    # Timing arms change only the entry window; all other policies are reset.
+    for window, begin in (("30", 15), ("60", 18), ("180", 21)):
+        for entry in seen[begin : begin + 3]:
+            assert entry["entry_window"] == window
+            assert entry["momentum"] is None
+            assert entry["target_rr"] is None
+            assert entry["allow_range"] == "false"
+    compared = result["timing_window_comparisons"]
+    assert len(compared) == 9
+    assert {row["treatment"] for row in compared} == {
+        "early_entry_30",
+        "early_entry_60",
+        "extended_entry_180_research",
+    }
+    assert all(row["profitability_inference_allowed"] is False for row in compared)
 
     # Each scenario restores external settings without side effects.
     assert research.os.environ["ORB_MOMENTUM_BRANCH_ENABLED"] == "false"
