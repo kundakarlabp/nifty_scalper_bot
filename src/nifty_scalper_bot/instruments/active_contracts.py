@@ -1,6 +1,6 @@
 """Runtime role:
 - Parsing/canonicalization utilities for active contract diagnostics.
-- Deterministic option-universe cap favours OTM strikes at equal ATM distance.
+- Optional live-basket OTM tie-break preserves research archive pair coverage.
 - Runtime active contract selection belongs to InstrumentManager.
 - Must not derive live futures from selected options."""
 
@@ -228,11 +228,13 @@ def cap_option_universe(
     selected_pe: str,
     atm_strike: float,
     max_options: int,
+    prefer_otm_on_ties: bool = False,
 ) -> list[tuple[str, int, float, str]]:
     """Args: (symbol, token, strike, side) items, selected pair, atm, cap.
     Returns: capped list always containing selected CE/PE, remaining slots
-    filled by strikes nearest to ATM alternating CE/PE; equal-distance
-    candidates favour the OTM side to retain cash-compatible alternatives.
+    filled by strikes nearest to ATM alternating CE/PE. When opted in by
+    the live instrument owner, equal-distance ties favour OTM options.
+    Default distance-only stable ordering preserves archival strike pairs.
     This does not prove liquidity or permit an entry. Raises: none.
 
     Single global cap for the active option universe. Applying it where the
@@ -250,21 +252,22 @@ def cap_option_universe(
             capped.append(item)
             seen.add(sel)
     remaining = [item for item in option_items if item[0] not in seen]
+    def distance_rank(item: tuple[str, int, float, str]) -> tuple[float, int]:
+        distance = abs(item[2] - atm_strike)
+        if not prefer_otm_on_ties:
+            return (distance, 0)
+        otm = (item[3] == "CE" and item[2] > atm_strike) or (
+            item[3] == "PE" and item[2] < atm_strike
+        )
+        return (distance, 0 if otm else 1)
+
     ce_ranked = sorted(
         (i for i in remaining if i[3] == "CE"),
-        key=lambda i: (
-            abs(i[2] - atm_strike),
-            0 if i[2] >= atm_strike else 1,
-            i[0],
-        ),
+        key=distance_rank,
     )
     pe_ranked = sorted(
         (i for i in remaining if i[3] == "PE"),
-        key=lambda i: (
-            abs(i[2] - atm_strike),
-            0 if i[2] <= atm_strike else 1,
-            i[0],
-        ),
+        key=distance_rank,
     )
     take_ce = True
     while len(capped) < max_options and (ce_ranked or pe_ranked):
