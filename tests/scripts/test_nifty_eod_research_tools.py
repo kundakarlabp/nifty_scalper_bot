@@ -6,7 +6,6 @@ import gzip
 import json
 import sqlite3
 from datetime import date, datetime
-from pathlib import Path
 
 import pytest
 from scripts.build_eod_contract_db import SCHEMA, check_sha, parse_catalog
