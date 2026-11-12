@@ -26,6 +26,11 @@ Owner: offline research only. No broker credentials, exchange data, private keys
 - NSE quote feed depths: https://www.nseindia.com/static/market-data/real-time-data-subscription
 - NSE contact: marketdata@nse.co.in
 
+## Secondary research/data-access routes
+- Quantsapp advertises historical NIFTY option-chain bid/ask, greeks, order flow and point-in-time expiry/lot data at one-second resolution in its own backtester. It does **not** establish from this public description that raw history is downloadable, API-accessible, top-five depth, or licensed for an external bot. Verify export rights, quote field definition, timestamp controls and sample data before committing: https://www.quantsapp.com/backtesting/data
+- Global Datafeeds documents NFO historical TICK calls and bid/ask L1 fields; this is a plausible independent historical best-bid/ask source but must be checked for available 2024–2026 contracts, export limits, timestamp semantics, volume and historical quote completeness. Its listed historical format does not prove five-level depth: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/introduction/type-of-data-available/
+- Reject third-party claims of complete tick/L2 archives without a verifiable licensed sample and exchange provenance; do not use scraped/live option-chain pages as historical bid/ask evidence.
+
 ## Mandatory pilot before full procurement
 Request a small but representative paid/free sample including: a normal high-volume Tuesday/weekly expiry, a volatile intraday session, an illiquid/wide-spread strike, and exact special-session samples if retained. Require contemporaneous order/quote updates with source timestamp, historical master, sample count and gap audit, and a documented reconstruction example.
 Reject a trade-only/EOD/1-minute-candle-only offering as **insufficient for execution-grade depth replay**.
@@ -42,7 +47,7 @@ Reject a trade-only/EOD/1-minute-candle-only offering as **insufficient for exec
 ## Release gates
 | Gate | Pass requirement | Current |
 |---|---|---|
-| G0 archive integrity | Signed/hash-verified historical archives, no duplicate overwrite | 25/25 archives validated; original 19 partial windows |
+| G0 archive integrity | Hash-verified historical archives, no duplicate overwrite | 25/25 archives validated; original 19 partial windows |
 | G1 strategy candles | Strict 1/5/15m causal samples, missing periods exposed | Conditional research only |
 | G2 historical universe | Point-in-time all candidate strikes, lot/tick/expiry, special dates | FAIL |
 | G3 historical execution quotes | Complete synchronized contemporaneous bid/ask or verified 5-level reconstruction for studied events | FAIL |
