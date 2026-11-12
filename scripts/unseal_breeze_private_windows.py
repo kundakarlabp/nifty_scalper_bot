@@ -5,6 +5,7 @@ Ownership: offline, human-invoked research transport only.
 Safety: private key never read into Python or logged; no network, broker or orders.
 Encrypted originals stay unchanged. Decrypted data must remain on private storage.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,7 @@ from pathlib import Path
 from scripts.prepare_breeze_research_dataset import verify_window
 
 SHA256 = re.compile(r"^([a-fA-F0-9]{64})  history.cms\s*$")
-LIMIT_BYTES = 4 * 1024 ** 3
+LIMIT_BYTES = 4 * 1024**3
 
 
 def _safe_unseal(
@@ -32,8 +33,7 @@ def _safe_unseal(
         temporary = Path(scratch)
         with zipfile.ZipFile(archive) as src:
             members = {
-                item.filename: item for item in src.infolist()
-                if not item.is_dir()
+                item.filename: item for item in src.infolist() if not item.is_dir()
             }
             if set(members) != {"history.cms", "history.cms.sha256"}:
                 raise ValueError("encrypted_archive_members_invalid")
@@ -56,9 +56,20 @@ def _safe_unseal(
         decrypted_tar = temporary / "window.tar.gz"
         with subprocess.Popen(
             [
-                "openssl", "cms", "-decrypt", "-binary", "-inform", "DER",
-                "-in", str(cms), "-inkey", str(private_key),
-                "-recip", str(recipient), "-out", str(decrypted_tar),
+                "openssl",
+                "cms",
+                "-decrypt",
+                "-binary",
+                "-inform",
+                "DER",
+                "-in",
+                str(cms),
+                "-inkey",
+                str(private_key),
+                "-recip",
+                str(recipient),
+                "-out",
+                str(decrypted_tar),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -107,11 +118,19 @@ def _safe_unseal(
         os.replace(prepared, destination)
 
 
-def unseal(archives_dir: Path, private_key: Path, recipient: Path, output: Path,
-           *, expected_windows: int = 25) -> dict:
+def unseal(
+    archives_dir: Path,
+    private_key: Path,
+    recipient: Path,
+    output: Path,
+    *,
+    expected_windows: int = 25,
+) -> dict:
     if (
-        not archives_dir.is_dir() or not private_key.is_file()
-        or not recipient.is_file() or not 1 <= expected_windows <= 100
+        not archives_dir.is_dir()
+        or not private_key.is_file()
+        or not recipient.is_file()
+        or not 1 <= expected_windows <= 100
     ):
         raise ValueError("unseal_inputs_missing")
     archives = sorted(archives_dir.glob("Breeze_Window_*.zip"))
@@ -141,8 +160,11 @@ def main() -> None:
     args = parser.parse_args()
     os.umask(0o077)
     result = unseal(
-        args.encrypted_windows,args.private_key,args.recipient_cert,args.output,
-        expected_windows=args.expected_windows
+        args.encrypted_windows,
+        args.private_key,
+        args.recipient_cert,
+        args.output,
+        expected_windows=args.expected_windows,
     )
     print(
         f"Verified {result['unsealed_verified_windows']} owner-only windows; "
