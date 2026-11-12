@@ -1,7 +1,8 @@
 """Causal, read-only research adapter for NIFTY EOD option/future references.
 
-It never provides executable quotes, market depth, or intraday historical lots.
-Data are ex-post and may only inform research on dates after each EOD session.
+Responsibilities: Serve dated EOD contract and index research observations.
+Ownership: Offline strategy research only, not live market data or execution.
+Safety: Reject same-day lookahead, executable quotes and simulated broker fills.
 """
 from __future__ import annotations
 
