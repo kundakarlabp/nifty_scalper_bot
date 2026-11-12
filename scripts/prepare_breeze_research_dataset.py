@@ -394,8 +394,6 @@ def export_series(
     side: str | None,
     interval: int,
 ) -> dict[str, Any]:
-    if output.exists() or not database.is_file() or interval not in (1, 5, 15):
-        raise ValueError("research_export_input_invalid")
     if product not in ("cash", "futures", "options"):
         raise ValueError("research_product_invalid")
     if (
@@ -414,6 +412,8 @@ def export_series(
         )
     ):
         raise ValueError("research_identity_incomplete")
+    if output.exists() or not database.is_file() or interval not in (1, 5, 15):
+        raise ValueError("research_export_input_invalid")
     with sqlite3.connect(f"file:{database.resolve()}?mode=ro", uri=True) as conn:
         candidate = conn.execute(
             "SELECT id,status FROM series WHERE trade_day=? AND product_type=? "
