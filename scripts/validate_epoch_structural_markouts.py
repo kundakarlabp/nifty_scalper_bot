@@ -241,12 +241,16 @@ def _candidate_inclusion_funnel(
         if not str(context.get("strategy") or "").strip():
             excluded["missing_owned_strategy"] += 1
             continue
-        side = str(
-            context.get("contract_side")
-            or context.get("trade_side")
-            or row.get("direction")
-            or ""
-        ).strip().upper()
+        side = (
+            str(
+                context.get("contract_side")
+                or context.get("trade_side")
+                or row.get("direction")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         if side not in {"CE", "PE"}:
             excluded["invalid_option_side"] += 1
             continue
