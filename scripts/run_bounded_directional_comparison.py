@@ -3,8 +3,10 @@
 
 Responsibilities: Use pre-existing, checksum-prepared PUBLIC monthly-option
 sessions; select a small date-stratified archive cohort independent of outcomes;
-replay the existing strategies and retain source provenance and unresolved exits.
-Boundaries: SHADOW-only; modeled option OHLC is not executable quote evidence.
+replay the existing strategies, retain frozen matched-event IDs, inferred-contract
+labels, source provenance, rejection evidence and unresolved exit statuses.
+Boundary: SHADOW-only; monthly OHLC and inferred contract labels are not
+historically verified instruments, direction provenance or executable quotes.
 Safety: Never submits orders, changes live configuration or promotes parameters.
 """
 
