@@ -114,7 +114,11 @@ def test_original_two_epochs_never_mix_decisions_or_quotes(tmp_path, monkeypatch
     grouped = {
         item["horizon_seconds"]: item for item in result["grouped_outcomes"]
     }
-    assert grouped[60]["quote_valid"] == 2, {\n        "coverage": grouped[60],\n        "epochs": result["epochs"],\n        "outcomes": [o for o in result["outcomes"] if o["horizon_seconds"] == 60],\n    }
+    assert grouped[60]["quote_valid"] == 2, {
+        "coverage": grouped[60],
+        "epochs": result["epochs"],
+        "outcomes": [o for o in result["outcomes"] if o["horizon_seconds"] == 60],
+    }
     assert grouped[60]["cost_modelled"] == 2
     assert grouped[900]["quote_valid"] == 0
     assert grouped[900]["status_counts"] == {"horizon_crosses_epoch_end": 2}
@@ -158,7 +162,11 @@ def test_dropped_capture_and_wrong_sha_fail_closed(tmp_path, monkeypatch):
 def test_research_only_without_local_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="epoch_audit_requires_shadow"):
-        audit.audit_original_session(\n            tmp_path / "missing.jsonl", tmp_path / "missing.db"\n        )
+        audit.audit_original_session(
+            tmp_path / "missing.jsonl", tmp_path / "missing.db"
+        )
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     with pytest.raises(ValueError, match="epoch_audit_original_tape_missing"):
-        audit.audit_original_session(\n            tmp_path / "missing.jsonl", tmp_path / "missing.db"\n        )
+        audit.audit_original_session(
+            tmp_path / "missing.jsonl", tmp_path / "missing.db"
+        )
