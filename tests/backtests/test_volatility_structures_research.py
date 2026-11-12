@@ -211,12 +211,8 @@ def test_straddle_uses_actual_spot_to_reject_non_atm_quotes(spot):
 def test_debit_spread_crosses_book_and_preserves_single_long_comparator(
     option_type, long_strike, short_strike, structure, breakeven
 ):
-    long_leg = quote(
-        option_type, long_strike, bid=95, ask=100, token=31
-    )
-    short_leg = quote(
-        option_type, short_strike, bid=50, ask=55, token=32
-    )
+    long_leg = quote(option_type, long_strike, bid=95, ask=100, token=31)
+    short_leg = quote(option_type, short_strike, bid=50, ask=55, token=32)
     result = assess_directional_debit_spread(
         long_leg=long_leg, short_leg=short_leg, at=_AT
     )
@@ -281,9 +277,7 @@ def test_debit_spread_rejects_wrong_direction_or_unverified_quote(
     long_leg, short_leg, reason
 ):
     with pytest.raises(ValueError, match=reason):
-        assess_directional_debit_spread(
-            long_leg=long_leg, short_leg=short_leg, at=_AT
-        )
+        assess_directional_debit_spread(long_leg=long_leg, short_leg=short_leg, at=_AT)
 
 
 @pytest.mark.parametrize("mode", ["LIVE", "PAPER", ""])
