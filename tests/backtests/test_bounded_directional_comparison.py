@@ -243,7 +243,10 @@ def test_pilot_preserves_same_event_reversal_identity_without_proof(tmp_path):
     for side in ("CE", "PE"):
         (candle_dir / f"{side}.json").write_text(
             json.dumps(
-                {"symbol": f"NFO:NIFTY19JAN11000{side}", "instrument": instruments[side]}
+                {
+                    "symbol": f"NFO:NIFTY19JAN11000{side}",
+                    "instrument": instruments[side],
+                }
             )
         )
     study = {
