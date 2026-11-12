@@ -161,16 +161,18 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
         or payload.get("promotion_eligible") is not False
     ):
         raise ValueError("breeze_source_provenance_invalid")
-    for field, value in (
-        ("candles", payload.get("candles")),
-        ("provider_rows", payload.get("provider_rows")),
+    for field, checksum_key in (
+        ("candles", "candles_sha256"),
+        ("provider_rows", "provider_sha256"),
     ):
+        value = payload.get(field)
+        checksum = payload.get(checksum_key)
         if not isinstance(value, list):
             raise ValueError("breeze_source_array_missing")
         if (
-            not isinstance(payload.get(f"{field}_sha256"), str)
-            or not SHA_VALUE.fullmatch(payload[f"{field}_sha256"])
-            or digest_json(value) != payload[f"{field}_sha256"]
+            not isinstance(checksum, str)
+            or not SHA_VALUE.fullmatch(checksum)
+            or digest_json(value) != checksum
         ):
             raise ValueError("breeze_source_digest_mismatch")
     key, product, expiry, strike, side = contract_identity(payload)
