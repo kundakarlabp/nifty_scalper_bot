@@ -114,7 +114,7 @@ def test_original_two_epochs_never_mix_decisions_or_quotes(tmp_path, monkeypatch
     grouped = {
         item["horizon_seconds"]: item for item in result["grouped_outcomes"]
     }
-    assert grouped[60]["quote_valid"] == 2
+    assert grouped[60]["quote_valid"] == 2, {\n        "coverage": grouped[60],\n        "epochs": result["epochs"],\n        "outcomes": [o for o in result["outcomes"] if o["horizon_seconds"] == 60],\n    }
     assert grouped[60]["cost_modelled"] == 2
     assert grouped[900]["quote_valid"] == 0
     assert grouped[900]["status_counts"] == {"horizon_crosses_epoch_end": 2}
