@@ -151,17 +151,11 @@ def _direction(
     return "UNDERLYING_DIRECTION_ALIGNED", result.executable_bias
 
 
-def _book(
-    row: Mapping[str, Any], contract: Mapping[str, Any]
-) -> ObservedBook:
+def _book(row: Mapping[str, Any], contract: Mapping[str, Any]) -> ObservedBook:
     """Reject malformed depth rather than backfill it from option OHLC."""
     if not _sha(row.get("source_sha256")):
         raise ValueError("pit_depth_source_unverified")
-    if any(
-        type(level[1]) is not int
-        for side in ("bid", "ask")
-        for level in row[side]
-    ):
+    if any(type(level[1]) is not int for side in ("bid", "ask") for level in row[side]):
         raise ValueError("pit_depth_quantity_unverified")
     return ObservedBook(
         symbol=str(row["symbol"]),
@@ -182,16 +176,12 @@ def _book(
     )
 
 
-def _event_status(
-    event: Mapping[str, Any], proof: Mapping[str, Any]
-) -> dict[str, Any]:
+def _event_status(event: Mapping[str, Any], proof: Mapping[str, Any]) -> dict[str, Any]:
     decision = _time(event["earliest_entry"])
     event_bar_start = _time(event["event_bar_start"])
     if decision != event_bar_start + timedelta(minutes=1):
         raise ValueError("pit_event_decision_clock_invalid")
-    contract_status, contract = _contract(
-        event, proof.get("contract") or {}, decision
-    )
+    contract_status, contract = _contract(event, proof.get("contract") or {}, decision)
     direction_status, direction = _direction(
         event, proof.get("direction") or {}, decision
     )
@@ -217,9 +207,8 @@ def _event_status(
             entry_status = "HISTORICAL_FIVE_LEVEL_QUOTES_MISSING"
         else:
             fee = proof.get("historical_exchange_rate") or {}
-            if (
-                fee.get("independent_source_verified") is not True
-                or not _sha(fee.get("source_sha256"))
+            if fee.get("independent_source_verified") is not True or not _sha(
+                fee.get("source_sha256")
             ):
                 entry_status = "HISTORICAL_EXCHANGE_FEE_UNVERIFIED"
             else:
@@ -248,7 +237,8 @@ def _event_status(
     blockers = [
         status
         for status in (contract_status, direction_status, entry_status)
-        if status not in {
+        if status
+        not in {
             "POINT_IN_TIME_CONTRACT_ASSERTED",
             "UNDERLYING_DIRECTION_ALIGNED",
             "observed_depth_model_only",
