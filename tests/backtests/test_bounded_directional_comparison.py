@@ -224,3 +224,71 @@ def test_pilot_rejects_invalid_diagnostic_counters(diagnostics):
                 }
             ]
         )
+
+
+def test_pilot_preserves_same_event_reversal_identity_without_proof(tmp_path):
+    root = tmp_path / "session"
+    candle_dir = root / "candles"
+    candle_dir.mkdir(parents=True)
+    instruments = {
+        "CE": {"instrument_type": "CE", "expiry": "2019-01-24", "strike": 11000, "lot_size": 75},
+        "PE": {"instrument_type": "PE", "expiry": "2019-01-24", "strike": 11000, "lot_size": 75},
+    }
+    for side in ("CE", "PE"):
+        (candle_dir / f"{side}.json").write_text(
+            json.dumps({"symbol": f"NFO:NIFTY19JAN11000{side}", "instrument": instruments[side]})
+        )
+    study = {
+        "failed_breakout_vs_smc": {
+            "scenarios": [
+                {
+                    "events": [
+                        {
+                            "event_bar_start": "2019-01-23T09:30:00+05:30",
+                            "earliest_entry": "2019-01-23T09:31:00+05:30",
+                            "future": "NFO:NIFTY_F1",
+                            "symbol": "NFO:NIFTY19JAN11000CE",
+                            "side": "CE",
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    roster = pilot._matched_reversal_event_roster(
+        study, session_path=root, phase="validation"
+    )
+    assert len(roster) == 1
+    assert len(roster[0]["event_id"]) == 64
+    assert roster[0]["archive_instrument"]["lot_size"] == 75
+    assert roster[0]["historical_master_verified"] is False
+    assert roster[0]["source_clock_verified"] is False
+    assert roster[0]["observed_depth_available"] is False
+
+
+def test_reversal_roster_detects_duplicate_market_option_event(tmp_path):
+    root = tmp_path / "session"
+    candle_dir = root / "candles"
+    candle_dir.mkdir(parents=True)
+    for side in ("CE", "PE"):
+        (candle_dir / f"{side}.json").write_text(
+            json.dumps(
+                {
+                    "symbol": f"NFO:NIFTY19JAN11000{side}",
+                    "instrument": {"instrument_type": side},
+                }
+            )
+        )
+    event = {
+        "event_bar_start": "2019-01-23T09:30:00+05:30",
+        "earliest_entry": "2019-01-23T09:31:00+05:30",
+        "future": "NFO:NIFTY_F1",
+        "symbol": "NFO:NIFTY19JAN11000CE",
+        "side": "CE",
+    }
+    with pytest.raises(ValueError, match="event_duplicate"):
+        pilot._matched_reversal_event_roster(
+            {"failed_breakout_vs_smc": {"scenarios": [{"events": [event, event]}]}},
+            session_path=root,
+            phase="validation",
+        )
