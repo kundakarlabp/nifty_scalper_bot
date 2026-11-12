@@ -154,8 +154,8 @@ def _recorded_full_book_quote(
     bid_levels, ask_levels = books
     if (
         bid_levels[0] >= ask_levels[0]
-        or any(a < b for a, b in zip(bid_levels[1:], bid_levels[:-1]))
-        or any(a > b for a, b in zip(ask_levels[1:], ask_levels[:-1]))
+        or any(a > b for a, b in zip(bid_levels[1:], bid_levels[:-1]))
+        or any(a < b for a, b in zip(ask_levels[1:], ask_levels[:-1]))
     ):
         return "five_level_order_invalid", None
     top_bid, top_ask = tick.get("bid"), tick.get("ask")
