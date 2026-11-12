@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Purpose: Audit original captured replay epochs and same-epoch quote outcomes.
 
-Responsibilities: Verify writer sidecars and isolate original process epochs,
-scope canonical decisions to the IST session, and measure exact-contract quote
-coverage without crossing a restart or selected-basket change.
+Responsibilities: Verify writer sidecars and isolate original process epochs;
+reconcile every IST-day decision through candidate-inclusion and setup-ID
+denominators, report missing selected quote context by role, and measure exact-
+contract forward quote coverage without crossing a restart or basket change.
 Boundaries: Offline SHADOW-only, no broker or network calls and no live changes.
 Safety: Missing quote paths, incomplete segment fidelity and absent fills never
 become synthesized outcomes or a strategy-promotion recommendation.
