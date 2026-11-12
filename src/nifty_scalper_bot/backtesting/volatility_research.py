@@ -329,7 +329,9 @@ class PortfolioBudgetScreen:
 
 def screen_volatility_portfolio_budget(
     *,
-    assessment: CondorAssessment | LongStraddleAssessment | DirectionalDebitSpreadAssessment,
+    assessment: (
+        CondorAssessment | LongStraddleAssessment | DirectionalDebitSpreadAssessment
+    ),
     broker_required_margin: float | None,
     broker_free_margin: float | None,
     remaining_trade_risk: float | None,
