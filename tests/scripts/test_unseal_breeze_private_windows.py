@@ -1,4 +1,5 @@
 """Offline CMS transport regression: no broker secrets, no network."""
+
 import hashlib
 import io
 import json
