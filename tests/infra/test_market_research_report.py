@@ -11,6 +11,7 @@ from nifty_scalper_bot.infra.market_research_report import (
     _cost_model,
     _parity_summary,
     _sampled_markouts,
+    _session_decision_rows,
     build_session_research_report,
     research_report_log_lines,
 )
@@ -320,3 +321,62 @@ def test_postmarket_changed_archive_hash_invalidates_counterfactuals(
         (tmp_path / "research" / "markouts" / "2026-11-03.json").read_text()
     )
     assert persisted["status"] == "unavailable"
+
+
+def test_session_decisions_are_scoped_by_ist_midnight_not_utc() -> None:
+    midnight_ist = datetime(2026, 11, 2, 18, 30, tzinfo=timezone.utc)
+    end_ist = midnight_ist + timedelta(days=1)
+    rows = [
+        {"timestamp": (midnight_ist - timedelta(seconds=1)).timestamp()},
+        {"timestamp": midnight_ist.timestamp()},
+        {"timestamp": DECISION.timestamp()},
+        {"timestamp": (end_ist - timedelta(seconds=1)).timestamp()},
+        {"timestamp": end_ist.timestamp()},
+        {"timestamp": None},
+        {"timestamp": float("nan")},
+    ]
+    scoped = _session_decision_rows(rows, date(2026, 11, 3))
+    assert scoped == rows[1:4]
+
+
+def test_postmarket_excludes_other_day_trade_decisions_before_markouts(
+    tmp_path, monkeypatch
+) -> None:
+    from nifty_scalper_bot.backtesting import setup_opportunity_analysis
+    from nifty_scalper_bot.journal import trade_ledger
+
+    replay_path, _run_id = _session(tmp_path)
+    trade_db = tmp_path / "trades.db"
+    trade_db.touch()
+    decisions = [
+        {"timestamp": (DECISION - timedelta(days=1)).timestamp()},
+        {"timestamp": DECISION.timestamp()},
+        {"timestamp": (DECISION + timedelta(days=1)).timestamp()},
+    ]
+    seen = []
+
+    monkeypatch.setattr(
+        trade_ledger, "load_candidate_decision_rows", lambda _path: decisions
+    )
+
+    def capture(rows):
+        seen.extend(rows)
+        return ()
+
+    monkeypatch.setattr(
+        setup_opportunity_analysis, "canonicalize_setup_opportunities", capture
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=_journal(),
+        replay_path=replay_path,
+        trade_db=trade_db,
+        output_path=tmp_path / "scope.json",
+    )
+    assert report["status"] == "analysed"
+    assert seen == [decisions[1]]
+    assert report["structural_decision_rows_scoped"] == 1
+    assert report["structural_decision_rows_excluded_non_session"] == 2
+    session_log = research_report_log_lines(report)[0]
+    assert '"structural_decision_rows_scoped":1' in session_log
+    assert '"structural_decision_rows_excluded_non_session":2' in session_log
