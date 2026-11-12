@@ -1,9 +1,10 @@
-"""Causal, read-only research adapter for NIFTY EOD option/future references.
+"""Causal, read-only research adapter for NIFTY EOD contract references.
 
-Responsibilities: Serve dated EOD contract and index research observations.
-Ownership: Offline strategy research only, not live market data or execution.
-Safety: Reject same-day lookahead, executable quotes and simulated broker fills.
+Responsibilities: Serve available-after-day historical contract and index bars.
+Ownership: Offline research input, not production execution.
+Safety: Reject same-day lookahead and unsupported quotes or fills.
 """
+
 from __future__ import annotations
 
 import argparse
