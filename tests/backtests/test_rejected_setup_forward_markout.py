@@ -171,8 +171,7 @@ def test_structural_summary_reports_unlabelled_quote_failure_reasons() -> None:
         },
     ]
     by_horizon = {
-        row["horizon_seconds"]: row
-        for row in summarize_groups(rows, min_labelled=10)
+        row["horizon_seconds"]: row for row in summarize_groups(rows, min_labelled=10)
     }
     assert by_horizon[900]["independent_setups"] == 4
     assert by_horizon[900]["labelled"] == 1
@@ -181,7 +180,5 @@ def test_structural_summary_reports_unlabelled_quote_failure_reasons() -> None:
         "no_point_in_time_entry_ask": 2,
     }
     assert sum(by_horizon[900]["unlabelled_status_counts"].values()) == 3
-    assert by_horizon[60]["unlabelled_status_counts"] == {
-        "stale_terminal_bid": 1
-    }
+    assert by_horizon[60]["unlabelled_status_counts"] == {"stale_terminal_bid": 1}
     assert by_horizon[900]["causal_or_profitability_inference_ready"] is False
