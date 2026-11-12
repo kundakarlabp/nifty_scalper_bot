@@ -1,0 +1,37 @@
+# Temporary read-only formatter; removed before merge.
+name: Offline Breeze Python format preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/finish_breeze_private_replay.py
+      - scripts/replay_breeze_archive_sqlite.py
+      - tests/scripts/test_finish_breeze_private_replay.py
+      - tests/scripts/test_replay_breeze_archive_sqlite.py
+      - .github/workflows/research-breeze-format-preview.yml
+
+permissions:
+  contents: read
+
+jobs:
+  format-preview:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Format research Python in ephemeral CI only
+        run: |
+          python -m pip install --disable-pip-version-check ruff black
+          python -m ruff check --fix --select I scripts/finish_breeze_private_replay.py scripts/replay_breeze_archive_sqlite.py tests/scripts/test_finish_breeze_private_replay.py tests/scripts/test_replay_breeze_archive_sqlite.py
+          python -m black scripts/finish_breeze_private_replay.py scripts/replay_breeze_archive_sqlite.py tests/scripts/test_finish_breeze_private_replay.py tests/scripts/test_replay_breeze_archive_sqlite.py
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for name in ('scripts/finish_breeze_private_replay.py', 'scripts/replay_breeze_archive_sqlite.py', 'tests/scripts/test_finish_breeze_private_replay.py', 'tests/scripts/test_replay_breeze_archive_sqlite.py'):
+              print('REPLAY_FORMAT_JSON:' + json.dumps({'path': name, 'content': Path(name).read_text()}))
+          PY
