@@ -134,3 +134,54 @@ def test_markout_uses_decision_time_not_first_seen_or_later_rejection() -> None:
     assert outcome["status"] == "observed_bid_path_not_broker_fill"
     assert outcome["markout"]["entry_ask"] == 200.0
     assert outcome["markout"]["gross_spread_adjusted_markout_pct"] == 10.0
+
+
+def test_structural_summary_reports_unlabelled_quote_failure_reasons() -> None:
+    base = {"approved": False, "reason": "alpha_below_threshold"}
+    rows = [
+        {
+            **base,
+            "horizon_seconds": 900,
+            "markout": None,
+            "status": "no_point_in_time_entry_ask",
+        },
+        {
+            **base,
+            "horizon_seconds": 900,
+            "markout": None,
+            "status": "no_point_in_time_entry_ask",
+        },
+        {
+            **base,
+            "horizon_seconds": 900,
+            "markout": None,
+            "status": "contract_rotation_or_missing_identity",
+        },
+        {
+            **base,
+            "horizon_seconds": 900,
+            "markout": {"gross_spread_adjusted_markout_pct": 2.0},
+            "status": "observed_bid_path_not_broker_fill",
+        },
+        {
+            **base,
+            "horizon_seconds": 60,
+            "markout": None,
+            "status": "stale_terminal_bid",
+        },
+    ]
+    by_horizon = {
+        row["horizon_seconds"]: row
+        for row in summarize_groups(rows, min_labelled=10)
+    }
+    assert by_horizon[900]["independent_setups"] == 4
+    assert by_horizon[900]["labelled"] == 1
+    assert by_horizon[900]["unlabelled_status_counts"] == {
+        "contract_rotation_or_missing_identity": 1,
+        "no_point_in_time_entry_ask": 2,
+    }
+    assert sum(by_horizon[900]["unlabelled_status_counts"].values()) == 3
+    assert by_horizon[60]["unlabelled_status_counts"] == {
+        "stale_terminal_bid": 1
+    }
+    assert by_horizon[900]["causal_or_profitability_inference_ready"] is False
