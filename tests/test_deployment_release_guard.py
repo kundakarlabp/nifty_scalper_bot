@@ -140,3 +140,13 @@ def test_backup_runs_without_root_config_and_does_not_capture_env(
     assert (backup / "data/state.json").read_text() == "{}"
     assert not (backup / ".env").exists()
     assert not (backup / "config").exists()
+
+
+def test_deployment_paths_do_not_use_obsolete_entrypoint() -> None:
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    railway = (root / "railway.toml").read_text(encoding="utf-8")
+    assert "entrypoint.sh" not in dockerfile
+    assert "/bin/bash /app/entrypoint.sh" not in railway
+    assert "[env]" not in railway
+    assert 'source = ".env"' not in railway
