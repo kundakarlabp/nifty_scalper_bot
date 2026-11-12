@@ -97,6 +97,30 @@ def test_verified_capture_has_anonymous_quote_fidelity_statistics(tmp_path):
     assert not report["actual_exchange_stream_completeness_proven"]
 
 
+def test_ws_full_provenance_passes_selected_depth_context(tmp_path):
+    recorder = ReplayArchive(tmp_path)
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
+    recorder.record("snapshot", _snapshot(), now)
+    for symbol in (CE, PE, FUT, "NSE:NIFTY 50"):
+        recorder.record(
+            "tick",
+            _tick(symbol, full=True, source="ws_full"),
+            now + timedelta(seconds=1),
+        )
+    recorder.close()
+
+    report = audit_session(tmp_path / "2026-10-21.jsonl")
+    assert report["archive_integrity_verified"] is True
+    assert report["observed_selected_context_available"] is True
+    assert report["basket_segments_with_quote_context"] == 1
+    assert report["roles"]["CE"]["websocket_ticks"] == 1
+    assert report["roles"]["PE"]["websocket_ticks"] == 1
+    assert report["roles"]["FUT"]["websocket_ticks"] == 1
+    assert report["roles"]["CE"]["five_level_depth_ticks"] == 1
+    assert report["roles"]["CE"]["observed_ws_two_sided_quote_minutes"] == 1
+    assert report["promotion_eligible"] is False
+
+
 def test_missing_quote_minute_ranges_preserve_exact_holes() -> None:
     # Observed ticks are updates, not a guarantee of every exchange message.
     observed = {
