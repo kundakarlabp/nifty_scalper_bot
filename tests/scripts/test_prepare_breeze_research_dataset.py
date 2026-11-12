@@ -7,7 +7,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from scripts.prepare_breeze_research_dataset import (
     build,
     digest_json,
