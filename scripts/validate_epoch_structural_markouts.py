@@ -455,7 +455,9 @@ def _report_grouped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "quote_missing": len(observed) - quote_valid,
                 "strict_full_depth_valid": strict_valid,
                 "strict_full_depth_missing": len(observed) - strict_valid,
-                "strict_full_depth_status_counts": dict(sorted(strict_statuses.items())),
+                "strict_full_depth_status_counts": dict(
+                    sorted(strict_statuses.items())
+                ),
                 "cost_modelled": cost_valid,
                 "cost_unavailable": len(observed) - cost_valid,
                 "status_counts": dict(sorted(statuses.items())),
