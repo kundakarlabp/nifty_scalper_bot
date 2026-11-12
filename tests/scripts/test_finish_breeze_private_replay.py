@@ -11,7 +11,7 @@ import json
 import subprocess
 import tarfile
 import zipfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -38,9 +38,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     )
     bars = [
         [
-            datetime(2025, 2, 3, 9, 15, tzinfo=__import__(
-                "datetime"
-            ).timezone(timedelta(hours=5, minutes=30))).isoformat(),
+            datetime(
+                2025, 2, 3, 9, 15,
+                tzinfo=timezone(timedelta(hours=5, minutes=30)),
+            ).isoformat(),
             100.0, 101.0, 99.0, 100.5, 100, 1000,
         ]
     ]
