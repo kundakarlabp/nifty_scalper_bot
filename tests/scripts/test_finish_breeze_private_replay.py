@@ -15,7 +15,6 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-
 from scripts.finish_breeze_private_replay import (
     execute,
     matching_key,
@@ -29,9 +28,20 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     cert = tmp_path / "recipient.pem"
     subprocess.run(
         [
-            "openssl", "req", "-newkey", "rsa:2048", "-nodes",
-            "-x509", "-days", "1", "-subj", "/CN=research-only-fixture",
-            "-keyout", str(key), "-out", str(cert),
+            "openssl",
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-x509",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=research-only-fixture",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
         ],
         check=True,
         capture_output=True,
@@ -39,10 +49,19 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     bars = [
         [
             datetime(
-                2025, 2, 3, 9, 15,
+                2025,
+                2,
+                3,
+                9,
+                15,
                 tzinfo=timezone(timedelta(hours=5, minutes=30)),
             ).isoformat(),
-            100.0, 101.0, 99.0, 100.5, 100, 1000,
+            100.0,
+            101.0,
+            99.0,
+            100.5,
+            100,
+            1000,
         ]
     ]
     raw = []
@@ -78,9 +97,18 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     cms = tmp_path / "history.cms"
     subprocess.run(
         [
-            "openssl", "cms", "-encrypt", "-binary", "-aes-256-gcm",
-            "-outform", "DER", "-in", str(source),
-            "-out", str(cms), str(cert),
+            "openssl",
+            "cms",
+            "-encrypt",
+            "-binary",
+            "-aes-256-gcm",
+            "-outform",
+            "DER",
+            "-in",
+            str(source),
+            "-out",
+            str(cms),
+            str(cert),
         ],
         check=True,
         capture_output=True,
@@ -102,8 +130,11 @@ def test_match_and_convert_private_research_archive(tmp_path: Path) -> None:
     assert verified_transports(folder, expected_windows=1)["verified_archives"] == 1
     output = tmp_path / "derived"
     result = execute(
-        archives=folder, certificate=cert, output_root=output,
-        search_directories=(tmp_path,), expected_windows=1,
+        archives=folder,
+        certificate=cert,
+        output_root=output,
+        search_directories=(tmp_path,),
+        expected_windows=1,
     )
     assert result["intraday_sqlite_built"]
     assert result["unsealed_windows"] == 1
@@ -120,8 +151,11 @@ def test_missing_key_does_not_create_output(tmp_path: Path) -> None:
     isolated = tmp_path / "empty"
     isolated.mkdir()
     result = execute(
-        archives=folder, certificate=cert, output_root=output,
-        search_directories=(isolated,), expected_windows=1,
+        archives=folder,
+        certificate=cert,
+        output_root=output,
+        search_directories=(isolated,),
+        expected_windows=1,
     )
     assert key.exists()
     assert not output.exists()
@@ -132,8 +166,11 @@ def test_missing_key_does_not_create_output(tmp_path: Path) -> None:
 def test_preflight_checks_cms_without_key(tmp_path: Path) -> None:
     _, cert, folder, _ = _fixture(tmp_path)
     result = execute(
-        archives=folder, certificate=cert,
-        output_root=None, preflight_only=True, expected_windows=1,
+        archives=folder,
+        certificate=cert,
+        output_root=None,
+        preflight_only=True,
+        expected_windows=1,
     )
     assert result["verified_archives"] == 1
     assert not result["key_checked_by_public_fingerprint"]
@@ -146,8 +183,11 @@ def test_wrong_direct_key_does_not_decrypt(tmp_path: Path) -> None:
     wrong_key, _, _, _ = _fixture(wrong_dir)
     output = tmp_path / "derived"
     result = execute(
-        archives=folder, certificate=cert, output_root=output,
-        direct_key=wrong_key, expected_windows=1,
+        archives=folder,
+        certificate=cert,
+        output_root=output,
+        direct_key=wrong_key,
+        expected_windows=1,
     )
     assert not result["matching_owner_key_found"]
     assert not output.exists()
