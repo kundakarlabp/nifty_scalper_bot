@@ -180,3 +180,22 @@ def test_reject_existing_output(tmp_path: Path) -> None:
     out.mkdir()
     with pytest.raises(ValueError, match="research_day_output_exists"):
         prepare_causal_day(minute, eod, "2025-11-04", out)
+
+
+def test_real_shadow_component_engine_consumes_selected_breeze_bars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the existing research component engine, not a mocked callback."""
+    minute, eod = _databases(tmp_path)
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    for name in ("SMC_ENABLED", "VWAP_PRO_ENABLED", "ORB_ENABLED"):
+        monkeypatch.setenv(name, "true")
+    result = execute(minute, eod, "2025-11-04", tmp_path / "shadow")
+    assert result["status"] == "RESEARCH_BAR_PROXY_REPLAYED"
+    output = tmp_path / "shadow" / "research_scenarios.json"
+    report = json.loads(output.read_text())
+    assert report["breeze_evidence_label"] == "RESEARCH_CANDIDATE_BAR_PROXY_ONLY"
+    assert report["execution_grade_ready"] is False
+    assert report["promotion_eligible"] is False
+    assert len(report["scenarios"]) >= 3
