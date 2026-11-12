@@ -91,8 +91,14 @@ def matching_key(
             continue
         public = _openssl(
             [
-                "pkey", "-pubout", "-outform", "DER",
-                "-passin", "pass:", "-in", str(file),
+                "pkey",
+                "-pubout",
+                "-outform",
+                "DER",
+                "-passin",
+                "pass:",
+                "-in",
+                str(file),
             ]
         )
         if public is not None and hashlib.sha256(public).digest() == wanted:
@@ -120,7 +126,8 @@ def verified_transports(
             digest_line = source.read("history.cms.sha256").decode("ascii").strip()
             checksum, sep, filename = digest_line.partition("  ")
             if (
-                not sep or filename != "history.cms"
+                not sep
+                or filename != "history.cms"
                 or len(checksum) != 64
                 or any(c not in "0123456789abcdefABCDEF" for c in checksum)
             ):
@@ -173,14 +180,19 @@ def execute(
     output = output_root.resolve()
     source = archives.resolve()
     if (
-        output == source or output.is_relative_to(source)
-        or source.is_relative_to(output) or output.exists()
+        output == source
+        or output.is_relative_to(source)
+        or source.is_relative_to(output)
+        or output.exists()
     ):
         raise ValueError("private_output_must_be_new_and_outside_source")
     output.mkdir(parents=True, mode=0o700)
     os.chmod(output, 0o700)
     unseal_result = unseal(
-        archives, key, certificate, output / "windows",
+        archives,
+        key,
+        certificate,
+        output / "windows",
         expected_windows=expected_windows,
     )
     converted = build(
@@ -222,14 +234,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archives", required=True, type=Path)
     parser.add_argument(
-        "--certificate", type=Path,
+        "--certificate",
+        type=Path,
         default=Path("deploy/breeze_transport_recipient.pem"),
     )
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--key", type=Path)
-    parser.add_argument(
-        "--key-search-dir", action="append", type=Path, default=[]
-    )
+    parser.add_argument("--key-search-dir", action="append", type=Path, default=[])
     parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
     roots = tuple(args.key_search_dir) or (
@@ -251,9 +262,12 @@ def main() -> int:
             {
                 key: result.get(key)
                 for key in (
-                    "verified_archives", "encrypted_bytes",
-                    "matching_owner_key_found", "intraday_sqlite_built",
-                    "blocker", "minute_reconciliation",
+                    "verified_archives",
+                    "encrypted_bytes",
+                    "matching_owner_key_found",
+                    "intraday_sqlite_built",
+                    "blocker",
+                    "minute_reconciliation",
                     "execution_grade_ready",
                 )
             },
