@@ -228,9 +228,7 @@ def assess_directional_debit_spread(
         long_leg.option_type == short_leg.option_type == "CE"
         and long_leg.strike < short_leg.strike
     ):
-        structure: Literal["BULL_CALL_SPREAD", "BEAR_PUT_SPREAD"] = (
-            "BULL_CALL_SPREAD"
-        )
+        structure: Literal["BULL_CALL_SPREAD", "BEAR_PUT_SPREAD"] = "BULL_CALL_SPREAD"
         width = short_leg.strike - long_leg.strike
     elif (
         long_leg.option_type == short_leg.option_type == "PE"
@@ -243,12 +241,8 @@ def assess_directional_debit_spread(
     debit = long_leg.ask - short_leg.bid
     if not math.isfinite(debit) or not 0 < debit < width:
         raise ValueError("research_debit_spread_debit_invalid")
-    buy_fee = estimate_order_cost(
-        turnover=long_leg.ask * quantity, side="BUY"
-    )
-    sell_fee = estimate_order_cost(
-        turnover=short_leg.bid * quantity, side="SELL"
-    )
+    buy_fee = estimate_order_cost(turnover=long_leg.ask * quantity, side="BUY")
+    sell_fee = estimate_order_cost(turnover=short_leg.bid * quantity, side="SELL")
     entry_fees = buy_fee + sell_fee
     breakeven = (
         long_leg.strike + debit
@@ -264,9 +258,7 @@ def assess_directional_debit_spread(
         gross_max_loss_rupees=debit * quantity,
         entry_fees_rupees=entry_fees,
         spread_entry_cash_required_rupees=debit * quantity + entry_fees,
-        long_option_entry_cash_required_rupees=(
-            long_leg.ask * quantity + buy_fee
-        ),
+        long_option_entry_cash_required_rupees=(long_leg.ask * quantity + buy_fee),
     )
 
 
