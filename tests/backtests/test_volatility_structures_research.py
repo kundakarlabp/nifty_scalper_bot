@@ -9,6 +9,7 @@ import pytest
 from nifty_scalper_bot.backtesting.volatility_research import (
     VolatilityOptionQuote,
     assess_credit_iron_condor,
+    assess_directional_debit_spread,
     assess_long_atm_straddle,
 )
 
@@ -197,4 +198,100 @@ def test_straddle_uses_actual_spot_to_reject_non_atm_quotes(spot):
             implied_annual_vol=0.17,
             forecast_annual_vol=0.22,
             forecast_asof=_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("option_type", "long_strike", "short_strike", "structure", "breakeven"),
+    [
+        ("CE", 24000, 24100, "BULL_CALL_SPREAD", 24050.0),
+        ("PE", 24000, 23900, "BEAR_PUT_SPREAD", 23950.0),
+    ],
+)
+def test_debit_spread_crosses_book_and_preserves_single_long_comparator(
+    option_type, long_strike, short_strike, structure, breakeven
+):
+    long_leg = quote(
+        option_type, long_strike, bid=95, ask=100, token=31
+    )
+    short_leg = quote(
+        option_type, short_strike, bid=50, ask=55, token=32
+    )
+    result = assess_directional_debit_spread(
+        long_leg=long_leg, short_leg=short_leg, at=_AT
+    )
+    assert result.structure == structure
+    assert result.debit_per_unit == pytest.approx(50.0)
+    assert result.width_points == 100
+    assert result.expiry_breakeven == pytest.approx(breakeven)
+    assert result.gross_max_profit_rupees == pytest.approx(50.0 * 75)
+    assert result.gross_max_loss_rupees == pytest.approx(50.0 * 75)
+    assert result.entry_fees_rupees > 0
+    assert result.spread_entry_cash_required_rupees > 50.0 * 75
+    assert result.long_option_entry_cash_required_rupees > 100.0 * 75
+    assert result.live_eligible is False
+    assert result.net_loss_bound_certified is False
+    assert result.evidence_label == "RESEARCH_CANDIDATE"
+
+
+@pytest.mark.parametrize(
+    ("long_leg", "short_leg", "reason"),
+    [
+        (
+            quote("CE", 24100, token=31),
+            quote("CE", 24000, token=32),
+            "research_debit_spread_geometry_invalid",
+        ),
+        (
+            quote("PE", 23900, token=31),
+            quote("PE", 24000, token=32),
+            "research_debit_spread_geometry_invalid",
+        ),
+        (
+            quote("CE", 24000, token=31),
+            quote("PE", 24100, token=32),
+            "research_debit_spread_geometry_invalid",
+        ),
+        (
+            quote("CE", 24000, ask=20, token=31),
+            quote("CE", 24100, bid=21, ask=22, token=32),
+            "research_debit_spread_debit_invalid",
+        ),
+        (
+            quote("CE", 24000, ask=200, token=31),
+            quote("CE", 24100, bid=20, token=32),
+            "research_debit_spread_debit_invalid",
+        ),
+        (
+            quote("CE", 24000, token=31),
+            quote("CE", 24100, token=32, ask=18, bid_quantity=0),
+            "research_contract_or_depth_unverified",
+        ),
+        (
+            quote("CE", 24000, token=31),
+            replace(
+                quote("CE", 24100, token=32),
+                observed_at=_AT - timedelta(seconds=1),
+            ),
+            "research_multileg_quote_skew",
+        ),
+    ],
+)
+def test_debit_spread_rejects_wrong_direction_or_unverified_quote(
+    long_leg, short_leg, reason
+):
+    with pytest.raises(ValueError, match=reason):
+        assess_directional_debit_spread(
+            long_leg=long_leg, short_leg=short_leg, at=_AT
+        )
+
+
+@pytest.mark.parametrize("mode", ["LIVE", "PAPER", ""])
+def test_debit_spread_never_authorizes_other_execution_modes(monkeypatch, mode):
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    with pytest.raises(ValueError, match="volatility_research_requires_shadow_process"):
+        assess_directional_debit_spread(
+            long_leg=quote("CE", 24000, bid=95, ask=100, token=31),
+            short_leg=quote("CE", 24100, bid=50, ask=55, token=32),
+            at=_AT,
         )
