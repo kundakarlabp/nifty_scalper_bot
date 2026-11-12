@@ -231,12 +231,20 @@ def test_pilot_preserves_same_event_reversal_identity_without_proof(tmp_path):
     candle_dir = root / "candles"
     candle_dir.mkdir(parents=True)
     instruments = {
-        "CE": {"instrument_type": "CE", "expiry": "2019-01-24", "strike": 11000, "lot_size": 75},
-        "PE": {"instrument_type": "PE", "expiry": "2019-01-24", "strike": 11000, "lot_size": 75},
+        "CE": {
+            "instrument_type": "CE", "expiry": "2019-01-24",
+            "strike": 11000, "lot_size": 75,
+        },
+        "PE": {
+            "instrument_type": "PE", "expiry": "2019-01-24",
+            "strike": 11000, "lot_size": 75,
+        },
     }
     for side in ("CE", "PE"):
         (candle_dir / f"{side}.json").write_text(
-            json.dumps({"symbol": f"NFO:NIFTY19JAN11000{side}", "instrument": instruments[side]})
+            json.dumps(
+                {"symbol": f"NFO:NIFTY19JAN11000{side}", "instrument": instruments[side]}
+            )
         )
     study = {
         "failed_breakout_vs_smc": {
