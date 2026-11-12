@@ -111,9 +111,7 @@ def test_original_two_epochs_never_mix_decisions_or_quotes(tmp_path, monkeypatch
     assert result["journal_unassigned_same_day_decision_rows"] == {
         "decision_outside_valid_recording_epochs": 1
     }
-    grouped = {
-        item["horizon_seconds"]: item for item in result["grouped_outcomes"]
-    }
+    grouped = {item["horizon_seconds"]: item for item in result["grouped_outcomes"]}
     assert grouped[60]["quote_valid"] == 2, {
         "coverage": grouped[60],
         "epochs": result["epochs"],
@@ -148,9 +146,7 @@ def test_dropped_capture_and_wrong_sha_fail_closed(tmp_path, monkeypatch):
     db.touch()
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     with pytest.raises(ValueError, match="pinned_uncompressed_sha256_mismatch"):
-        audit.audit_original_session(
-            session, db, expected_uncompressed_sha256="0" * 64
-        )
+        audit.audit_original_session(session, db, expected_uncompressed_sha256="0" * 64)
     sidecar = session.parent / f"{runs[0]}.integrity.json"
     metadata = json.loads(sidecar.read_text())
     metadata["dropped"] = 1
