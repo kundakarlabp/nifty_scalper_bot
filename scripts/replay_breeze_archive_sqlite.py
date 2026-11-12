@@ -158,7 +158,8 @@ def prepare_causal_day(
             return {
                 "status": "ABSTAIN",
                 "reason": "previously_listed_contract_pair_missing",
-                "day": day, "prior_eod_day": prior_day,
+                "day": day,
+                "prior_eod_day": prior_day,
             }
         fut, ce, pe = listed
         selected: list[tuple[str, dict[str, Any]]] = [
@@ -247,9 +248,7 @@ def execute(
 ) -> dict[str, Any]:
     if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
         raise ValueError("breeze_replay_requires_shadow_mode")
-    if os.getenv("ENABLE_LIVE", "false").strip().lower() in (
-        "true", "1", "yes", "on"
-    ):
+    if os.getenv("ENABLE_LIVE", "false").strip().lower() in ("true", "1", "yes", "on"):
         raise ValueError("breeze_replay_refuses_live_environment")
     result = prepare_causal_day(minute_db, eod_db, day, output)
     if result["status"] != "RESEARCH_BAR_PROXY_READY" or prepare_only:
@@ -281,7 +280,10 @@ def main() -> int:
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     result = execute(
-        args.minute_db, args.eod_db, args.day, args.output,
+        args.minute_db,
+        args.eod_db,
+        args.day,
+        args.output,
         prepare_only=args.prepare_only,
     )
     print(
