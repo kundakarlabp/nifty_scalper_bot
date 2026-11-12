@@ -16,7 +16,7 @@ import bisect
 import json
 import math
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -191,6 +191,11 @@ def summarize_groups(
             if isinstance(row.get("markout"), Mapping)
         ]
         sufficient = len(valid) >= min_labelled
+        unlabelled_statuses = Counter(
+            str(row.get("status") or "missing_status")[:64]
+            for row in observations
+            if not isinstance(row.get("markout"), Mapping)
+        )
         result.append(
             {
                 "group": group,
@@ -199,6 +204,7 @@ def summarize_groups(
                 "independent_setups": len(observations),
                 "labelled": len(valid),
                 "unlabelled": len(observations) - len(valid),
+                "unlabelled_status_counts": dict(sorted(unlabelled_statuses.items())),
                 "label_coverage_fraction": round(len(valid) / len(observations), 4),
                 "mean_gross_markout_pct": (
                     round(statistics.mean(valid), 5) if sufficient else None
