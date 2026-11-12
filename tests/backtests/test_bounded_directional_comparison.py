@@ -232,12 +232,16 @@ def test_pilot_preserves_same_event_reversal_identity_without_proof(tmp_path):
     candle_dir.mkdir(parents=True)
     instruments = {
         "CE": {
-            "instrument_type": "CE", "expiry": "2019-01-24",
-            "strike": 11000, "lot_size": 75,
+            "instrument_type": "CE",
+            "expiry": "2019-01-24",
+            "strike": 11000,
+            "lot_size": 75,
         },
         "PE": {
-            "instrument_type": "PE", "expiry": "2019-01-24",
-            "strike": 11000, "lot_size": 75,
+            "instrument_type": "PE",
+            "expiry": "2019-01-24",
+            "strike": 11000,
+            "lot_size": 75,
         },
     }
     for side in ("CE", "PE"):
