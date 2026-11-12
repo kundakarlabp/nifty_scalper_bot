@@ -499,7 +499,7 @@ def _session_decision_rows(
     scoped = []
     for row in rows:
         raw = row.get("timestamp")
-        if isinstance(raw, bool):
+        if raw is None or isinstance(raw, bool):
             continue
         try:
             observed = float(raw)
