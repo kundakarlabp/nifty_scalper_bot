@@ -215,6 +215,68 @@ def summarize_pilot(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _matched_reversal_event_roster(
+    study: Mapping[str, Any], *, session_path: Path, phase: str
+) -> list[dict[str, Any]]:
+    """Retain the original matched cohort, never retroactively choose a strike.
+
+    The public archive's expiry, lot and continuous-future labels are inferred,
+    not contemporaneous exchange-master or quote-depth proof.
+    """
+    scenarios = study["failed_breakout_vs_smc"]["scenarios"]
+    if not scenarios:
+        raise ValueError("directional_pilot_reversal_scenarios_missing")
+    events = scenarios[0]["events"]
+    index = {}
+    for kind in ("CE", "PE"):
+        payload = json.loads((session_path / "candles" / f"{kind}.json").read_text())
+        index[payload["symbol"]] = dict(payload["instrument"])
+    retained = []
+    seen = set()
+    for row in events:
+        symbol, side = row["symbol"], row["side"]
+        instrument = index.get(symbol)
+        if instrument is None or instrument.get("instrument_type") != side:
+            raise ValueError("directional_pilot_reversal_instrument_mismatch")
+        key = "|".join(
+            (
+                row["event_bar_start"],
+                row["earliest_entry"],
+                row["future"],
+                symbol,
+                side,
+            )
+        )
+        identity = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        if identity in seen:
+            raise ValueError("directional_pilot_reversal_event_duplicate")
+        seen.add(identity)
+        retained.append(
+            {
+                "event_id": identity,
+                "phase": phase,
+                "event_bar_start": row["event_bar_start"],
+                "earliest_entry": row["earliest_entry"],
+                "future": row["future"],
+                "symbol": symbol,
+                "side": side,
+                "archive_instrument": {
+                    "expiry": instrument.get("expiry"),
+                    "strike": instrument.get("strike"),
+                    "lot_size": instrument.get("lot_size"),
+                    "token": instrument.get("instrument_token"),
+                },
+                "archive_instrument_basis": "INFERRED_FROM_MONTHLY_CANDLES",
+                "historical_master_verified": False,
+                "source_clock_verified": False,
+                "historical_futures_roll_verified": False,
+                "observed_depth_available": False,
+                "live_promotion_eligible": False,
+            }
+        )
+    return retained
+
+
 def run(root: Path, *, per_quarter: int = 2) -> dict[str, Any]:
     if os.getenv("EXECUTION_MODE", "").upper() != "SHADOW":
         raise ValueError("directional_pilot_requires_shadow")
@@ -225,6 +287,7 @@ def run(root: Path, *, per_quarter: int = 2) -> dict[str, Any]:
     if not selected:
         raise ValueError("directional_pilot_no_eligible_sessions")
     observations = []
+    matched_reversal_events = []
     failures = []
     digest_by_day = {}
     for index, day in enumerate(selected, start=1):
@@ -247,6 +310,11 @@ def run(root: Path, *, per_quarter: int = 2) -> dict[str, Any]:
             observations.append(
                 _compact_reversal(study["failed_breakout_vs_smc"], phase, day)
             )
+            matched_reversal_events.extend(
+                _matched_reversal_event_roster(
+                    study, session_path=session_path, phase=phase
+                )
+            )
         except (ValueError, KeyError, TypeError, OSError) as exc:
             failures.append(
                 {"day": day, "type": type(exc).__name__, "reason": str(exc)[:160]}
@@ -266,6 +334,9 @@ def run(root: Path, *, per_quarter: int = 2) -> dict[str, Any]:
         "failures": failures,
         "per_quarter": per_quarter,
         "results": summarize_pilot(flat),
+        "matched_reversal_events": matched_reversal_events,
+        "historical_point_in_time_identity_verified": False,
+        "observed_historical_quote_books_present": False,
         "promotion_eligible": False,
         "live_equivalent": False,
         "outperformance_inference_allowed": False,
