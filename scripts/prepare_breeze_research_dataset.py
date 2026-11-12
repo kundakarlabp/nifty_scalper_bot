@@ -197,6 +197,7 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
     if quarantined:
         if product != "cash" or session != date(2025, 10, 21):
             raise ValueError("unexpected_source_quarantine")
+        quarantined += len(normal_rows)
         normal_rows = []
     audit = aggregate_breeze_session(
         normal_rows, day=session, interval_minutes=1,
