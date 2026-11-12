@@ -164,3 +164,89 @@ def test_research_only_without_local_evidence(tmp_path, monkeypatch):
         audit.audit_original_session(
             tmp_path / "missing.jsonl", tmp_path / "missing.db"
         )
+
+
+def test_epoch_decision_funnel_accounts_for_missing_setup_ownership(
+    tmp_path, monkeypatch
+):
+    session, _runs, times = _two_run_source(tmp_path)
+    db = tmp_path / "trades.db"
+    db.touch()
+    first = _row(times[0], _CE1)
+    repeated = _row(times[0] + 1, _CE1)
+    missing_setup = _row(times[0], _CE1)
+    missing_setup["meta"]["research_context"].pop("setup_id")
+    missing_strategy = _row(times[0], _CE1)
+    missing_strategy["meta"]["research_context"].pop("strategy")
+    invalid_side = _row(times[0], _CE1)
+    invalid_side["meta"]["research_context"]["contract_side"] = "BUY"
+    not_candidate = _row(times[0], _CE1)
+    not_candidate["event_name"] = "decision.other"
+    decisions = [
+        _row(times[0] - 86400, _CE1, "yesterday"),
+        first,
+        repeated,
+        missing_setup,
+        missing_strategy,
+        invalid_side,
+        not_candidate,
+        _row(times[0] + 15 * 60, _CE1, "between_epochs"),
+        _row(times[1], _CE2),
+    ]
+    monkeypatch.setattr(audit, "load_candidate_decision_rows", lambda _db: decisions)
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    result = audit.audit_original_session(session, db)
+    assert result["journal_same_day_decision_rows"] == 8
+    assert result["journal_assigned_same_epoch_decision_rows"] == 7
+    assert result["journal_canonicalized_decision_rows"] == 3
+    assert result["journal_excluded_before_canonicalization"] == 4
+    assert result["journal_unassigned_same_day_decision_rows"] == {
+        "decision_outside_valid_recording_epochs": 1
+    }
+    first_epoch = result["epochs"][0]["canonical_inclusion_funnel"]
+    assert first_epoch["canonicalized_decision_rows"] == 2
+    assert first_epoch["independent_setup_count"] == 1
+    assert first_epoch["repeated_decisions_collapsed"] == 1
+    assert first_epoch["exclusion_reasons"] == {
+        "invalid_option_side": 1,
+        "missing_owned_setup_id": 1,
+        "missing_owned_strategy": 1,
+        "not_candidate_decision_event": 1,
+    }
+    assert result["independent_same_epoch_setups"] == 2
+    assert result["promotion_eligible"] is False
+
+
+def test_missing_futures_quote_context_remains_explicitly_unlabelled(
+    tmp_path, monkeypatch
+):
+    folder = tmp_path / "replay_archive"
+    now = datetime.fromisoformat("2026-11-11T09:20:00+05:30")
+    archive = ReplayArchive(folder)
+    archive.record("snapshot", _snapshot(_CE1), now)
+    for symbol in (_CE1, _PE, _SPOT):
+        archive.record("tick", _tick(symbol), now + timedelta(seconds=5))
+    archive.close()
+    db = tmp_path / "trades.db"
+    db.touch()
+    monkeypatch.setattr(
+        audit,
+        "load_candidate_decision_rows",
+        lambda _db: [_row((now + timedelta(seconds=5)).timestamp(), _CE1)],
+    )
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    report = audit.audit_original_session(folder / "2026-11-11.jsonl", db)
+    assert report["original_writer_integrity_verified"] is True
+    first = report["epochs"][0]
+    assert first["selected_quote_context_available"] is False
+    assert first["selected_quote_context_missing_by_requirement"] == {
+        "FUT_no_ticks": 1,
+        "FUT_no_websocket_ticks": 1,
+    }
+    assert report["independent_same_epoch_setups"] == 1
+    assert all(
+        row["status"] == "epoch_selected_quote_context_incomplete"
+        and row["markout"] is None
+        and row["cost_scenarios"] is None
+        for row in report["outcomes"]
+    )
