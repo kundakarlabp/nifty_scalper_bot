@@ -1,3 +1,6 @@
+# File purpose: Canonical offline ORB and directional hypothesis research workflow.
+# Key responsibilities: Verify public historical data and isolate conditional research comparisons.
+# Operational constraints: No LIVE execution or deployment; read-only job permissions and owner-only issue routes.
 name: ORB historical research
 
 on:
@@ -567,3 +570,89 @@ jobs:
           path: |
             ${{ env.STUDY_DIR }}/data_manifest.json
             ${{ env.STUDY_DIR }}/orb_causal_gate_results.json
+
+  bounded-directional-pilot:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[Directional Audit]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      STRATEGY_MODE: directional_scalp
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolated archive directories
+        run: |
+          printf 'SOURCE_DIR=%s/public-basket-source\nSTUDY_DIR=%s/bounded-directional-study\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research-only dependencies
+        run: python -m pip install -e '.[research]'
+      - name: Cache publisher-checksummed public data
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Verify sources and prepare non-hindsight historical session baskets
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Compare VWAP, ORB, SMC and independent reversal on fixed calendar cohort
+        run: >-
+          python -m scripts.run_bounded_directional_comparison
+          --study-dir "$STUDY_DIR"
+          --output "$STUDY_DIR/bounded_directional_pilot.json"
+          --per-quarter 2
+      - name: Display bounded descriptive results
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["STUDY_DIR"]) / "bounded_directional_pilot.json"
+          report = json.loads(path.read_text())
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## Bounded directional historical pilot\n\n")
+              stream.write(
+                  f"Selected {len(report['preselected_sessions'])} sessions, "
+                  f"completed {len(report['successful_sessions'])}; "
+                  f"{len(report['failures'])} failures.\n\n"
+              )
+              stream.write("Research-only model on old monthly contracts; never LIVE-equivalent.\n\n")
+              stream.write(
+                  "| Period | Study | Candidate | bps/side | Resolved | "
+                  "Unresolved | Net P&L | Mean/fill |\n"
+              )
+              stream.write("|---|---|---|---:|---:|---:|---:|---:|\n")
+              for row in report["results"]:
+                  if row["slippage_bps_per_side"] != 25.0:
+                      continue
+                  mean = row["mean_net_per_resolved_fill"]
+                  mean_text = f"{mean:.2f}" if mean is not None else "—"
+                  stream.write(
+                      f"| {row['phase']} | {row['study']} | {row['candidate']} | "
+                      f"25 | {row['resolved']} | {row['unresolved']} | "
+                      f"{row['net_pnl']:.2f} | "
+                      f"{mean_text} |\n"
+                  )
+              stream.write(
+                  "\n**No live promotion:** sample and execution evidence are "
+                  "insufficient. See artifact for 10/25/50 bps.\n"
+              )
+          PY
+      - name: Preserve immutable research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounded-directional-pilot-${{ github.sha }}
+          path: ${{ env.STUDY_DIR }}/bounded_directional_pilot.json
+          if-no-files-found: warn
+          retention-days: 30
