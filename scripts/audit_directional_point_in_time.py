@@ -10,7 +10,6 @@ Safety: Missing point-in-time books remain UNRESOLVED, not OHLC proxy fills.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -211,7 +210,7 @@ def _event_status(
             or signal.get("strategy") not in {"SMC", "FailedBreakoutResearch"}
             or not _sha(signal.get("source_sha256"))
             or "emitted_at" not in signal
-            or not _time(signal["emitted_at"]) == decision
+            or _time(signal["emitted_at"]) != decision
         ):
             entry_status = "VERIFIED_STRATEGY_INTENT_MISSING"
         elif not quote_rows:
@@ -244,7 +243,7 @@ def _event_status(
                     entry_status = result.reason
                     if result.status == "MODELED_DEPTH":
                         entry_price, entry_fee = result.price, result.fees
-                except (KeyError, TypeError, ValueError, OverflowError):
+                except (IndexError, KeyError, TypeError, ValueError, OverflowError):
                     entry_status = "HISTORICAL_QUOTE_OR_FEE_INVALID"
     blockers = [
         status
