@@ -154,6 +154,8 @@ def summarize_pilot(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "net_pnl": 0.0,
                 "fees": 0.0,
                 "matched_option_event_count": 0,
+                "entry_funnel": {},
+                "no_vote_reasons": {},
             },
         )
         entry["sessions"].add(item["day"])
@@ -161,12 +163,44 @@ def summarize_pilot(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry[field] += item.get(field, 0)
         for field in ("net_pnl", "fees"):
             entry[field] += float(item[field])
+        for field in ("entry_funnel", "no_vote_reasons"):
+            counters = item.get(field) or {}
+            if not isinstance(counters, Mapping):
+                raise ValueError("directional_pilot_diagnostics_invalid")
+            for reason, count in counters.items():
+                if (
+                    not isinstance(reason, str)
+                    or not reason
+                    or not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or count < 0
+                ):
+                    raise ValueError("directional_pilot_diagnostics_invalid")
+                entry[field][reason] = entry[field].get(reason, 0) + count
     result = []
     for value in grouped.values():
         value["session_count"] = len(value.pop("sessions"))
         value["mean_net_per_resolved_fill"] = (
             value["net_pnl"] / value["resolved"] if value["resolved"] else None
         )
+        # This is a diagnostic stage, not a causal explanation of profitability.
+        funnel = value["entry_funnel"]
+        if value["resolved"] > 0:
+            value["zero_fill_status"] = "RESOLVED_FILLS_PRESENT"
+        elif value["unresolved"] > 0:
+            value["zero_fill_status"] = "UNRESOLVED_EXIT_PRESENT"
+        elif value["study"] == "same_event_reversal":
+            value["zero_fill_status"] = (
+                "NO_MATCHED_EVENTS"
+                if value["matched_option_event_count"] == 0
+                else "MATCHED_EVENTS_WITHOUT_RESOLVED_FILL"
+            )
+        elif funnel.get("evaluations", 0) == 0:
+            value["zero_fill_status"] = "NO_RECORDED_EVALUATIONS"
+        elif funnel.get("signals_emitted", 0) == 0:
+            value["zero_fill_status"] = "EVALUATIONS_WITHOUT_SIGNALS"
+        else:
+            value["zero_fill_status"] = "SIGNALS_WITHOUT_RESOLVED_FILL"
         value["attribution_valid"] = False
         value["promotion_eligible"] = False
         result.append(value)

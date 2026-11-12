@@ -137,3 +137,90 @@ def test_result_compaction_keeps_actual_resolved_and_missing():
     assert failed["net_pnl"] == 55.0
     assert failed["resolved"] == 1
     assert failed["reversal_only_positive_count"] == 1
+
+
+def test_zero_fill_summary_preserves_rejections_and_entry_funnel():
+    rows = []
+    for day, evaluations, reason_count in [
+        ("2019-01-01", 12, 9),
+        ("2019-01-02", 7, 5),
+    ]:
+        rows.append(
+            {
+                "study": "vwap",
+                "phase": "validation",
+                "candidate": "current_reference",
+                "day": day,
+                "slippage_bps": 25.0,
+                "resolved": 0,
+                "unresolved": 0,
+                "net_pnl": 0.0,
+                "fees": 0.0,
+                "entry_funnel": {
+                    "evaluations": evaluations,
+                    "signals_emitted": 0,
+                    "accepted_fills": 0,
+                },
+                "no_vote_reasons": {"distance_outside_band": reason_count},
+            }
+        )
+    summary = pilot.summarize_pilot(rows)
+    assert len(summary) == 1
+    result = summary[0]
+    assert result["session_count"] == 2
+    assert result["entry_funnel"]["evaluations"] == 19
+    assert result["no_vote_reasons"] == {"distance_outside_band": 14}
+    assert result["zero_fill_status"] == "EVALUATIONS_WITHOUT_SIGNALS"
+    assert result["promotion_eligible"] is False
+
+
+def test_zero_fill_diagnostics_distinguish_no_evaluation_and_no_fill():
+    base = {
+        "study": "orb",
+        "phase": "validation",
+        "candidate": "cost_gated_reference",
+        "day": "2019-01-01",
+        "slippage_bps": 25.0,
+        "resolved": 0,
+        "unresolved": 0,
+        "net_pnl": 0.0,
+        "fees": 0.0,
+    }
+    assert pilot.summarize_pilot([base])[0]["zero_fill_status"] == (
+        "NO_RECORDED_EVALUATIONS"
+    )
+    signalled = {
+        **base,
+        "entry_funnel": {"evaluations": 50, "signals_emitted": 1},
+    }
+    assert pilot.summarize_pilot([signalled])[0]["zero_fill_status"] == (
+        "SIGNALS_WITHOUT_RESOLVED_FILL"
+    )
+    unresolved = {**signalled, "unresolved": 1}
+    assert pilot.summarize_pilot([unresolved])[0]["zero_fill_status"] == (
+        "UNRESOLVED_EXIT_PRESENT"
+    )
+
+
+@pytest.mark.parametrize(
+    "diagnostics",
+    [{"evaluations": -1}, {"evaluations": True}, {"evaluations": "5"}],
+)
+def test_pilot_rejects_invalid_diagnostic_counters(diagnostics):
+    with pytest.raises(ValueError, match="diagnostics_invalid"):
+        pilot.summarize_pilot(
+            [
+                {
+                    "study": "vwap",
+                    "phase": "validation",
+                    "candidate": "current_reference",
+                    "day": "2019-01-01",
+                    "slippage_bps": 25.0,
+                    "resolved": 0,
+                    "unresolved": 0,
+                    "net_pnl": 0.0,
+                    "fees": 0.0,
+                    "entry_funnel": diagnostics,
+                }
+            ]
+        )
