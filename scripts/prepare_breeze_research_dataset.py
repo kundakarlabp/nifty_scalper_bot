@@ -7,6 +7,7 @@ Ownership: isolated offline research import and read-only export of named contra
 Safety: never decrypts, fetches, trades, or asserts executable quotes; rejects checksum
 conflicts and invalid candles and never silently patches gaps or modifies raw archives.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -95,8 +96,9 @@ def verify_window(window: Path) -> tuple[list[Path], int]:
     if not verified:
         raise ValueError("window_sha256_manifest_empty")
     observations = [
-        p for p in verified if "breeze_history" in p.relative_to(window).parts
-        and p.suffix == ".json"
+        p
+        for p in verified
+        if "breeze_history" in p.relative_to(window).parts and p.suffix == ".json"
     ]
     if not observations:
         raise ValueError("window_has_no_contract_archives")
@@ -122,13 +124,23 @@ def contract_identity(
         raise ValueError("archive_day_outside_study")
     if product == "cash" and (side, expiry, strike) == ("INDEX", None, None):
         key = "NIFTY_INDEX"
-    elif product == "futures" and side == "FUT" and strike is None and (
-        expiry_day is not None and expiry_day >= session
+    elif (
+        product == "futures"
+        and side == "FUT"
+        and strike is None
+        and (expiry_day is not None and expiry_day >= session)
     ):
         key = f"NIFTY_{expiry}_FUT"
-    elif product == "options" and side in ("CE", "PE") and (
-        type(strike) is int and strike > 0 and strike % 50 == 0
-        and expiry_day is not None and expiry_day >= session
+    elif (
+        product == "options"
+        and side in ("CE", "PE")
+        and (
+            type(strike) is int
+            and strike > 0
+            and strike % 50 == 0
+            and expiry_day is not None
+            and expiry_day >= session
+        )
     ):
         key = f"NIFTY_{expiry}_{strike}_{side}"
     else:
@@ -177,8 +189,11 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
         except (TypeError, ValueError) as exc:
             raise ValueError("breeze_candle_timestamp_invalid") from exc
         if (
-            stamp.utcoffset() != IST_SUFFIX or stamp.second or stamp.microsecond
-            or stamp.tzinfo is None or stamp.date() != session
+            stamp.utcoffset() != IST_SUFFIX
+            or stamp.second
+            or stamp.microsecond
+            or stamp.tzinfo is None
+            or stamp.date() != session
         ):
             raise ValueError("breeze_candle_timestamp_invalid")
         naive = stamp.replace(tzinfo=None)
@@ -200,15 +215,24 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
         quarantined += len(normal_rows)
         normal_rows = []
     audit = aggregate_breeze_session(
-        normal_rows, day=session, interval_minutes=1,
-        session_start=start, session_end=stop
+        normal_rows,
+        day=session,
+        interval_minutes=1,
+        session_start=start,
+        session_end=stop,
     )
     if len(audit.bars) != len(normal_rows):
         raise ValueError("breeze_normalized_series_conflict")
-    state = "QUARANTINED_SPECIAL_INDEX_CLOCK" if quarantined else (
-        "EMPTY" if not normal_rows else (
-            "SPECIAL_BOUNDARY_FLAGGED" if boundaries else (
-                "PARTIAL" if audit.missing_windows else "COMPLETE"
+    state = (
+        "QUARANTINED_SPECIAL_INDEX_CLOCK"
+        if quarantined
+        else (
+            "EMPTY"
+            if not normal_rows
+            else (
+                "SPECIAL_BOUNDARY_FLAGGED"
+                if boundaries
+                else ("PARTIAL" if audit.missing_windows else "COMPLETE")
             )
         )
     )
@@ -292,12 +316,23 @@ def build(
                     "flagged_boundary_minutes,quarantined_source_minutes,"
                     "source_digest) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    tuple(info[k] for k in (
-                        "trade_day","contract_key","product_type","expiry","strike",
-                        "side","status","observed_minutes","missing_minutes",
-                        "flagged_boundary_minutes","quarantined_source_minutes",
-                        "source_digest"
-                    )),
+                    tuple(
+                        info[k]
+                        for k in (
+                            "trade_day",
+                            "contract_key",
+                            "product_type",
+                            "expiry",
+                            "strike",
+                            "side",
+                            "status",
+                            "observed_minutes",
+                            "missing_minutes",
+                            "flagged_boundary_minutes",
+                            "quarantined_source_minutes",
+                            "source_digest",
+                        )
+                    ),
                 )
                 n = cursor.lastrowid
                 values = []
@@ -305,9 +340,7 @@ def build(
                     ts = datetime.fromisoformat(row[0])
                     available = (ts + timedelta(minutes=1)).isoformat()
                     values.append((n, row[0], available, *row[1:]))
-                db.executemany(
-                    "INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?)", values
-                )
+                db.executemany("INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?)", values)
                 counters["series"] += 1
                 counters["bars_1m"] += len(candles)
                 counters["gap_minutes"] += info["missing_minutes"]
@@ -349,20 +382,34 @@ def build(
 
 
 def export_series(
-    database: Path, output: Path, *, day: str, product: str,
-    expiry: str | None, strike: int | None, side: str | None, interval: int
+    database: Path,
+    output: Path,
+    *,
+    day: str,
+    product: str,
+    expiry: str | None,
+    strike: int | None,
+    side: str | None,
+    interval: int,
 ) -> dict[str, Any]:
     if output.exists() or not database.is_file() or interval not in (1, 5, 15):
         raise ValueError("research_export_input_invalid")
     if product not in ("cash", "futures", "options"):
         raise ValueError("research_product_invalid")
-    if (product, side, expiry, strike) not in (
-        ("cash", "INDEX", None, None),
-    ) and not (
-        product == "futures" and side == "FUT" and expiry is not None and strike is None
-    ) and not (
-        product == "options" and side in ("CE", "PE")
-        and expiry is not None and type(strike) is int
+    if (
+        (product, side, expiry, strike) not in (("cash", "INDEX", None, None),)
+        and not (
+            product == "futures"
+            and side == "FUT"
+            and expiry is not None
+            and strike is None
+        )
+        and not (
+            product == "options"
+            and side in ("CE", "PE")
+            and expiry is not None
+            and type(strike) is int
+        )
     ):
         raise ValueError("research_identity_incomplete")
     with sqlite3.connect(f"file:{database.resolve()}?mode=ro", uri=True) as conn:
@@ -372,17 +419,22 @@ def export_series(
             (day, product, expiry, strike, side),
         ).fetchall()
         if len(candidate) != 1 or candidate[0][1] in (
-            "EMPTY", "QUARANTINED_SPECIAL_INDEX_CLOCK"
+            "EMPTY",
+            "QUARANTINED_SPECIAL_INDEX_CLOCK",
         ):
             raise ValueError("research_contract_day_not_available")
         source = conn.execute(
             "SELECT stamp,open,high,low,close,volume,oi FROM candles "
-            "WHERE series_id=? ORDER BY stamp", (candidate[0][0],)
+            "WHERE series_id=? ORDER BY stamp",
+            (candidate[0][0],),
         ).fetchall()
     start, stop = session_hours(date.fromisoformat(day))
     audit = aggregate_breeze_session(
-        source, day=date.fromisoformat(day), interval_minutes=interval,
-        session_start=start, session_end=stop
+        source,
+        day=date.fromisoformat(day),
+        interval_minutes=interval,
+        session_start=start,
+        session_end=stop,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".tmp")
@@ -391,12 +443,34 @@ def export_series(
     try:
         with tmp.open("x", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(("start_ist","available_at_ist","open","high","low",
-                             "close","volume","oi","source_minutes","execution_eligible"))
+            writer.writerow(
+                (
+                    "start_ist",
+                    "available_at_ist",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "oi",
+                    "source_minutes",
+                    "execution_eligible",
+                )
+            )
             writer.writerows(
-                (bar.start.isoformat(),bar.available_at.isoformat(),bar.open,
-                 bar.high,bar.low,bar.close,bar.volume,bar.open_interest,
-                 bar.source_minutes,False) for bar in audit.bars
+                (
+                    bar.start.isoformat(),
+                    bar.available_at.isoformat(),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.open_interest,
+                    bar.source_minutes,
+                    False,
+                )
+                for bar in audit.bars
             )
         os.chmod(tmp, 0o600)
         os.replace(tmp, output)
@@ -423,22 +497,29 @@ def main() -> None:
     e.add_argument("--database", type=Path, required=True)
     e.add_argument("--output", type=Path, required=True)
     e.add_argument("--day", required=True)
-    e.add_argument("--product", choices=("cash","futures","options"), required=True)
+    e.add_argument("--product", choices=("cash", "futures", "options"), required=True)
     e.add_argument("--expiry")
     e.add_argument("--strike", type=int)
-    e.add_argument("--side", choices=("INDEX","FUT","CE","PE"), required=True)
-    e.add_argument("--interval", type=int, choices=(1,5,15), default=5)
+    e.add_argument("--side", choices=("INDEX", "FUT", "CE", "PE"), required=True)
+    e.add_argument("--interval", type=int, choices=(1, 5, 15), default=5)
     args = parser.parse_args()
     if args.command == "build":
         result = build(
-            args.extracted_windows,args.database,args.summary,
-            expected_windows=args.expected_windows
+            args.extracted_windows,
+            args.database,
+            args.summary,
+            expected_windows=args.expected_windows,
         )
     else:
         result = export_series(
-            args.database,args.output,day=args.day,product=args.product,
-            expiry=args.expiry,strike=args.strike,side=args.side,
-            interval=args.interval
+            args.database,
+            args.output,
+            day=args.day,
+            product=args.product,
+            expiry=args.expiry,
+            strike=args.strike,
+            side=args.side,
+            interval=args.interval,
         )
     print(json.dumps(result, sort_keys=True))
 
