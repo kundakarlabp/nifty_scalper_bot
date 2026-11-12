@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded historical directional comparison; broker-free and research-only.
+"""Purpose: Run bounded, broker-free historical comparisons of VWAP, ORB and reversal.
 
-Uses pre-existing, checksum-prepared PUBLIC monthly-option session baskets. The
-cohort is selected on calendar date and basic archived data availability, never
-on signals, P&L, or historical hindsight. Models are not executable quotes.
+Responsibilities: Use pre-existing, checksum-prepared PUBLIC monthly-option
+sessions; select a small date-stratified archive cohort independent of outcomes;
+replay the existing strategies and retain source provenance and unresolved exits.
+Boundaries: SHADOW-only; modeled option OHLC is not executable quote evidence.
+Safety: Never submits orders, changes live configuration or promotes parameters.
 """
 from __future__ import annotations
 
