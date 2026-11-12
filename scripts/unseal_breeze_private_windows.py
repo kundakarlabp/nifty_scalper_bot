@@ -23,7 +23,9 @@ SHA256 = re.compile(r"^([a-fA-F0-9]{64})  history.cms\s*$")
 LIMIT_BYTES = 4 * 1024 ** 3
 
 
-def _safe_unseal(archive: Path, private_key: Path, recipient: Path, destination: Path) -> None:
+def _safe_unseal(
+    archive: Path, private_key: Path, recipient: Path, destination: Path
+) -> None:
     if not archive.is_file() or destination.exists():
         raise ValueError("source_missing_or_window_already_unsealed")
     with tempfile.TemporaryDirectory(prefix="breeze-unseal-") as scratch:
@@ -46,7 +48,10 @@ def _safe_unseal(archive: Path, private_key: Path, recipient: Path, destination:
             with src.open("history.cms") as reader, cms.open("wb") as writer:
                 for chunk in iter(lambda: reader.read(1024 * 1024), b""):
                     writer.write(chunk)
-            if hashlib.sha256(cms.read_bytes()).hexdigest() != expected.group(1).lower():
+            if (
+                hashlib.sha256(cms.read_bytes()).hexdigest()
+                != expected.group(1).lower()
+            ):
                 raise ValueError("encrypted_archive_checksum_mismatch")
         decrypted_tar = temporary / "window.tar.gz"
         with subprocess.Popen(
