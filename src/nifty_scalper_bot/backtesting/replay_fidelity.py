@@ -186,7 +186,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             seconds_observed[role].add(t.strftime("%H:%M:%S"))
             first_market.setdefault(role, t)
             last_market[role] = t
-        if str(tick.get("source") or "").lower() in ("ws", "websocket"):
+        if str(tick.get("source") or "").lower() in ("ws", "ws_full", "websocket"):
             c["websocket_ticks"] += 1
             if current_segment is not None:
                 current_segment[role]["websocket_ticks"] += 1
