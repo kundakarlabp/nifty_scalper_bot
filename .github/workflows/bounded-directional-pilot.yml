@@ -79,11 +79,12 @@ jobs:
                   if row["slippage_bps_per_side"] != 25.0:
                       continue
                   mean = row["mean_net_per_resolved_fill"]
+                  mean_text = f"{mean:.2f}" if mean is not None else "—"
                   stream.write(
                       f"| {row['phase']} | {row['study']} | {row['candidate']} | "
                       f"25 | {row['resolved']} | {row['unresolved']} | "
                       f"{row['net_pnl']:.2f} | "
-                      f"{mean:.2f if mean is not None else '—'} |\n"
+                      f"{mean_text} |\n"
                   )
               stream.write(
                   "\n**No live promotion:** sample and execution evidence are "
