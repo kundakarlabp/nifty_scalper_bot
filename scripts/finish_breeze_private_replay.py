@@ -100,7 +100,9 @@ def matching_key(
     return None
 
 
-def verified_transports(directory: Path, *, expected_windows: int = 25) -> dict[str, int]:
+def verified_transports(
+    directory: Path, *, expected_windows: int = 25
+) -> dict[str, int]:
     """Verify transport member names and CMS SHA-256 before any key use."""
     if not directory.is_dir():
         raise ValueError("encrypted_archive_directory_missing")
