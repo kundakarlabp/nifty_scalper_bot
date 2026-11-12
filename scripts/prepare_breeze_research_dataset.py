@@ -199,14 +199,14 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
         ):
             raise ValueError("breeze_candle_timestamp_invalid")
         naive = stamp.replace(tzinfo=None)
-        if window_start <= naive < window_end:
+        if session == date(2025, 10, 21) and product == "cash":
+            # The special-session index clock convention is unverified.
+            # Quarantine every observation, including boundary timestamps.
+            quarantined += 1
+        elif window_start <= naive < window_end:
             normal_rows.append(row)
         elif session == date(2025, 10, 21) and naive == window_end:
             boundaries += 1
-        elif session == date(2025, 10, 21) and product == "cash":
-            # Archived Muhurat spot source contains regular-session timestamps.
-            # Preserve explicit quarantine metadata but never expose such bars.
-            quarantined += 1
         else:
             raise ValueError("breeze_candle_outside_verified_session")
     if boundaries > 1:
@@ -214,7 +214,6 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
     if quarantined:
         if product != "cash" or session != date(2025, 10, 21):
             raise ValueError("unexpected_source_quarantine")
-        quarantined += len(normal_rows)
         normal_rows = []
     audit = aggregate_breeze_session(
         normal_rows,
