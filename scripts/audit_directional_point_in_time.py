@@ -100,10 +100,15 @@ def _direction(
     """Adjudicate fresh underlying observations with the runtime owner."""
     if not evidence:
         return "UNDERLYING_SOURCE_PROVENANCE_MISSING", None
+    future = evidence.get("futures_contract") or {}
     if (
         evidence.get("clock_verified") is not True
         or evidence.get("futures_roll_identity_verified") is not True
         or not _sha(evidence.get("source_sha256"))
+        or future.get("continuous_alias") != event["future"]
+        or not str(future.get("actual_symbol", "")).startswith("NFO:NIFTY")
+        or not str(future.get("instrument_token", "")).isdigit()
+        or not int(future["instrument_token"]) > 0
     ):
         return "UNDERLYING_SOURCE_PROVENANCE_UNVERIFIED", None
     observations = {}
@@ -151,14 +156,22 @@ def _book(
     row: Mapping[str, Any], contract: Mapping[str, Any]
 ) -> ObservedBook:
     """Reject malformed depth rather than backfill it from option OHLC."""
+    if not _sha(row.get("source_sha256")):
+        raise ValueError("pit_depth_source_unverified")
+    if any(
+        type(level[1]) is not int
+        for side in ("bid", "ask")
+        for level in row[side]
+    ):
+        raise ValueError("pit_depth_quantity_unverified")
     return ObservedBook(
         symbol=str(row["symbol"]),
         token=str(row["token"]),
         expiry=date.fromisoformat(row["expiry"]),
-        lot_size=int(row["lot_size"]),
+        lot_size=row["lot_size"],
         observed_at=_time(row["observed_at"]),
-        bid=tuple(BookLevel(float(p), int(q)) for p, q in row["bid"]),
-        ask=tuple(BookLevel(float(p), int(q)) for p, q in row["ask"]),
+        bid=tuple(BookLevel(float(p), q) for p, q in row["bid"]),
+        ask=tuple(BookLevel(float(p), q) for p, q in row["ask"]),
         source=row["source"],
         full_depth_captured=(row.get("full_depth_captured") is True),
         historical_identity_verified=(
@@ -197,6 +210,8 @@ def _event_status(
             or signal.get("side") != event["side"]
             or signal.get("strategy") not in {"SMC", "FailedBreakoutResearch"}
             or not _sha(signal.get("source_sha256"))
+            or "emitted_at" not in signal
+            or not _time(signal["emitted_at"]) == decision
         ):
             entry_status = "VERIFIED_STRATEGY_INTENT_MISSING"
         elif not quote_rows:
