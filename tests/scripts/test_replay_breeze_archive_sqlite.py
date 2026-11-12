@@ -11,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-
 from scripts.replay_breeze_archive_sqlite import execute, prepare_causal_day
 
 
@@ -19,8 +18,7 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
     minute = root / "intraday.sqlite"
     eod = root / "eod.sqlite"
     with sqlite3.connect(eod) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE sessions (day TEXT, available_not_before TEXT);
             CREATE TABLE daily_index (
                 day TEXT, available_not_before TEXT, close REAL
@@ -29,11 +27,8 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
                 day TEXT, kind TEXT, expiry TEXT, strike REAL,
                 lot_size INTEGER, instrument_name TEXT
             );
-            """
-        )
-        conn.execute(
-            "INSERT INTO sessions VALUES (?,?)", ("2025-11-03", "2025-11-04")
-        )
+            """)
+        conn.execute("INSERT INTO sessions VALUES (?,?)", ("2025-11-03", "2025-11-04"))
         conn.execute(
             "INSERT INTO daily_index VALUES (?,?,?)",
             ("2025-11-03", "2025-11-04", 22530.0),
@@ -47,8 +42,12 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
                 conn.execute(
                     "INSERT INTO contract_eod VALUES (?,?,?,?,?,?)",
                     (
-                        "2025-11-03", kind, "2025-11-11",
-                        strike, 75, f"NIFTY25NOV{strike}{kind}",
+                        "2025-11-03",
+                        kind,
+                        "2025-11-11",
+                        strike,
+                        75,
+                        f"NIFTY25NOV{strike}{kind}",
                     ),
                 )
         # Same-day EOD is deliberately unavailable at replay time and must
@@ -63,8 +62,7 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
         )
         conn.commit()
     with sqlite3.connect(minute) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE series (
                 id INTEGER PRIMARY KEY, trade_day TEXT, contract_key TEXT,
                 status TEXT, observed_minutes INTEGER, missing_minutes INTEGER,
@@ -74,8 +72,7 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
                 series_id INTEGER, stamp TEXT, open REAL, high REAL,
                 low REAL, close REAL, volume INTEGER, oi INTEGER
             );
-            """
-        )
+            """)
         contracts = [
             "NIFTY_INDEX",
             "NIFTY_2025-11-25_FUT",
@@ -93,14 +90,26 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
             )
             for minute_index in range(4):
                 stamp = datetime(
-                    2025, 11, 4, 9, 15,
+                    2025,
+                    11,
+                    4,
+                    9,
+                    15,
                     tzinfo=timezone(timedelta(hours=5, minutes=30)),
                 ) + timedelta(minutes=minute_index)
                 value = 100.0 + minute_index
                 conn.execute(
                     "INSERT INTO candles VALUES (?,?,?,?,?,?,?,?)",
-                    (n, stamp.isoformat(), value, value + 1,
-                     value - 1, value + 0.5, 100, 1000),
+                    (
+                        n,
+                        stamp.isoformat(),
+                        value,
+                        value + 1,
+                        value - 1,
+                        value + 0.5,
+                        100,
+                        1000,
+                    ),
                 )
         conn.commit()
     return minute, eod
@@ -109,15 +118,11 @@ def _databases(root: Path, *, omit_ce: bool = False) -> tuple[Path, Path]:
 def test_prepare_only_uses_prior_day_not_same_day(tmp_path: Path) -> None:
     minute, eod = _databases(tmp_path)
     out = tmp_path / "shadow"
-    result = execute(
-        minute, eod, "2025-11-04", out, prepare_only=True
-    )
+    result = execute(minute, eod, "2025-11-04", out, prepare_only=True)
     assert result["status"] == "RESEARCH_BAR_PROXY_READY"
     assert result["prior_eod_day"] == "2025-11-03"
     assert result["prior_eod_close_used_for_selection"] == 22530.0
-    assert result["selected_contracts"]["CE"]["contract_key"].endswith(
-        "22500_CE"
-    )
+    assert result["selected_contracts"]["CE"]["contract_key"].endswith("22500_CE")
     assert result["execution_grade_ready"] is False
     assert not result["historical_bid_ask_available"]
     from nifty_scalper_bot.backtesting.strategy_research import load_archive
@@ -125,7 +130,8 @@ def test_prepare_only_uses_prior_day_not_same_day(tmp_path: Path) -> None:
     histories, instruments, _ = load_archive(out)
     assert len(histories) == 4
     assert sorted(
-        row["lot_size"] for row in instruments.values()
+        row["lot_size"]
+        for row in instruments.values()
         if row["instrument_type"] in ("CE", "PE")
     ) == [75, 75]
     with (out / "candles" / "CE.json").open() as source:
@@ -159,8 +165,11 @@ def test_reject_live_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("ENABLE_LIVE", "true")
     with pytest.raises(ValueError, match="breeze_replay_refuses_live_environment"):
         execute(
-            minute, eod, "2025-11-04",
-            tmp_path / "nope", prepare_only=True,
+            minute,
+            eod,
+            "2025-11-04",
+            tmp_path / "nope",
+            prepare_only=True,
         )
     assert not (tmp_path / "nope").exists()
 
