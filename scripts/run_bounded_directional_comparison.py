@@ -17,8 +17,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from nifty_scalper_bot.backtesting.strategy_research import summarize
 from scripts.audit_directional_strategies import run_directional_research_bundle
+
+from nifty_scalper_bot.backtesting.strategy_research import summarize
 
 PHASES = {"2017": "development", "2018": "development",
           "2019": "validation", "2020": "retrospective_check"}
@@ -188,11 +189,15 @@ def run(root: Path, *, per_quarter: int = 2) -> dict[str, Any]:
         "outperformance_inference_allowed": False,
         "limitations": [
             "Small date-stratified feasibility sample; not an untouched holdout",
-            "Monthly fixed-opening ATM option baskets; not current weekly or rotated contracts",
-            "Public pre-2018 bar timestamp conventions and continuous future identity unverified",
+            "Monthly fixed-opening ATM option baskets; "
+            "not current weekly or rotated contracts",
+            "Public pre-2018 bar timestamp conventions and "
+            "continuous future identity unverified",
             "OHLC simulated execution lacks historical bid/ask/depth and partial fills",
-            "SMC/reversal compared at same next-minute fill; earlier SMC entries not attributed",
-            "Per-session candidate competition is not reconstructed across a real live portfolio",
+            "SMC/reversal compared at same next-minute fill; "
+            "earlier SMC entries not attributed",
+            "Per-session candidate competition is not reconstructed "
+            "across a real live portfolio",
             "Failed archive sessions are reported and never silently imputed",
         ],
     }
