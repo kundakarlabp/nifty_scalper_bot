@@ -159,3 +159,33 @@ def test_export_rejects_incomplete_contract_identity(tmp_path):
             day="2025-02-03", product="options",
             expiry="2025-02-27", strike=None, side="CE", interval=5
         )
+
+
+def test_muhurat_spot_legacy_clock_is_quarantined(tmp_path):
+    source = tmp_path / "src"
+    payload = _payload(special=True)
+    payload["product_type"] = "cash"
+    payload["expiry"] = None
+    payload["strike"] = None
+    payload["side"] = "INDEX"
+    payload["candles"] = [
+        [
+            (datetime.fromisoformat("2025-10-21T09:15:00+05:30")
+             + timedelta(minutes=i)).isoformat(),
+            100.0, 102.0, 99.0, 101.0, 100, None,
+        ]
+        for i in range(370)
+    ]
+    payload["candles_sha256"] = digest_json(payload["candles"])
+    _window(source, "one", payload)
+    database = tmp_path / "private.sqlite"
+    report = build(source, database, tmp_path / "summary.json",
+                   expected_windows=1)
+    assert report["quarantined_special_index_series"] == 1
+    assert report["quarantined_source_minutes"] == 370
+    assert report["bars_1m"] == 0
+    with pytest.raises(ValueError, match="research_contract_day_not_available"):
+        export_series(
+            database, tmp_path / "invalid.csv", day="2025-10-21",
+            product="cash", expiry=None, strike=None, side="INDEX", interval=1
+        )
