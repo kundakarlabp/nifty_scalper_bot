@@ -73,6 +73,101 @@ def _day_from_filename(path: Path) -> date:
     return date.fromisoformat(day_text)
 
 
+def _recorded_option_tokens(snapshot: Mapping[str, Any]) -> dict[str, int]:
+    """Use captured NFO catalog identity; never infer an option token."""
+    tokens: dict[str, int] = {}
+    conflicted: set[str] = set()
+    for row in snapshot.get("instruments") or []:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("exchange") or "").upper() != "NFO":
+            continue
+        symbol = normalize_symbol(f"NFO:{row.get('tradingsymbol') or ''}")
+        token = row.get("instrument_token")
+        if not symbol.endswith(("CE", "PE")) or type(token) is not int or token <= 0:
+            continue
+        if symbol in tokens and tokens[symbol] != token:
+            conflicted.add(symbol)
+        tokens[symbol] = token
+    for symbol in conflicted:
+        tokens.pop(symbol, None)
+    return tokens
+
+
+def _selected_snapshot_token(
+    symbol: str, snapshot: Mapping[str, Any], catalog: Mapping[str, int]
+) -> int | None:
+    token = catalog.get(symbol)
+    if token is None:
+        return None
+    mapping = (snapshot.get("basket") or {}).get("token_by_symbol")
+    if mapping is not None:
+        if not isinstance(mapping, Mapping):
+            return None
+        if mapping.get(symbol) != token:
+            return None
+    return token
+
+
+def _recorded_full_book_quote(
+    tick: Mapping[str, Any], expected_token: int | None
+) -> tuple[str, tuple[float, float] | None]:
+    """Approve only exact-token, two-sided five-level original WS FULL books."""
+    if str(tick.get("source") or "").lower() != "ws_full":
+        return "non_full_ws_source", None
+    if tick.get("depth_available") is not True:
+        return "depth_unavailable", None
+    if tick.get("tradable_quote") is not True:
+        return "quote_not_tradable", None
+    if expected_token is None:
+        return "selected_catalog_token_unverified", None
+    if type(tick.get("instrument_token")) is not int:
+        return "tick_instrument_token_missing", None
+    if tick["instrument_token"] != expected_token:
+        return "tick_instrument_token_mismatch", None
+    depth = tick.get("depth")
+    if not isinstance(depth, Mapping):
+        return "five_level_depth_missing", None
+    books: list[list[float]] = []
+    for side in ("buy", "sell"):
+        levels = depth.get(side)
+        if not isinstance(levels, list) or len(levels) < 5:
+            return "five_level_depth_missing", None
+        prices = []
+        for level in levels[:5]:
+            if not isinstance(level, Mapping):
+                return "five_level_depth_invalid", None
+            price, quantity = level.get("price"), level.get("quantity")
+            if (
+                type(price) not in (float, int)
+                or not math.isfinite(price)
+                or price <= 0
+                or type(quantity) is not int
+                or quantity <= 0
+            ):
+                return "five_level_depth_invalid", None
+            prices.append(float(price))
+        books.append(prices)
+    bid_levels, ask_levels = books
+    if (
+        bid_levels[0] >= ask_levels[0]
+        or any(a < b for a, b in zip(bid_levels[1:], bid_levels[:-1]))
+        or any(a > b for a, b in zip(ask_levels[1:], ask_levels[:-1]))
+    ):
+        return "five_level_order_invalid", None
+    top_bid, top_ask = tick.get("bid"), tick.get("ask")
+    if (
+        type(top_bid) not in (int, float)
+        or type(top_ask) not in (int, float)
+        or not math.isfinite(top_bid)
+        or not math.isfinite(top_ask)
+        or not math.isclose(top_bid, bid_levels[0], abs_tol=1e-6)
+        or not math.isclose(top_ask, ask_levels[0], abs_tol=1e-6)
+    ):
+        return "top_of_book_depth_conflict", None
+    return "recorded_full_book_token_verified", (bid_levels[0], ask_levels[0])
+
+
 def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
     """Take all evidence from existing validated original epoch and sidecar."""
     event_count, first, snapshots = validate_replay_epochs(path)
@@ -81,7 +176,17 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
         raise ValueError("epoch_audit_fidelity_not_verified")
     first_ts: float | None = None
     last_ts: float | None = None
-    selections: list[tuple[float, str, str]] = []
+    selections: list[tuple[float, str, str, int]] = []
+    catalog = _recorded_option_tokens(first)
+    full_book_quotes: dict[tuple[int, str], list[tuple[float, float, float]]] = (
+        defaultdict(list)
+    )
+    full_book_reasons: Counter[str] = Counter()
+    selected_full_book_ticks = 0
+    unselected_option_ticks = 0
+    phase_id = -1
+    phase_key: tuple[str, str, str] | None = None
+    active: dict[str, int | str | None] = {}
     for event in iter_session(path):
         instant = datetime.fromisoformat(event["available_at"])
         timestamp = instant.timestamp()
@@ -94,13 +199,40 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
             chosen = _selected(event["payload"])
             if not chosen:
                 raise ValueError("epoch_audit_selected_contracts_unproven")
-            selections.append(
-                (
-                    timestamp,
-                    normalize_symbol(chosen["CE"]),
-                    normalize_symbol(chosen["PE"]),
-                )
+            selection = tuple(
+                normalize_symbol(chosen[side]) for side in ("CE", "PE", "FUT")
             )
+            if selection != phase_key:
+                phase_id += 1
+                phase_key = selection
+            selections.append((timestamp, selection[0], selection[1], phase_id))
+            active = {
+                "phase": phase_id,
+                "CE": selection[0],
+                "PE": selection[1],
+                "CE_token": _selected_snapshot_token(
+                    selection[0], event["payload"], catalog
+                ),
+                "PE_token": _selected_snapshot_token(
+                    selection[1], event["payload"], catalog
+                ),
+            }
+        elif event["kind"] == "tick" and active:
+            tick = event["payload"]
+            symbol = normalize_symbol(str(tick.get("symbol") or ""))
+            if not symbol.startswith("NFO:") or not symbol.endswith(("CE", "PE")):
+                continue
+            side = symbol[-2:]
+            if symbol != active[side]:
+                unselected_option_ticks += 1
+                continue
+            selected_full_book_ticks += 1
+            reason, book = _recorded_full_book_quote(
+                tick, active[f"{side}_token"]
+            )
+            full_book_reasons[reason] += 1
+            if book is not None:
+                full_book_quotes[(phase_id, symbol)].append((timestamp, *book))
     if first_ts is None or last_ts is None or not selections:
         raise ValueError("epoch_audit_empty_epoch")
     quotes, quote_sha, quote_count = load_archive_quotes(path)
@@ -115,6 +247,13 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
         "fidelity": fidelity,
         "selections": selections,
         "quotes": quotes,
+        "full_book_quotes": dict(full_book_quotes),
+        "selected_option_full_book_candidate_ticks": selected_full_book_ticks,
+        "unselected_option_tick_count": unselected_option_ticks,
+        "full_book_tick_reasons": dict(sorted(full_book_reasons.items())),
+        "full_book_token_verified_ticks": full_book_reasons[
+            "recorded_full_book_token_verified"
+        ],
         "captured_revision": first.get("code_revision"),
     }
 
@@ -175,6 +314,8 @@ def _label(opportunity: Any, context: dict[str, Any], horizon: int) -> dict[str,
         "markout": None,
         "cost_scenarios": None,
         "cost_quantity_provenance": None,
+        "strict_full_depth_markout": None,
+        "strict_full_depth_status": "not_attempted",
         "independent_setup": True,
     }
     if not symbol.startswith("NFO:") or not symbol.endswith(("CE", "PE")):
@@ -193,6 +334,22 @@ def _label(opportunity: Any, context: dict[str, Any], horizon: int) -> dict[str,
     if selection_failure:
         entry["status"] = selection_failure
         return entry
+    latest_selection = next(
+        (s for s in reversed(context["selections"]) if s[0] <= ts),
+        None,
+    )
+    if latest_selection is not None:
+        strict_quotes = context["full_book_quotes"].get(
+            (latest_selection[3], symbol), ()
+        )
+        if strict_quotes:
+            strict_markout, strict_status = observed_markout(
+                strict_quotes, decision_ts=ts, horizon_s=horizon
+            )
+            entry["strict_full_depth_markout"] = strict_markout
+            entry["strict_full_depth_status"] = strict_status
+        else:
+            entry["strict_full_depth_status"] = "no_token_verified_full_depth_quotes"
     quotes = context["quotes"].get(symbol, ())
     timestamps = [row[0] for row in quotes]
     markout, status = observed_markout(
@@ -278,6 +435,12 @@ def _report_grouped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         statuses = Counter(row["status"] for row in observed)
         quote_valid = sum(row["markout"] is not None for row in observed)
         cost_valid = sum(row["cost_scenarios"] is not None for row in observed)
+        strict_valid = sum(
+            row.get("strict_full_depth_markout") is not None for row in observed
+        )
+        strict_statuses = Counter(
+            row.get("strict_full_depth_status", "not_attempted") for row in observed
+        )
         report.append(
             {
                 "strategy": strategy,
@@ -285,6 +448,9 @@ def _report_grouped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "independent_setup_outcomes": len(observed),
                 "quote_valid": quote_valid,
                 "quote_missing": len(observed) - quote_valid,
+                "strict_full_depth_valid": strict_valid,
+                "strict_full_depth_missing": len(observed) - strict_valid,
+                "strict_full_depth_status_counts": dict(sorted(strict_statuses.items())),
                 "cost_modelled": cost_valid,
                 "cost_unavailable": len(observed) - cost_valid,
                 "status_counts": dict(sorted(statuses.items())),
@@ -367,6 +533,10 @@ def audit_original_session(
                                 "status": "epoch_selected_quote_context_incomplete",
                                 "markout": None,
                                 "cost_scenarios": None,
+                                "strict_full_depth_markout": None,
+                                "strict_full_depth_status": (
+                                    "epoch_selected_quote_context_incomplete"
+                                ),
                                 "independent_setup": True,
                             }
                         )
@@ -382,6 +552,14 @@ def audit_original_session(
                     "event_count": c["event_count"],
                     "snapshot_count": c["snapshot_count"],
                     "quote_count": c["quote_count"],
+                    "selected_option_full_book_candidate_ticks": c[
+                        "selected_option_full_book_candidate_ticks"
+                    ],
+                    "full_book_token_verified_ticks": c[
+                        "full_book_token_verified_ticks"
+                    ],
+                    "full_book_tick_reasons": c["full_book_tick_reasons"],
+                    "unselected_option_tick_count": c["unselected_option_tick_count"],
                     "archive_sha256": c["archive_sha256"],
                     "captured_revision": c["captured_revision"],
                     "basket_segments": c["fidelity"]["basket_segments"],
