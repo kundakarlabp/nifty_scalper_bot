@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Purpose: Audit original captured replay epochs and same-epoch quote outcomes.
 
-Responsibilities: Verify writer sidecars and isolate original process epochs,
-scope canonical decisions to the IST session, and measure exact-contract quote
-coverage without crossing a restart or selected-basket change.
+Responsibilities: Verify writer sidecars and isolate original process epochs;
+reconcile every IST-day decision through candidate-inclusion and setup-ID
+denominators, report missing selected quote context by role, and measure exact-
+contract forward quote coverage without crossing a restart or basket change.
 Boundaries: Offline SHADOW-only, no broker or network calls and no live changes.
 Safety: Missing quote paths, incomplete segment fidelity and absent fills never
 become synthesized outcomes or a strategy-promotion recommendation.
@@ -32,6 +33,7 @@ from scripts.reporting.rejected_setup_forward_markout import (
 from nifty_scalper_bot.backtesting.replay_fidelity import _selected, audit_session
 from nifty_scalper_bot.backtesting.runtime_research import validate_replay_epochs
 from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+    _research_context,
     canonicalize_setup_opportunities,
 )
 from nifty_scalper_bot.infra.market_research_report import (
@@ -219,6 +221,54 @@ def _label(opportunity: Any, context: dict[str, Any], horizon: int) -> dict[str,
     return entry
 
 
+def _candidate_inclusion_funnel(
+    rows: list[dict[str, Any]], opportunities: Any
+) -> dict[str, Any]:
+    """Account for journal decisions excluded before unique-setup attribution."""
+    excluded: Counter[str] = Counter()
+    eligible = 0
+    for row in rows:
+        if row.get("event_name") not in {"candidate.approved", "candidate.blocked"}:
+            excluded["not_candidate_decision_event"] += 1
+            continue
+        context = _research_context(row)
+        setup_id = str(
+            context.get("setup_id") or context.get("setup_structure_id") or ""
+        ).strip()
+        if not setup_id:
+            excluded["missing_owned_setup_id"] += 1
+            continue
+        if not str(context.get("strategy") or "").strip():
+            excluded["missing_owned_strategy"] += 1
+            continue
+        side = (
+            str(
+                context.get("contract_side")
+                or context.get("trade_side")
+                or row.get("direction")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
+        if side not in {"CE", "PE"}:
+            excluded["invalid_option_side"] += 1
+            continue
+        eligible += 1
+
+    included = sum(int(item.decision_count) for item in opportunities)
+    if included != eligible or included + sum(excluded.values()) != len(rows):
+        raise ValueError("epoch_audit_canonical_candidate_count_conflict")
+    return {
+        "source_decision_rows": len(rows),
+        "canonicalized_decision_rows": included,
+        "excluded_before_canonicalization": sum(excluded.values()),
+        "exclusion_reasons": dict(sorted(excluded.items())),
+        "independent_setup_count": len(opportunities),
+        "repeated_decisions_collapsed": included - len(opportunities),
+    }
+
+
 def _report_grouped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -297,7 +347,9 @@ def audit_original_session(
         epoch_meta: list[dict[str, Any]] = []
         setup_total = 0
         for c in contexts:
-            opportunities = canonicalize_setup_opportunities(grouped[c["run_id"]])
+            decisions = grouped[c["run_id"]]
+            opportunities = canonicalize_setup_opportunities(decisions)
+            funnel = _candidate_inclusion_funnel(decisions, opportunities)
             setup_total += len(opportunities)
             for opportunity in opportunities:
                 if not c["fidelity"].get("observed_selected_context_available"):
@@ -340,7 +392,11 @@ def audit_original_session(
                     "selected_quote_context_available": c["fidelity"][
                         "observed_selected_context_available"
                     ],
-                    "canonical_decision_rows": len(grouped[c["run_id"]]),
+                    "canonical_decision_rows": len(decisions),
+                    "canonical_inclusion_funnel": funnel,
+                    "selected_quote_context_missing_by_requirement": c["fidelity"][
+                        "basket_segments_missing_by_requirement"
+                    ],
                     "independent_setups": len(opportunities),
                 }
             )
@@ -349,6 +405,12 @@ def audit_original_session(
     counts = Counter(
         row["strategy"] for row in outcomes if row["horizon_seconds"] == 900
     )
+    assigned = sum(
+        item["canonical_inclusion_funnel"]["source_decision_rows"]
+        for item in epoch_meta
+    )
+    if assigned + sum(unassigned.values()) != len(day_decisions):
+        raise ValueError("epoch_audit_session_decision_denominator_conflict")
     return {
         "scope": "original_captured_epochs_exact_contract_observational_markout",
         "session_date_ist": day.isoformat(),
@@ -363,6 +425,18 @@ def audit_original_session(
         "journal_same_day_decision_rows": len(day_decisions),
         "journal_out_of_day_decision_rows": len(raw_decisions) - len(day_decisions),
         "journal_unassigned_same_day_decision_rows": dict(unassigned),
+        "journal_assigned_same_epoch_decision_rows": sum(
+            item["canonical_inclusion_funnel"]["source_decision_rows"]
+            for item in epoch_meta
+        ),
+        "journal_excluded_before_canonicalization": sum(
+            item["canonical_inclusion_funnel"]["excluded_before_canonicalization"]
+            for item in epoch_meta
+        ),
+        "journal_canonicalized_decision_rows": sum(
+            item["canonical_inclusion_funnel"]["canonicalized_decision_rows"]
+            for item in epoch_meta
+        ),
         "independent_same_epoch_setups": setup_total,
         "independent_setup_counts_by_strategy": dict(sorted(counts.items())),
         "grouped_outcomes": _report_grouped(outcomes),
