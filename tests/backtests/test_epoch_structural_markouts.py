@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from scripts import validate_epoch_structural_markouts as audit
 
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
@@ -159,7 +158,7 @@ def test_dropped_capture_and_wrong_sha_fail_closed(tmp_path, monkeypatch):
 def test_research_only_without_local_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="epoch_audit_requires_shadow"):
-        audit.audit_original_session(tmp_path / "missing.jsonl", tmp_path / "missing.db")
+        audit.audit_original_session(\n            tmp_path / "missing.jsonl", tmp_path / "missing.db"\n        )
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     with pytest.raises(ValueError, match="epoch_audit_original_tape_missing"):
-        audit.audit_original_session(tmp_path / "missing.jsonl", tmp_path / "missing.db")
+        audit.audit_original_session(\n            tmp_path / "missing.jsonl", tmp_path / "missing.db"\n        )
