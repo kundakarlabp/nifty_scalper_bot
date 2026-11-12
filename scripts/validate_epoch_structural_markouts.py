@@ -230,9 +230,7 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
                 unselected_option_ticks += 1
                 continue
             selected_full_book_ticks += 1
-            reason, book = _recorded_full_book_quote(
-                tick, active[f"{side}_token"]
-            )
+            reason, book = _recorded_full_book_quote(tick, active[f"{side}_token"])
             full_book_reasons[reason] += 1
             if book is not None:
                 full_book_quotes[(phase_id, symbol)].append((timestamp, *book))
