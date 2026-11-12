@@ -1,7 +1,7 @@
 """Fail-closed point-in-time option contract, direction and depth research tests."""
 
 from copy import deepcopy
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from scripts import audit_directional_point_in_time as pit
