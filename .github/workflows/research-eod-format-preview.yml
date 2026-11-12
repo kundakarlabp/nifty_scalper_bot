@@ -1,0 +1,36 @@
+# Temporary, read-only formatting preview. Removed before final review.
+name: Research EOD formatting preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/build_eod_contract_db.py
+      - scripts/eod_research_reader.py
+      - tests/scripts/test_nifty_eod_research_tools.py
+      - .github/workflows/research-eod-format-preview.yml
+
+permissions:
+  contents: read
+
+jobs:
+  format-preview:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Format research Python only (no pushes, no secrets)
+        run: |
+          python -m pip install --disable-pip-version-check ruff black
+          python -m ruff check --fix --select I scripts/build_eod_contract_db.py scripts/eod_research_reader.py tests/scripts/test_nifty_eod_research_tools.py
+          python -m black scripts/build_eod_contract_db.py scripts/eod_research_reader.py tests/scripts/test_nifty_eod_research_tools.py
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for name in ('scripts/build_eod_contract_db.py', 'scripts/eod_research_reader.py', 'tests/scripts/test_nifty_eod_research_tools.py'):
+              print('RESEARCH_FORMAT_JSON:' + json.dumps({'path': name, 'content': Path(name).read_text()}))
+          PY
