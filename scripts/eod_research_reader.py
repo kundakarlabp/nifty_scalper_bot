@@ -42,7 +42,8 @@ class EodReferenceReader:
     def readiness(self) -> dict:
         with self._db() as db:
             row = db.execute(
-                "SELECT COUNT(*), SUM(option_contracts), SUM(futures_contracts) FROM sessions"
+                "SELECT COUNT(*), SUM(option_contracts), "
+                "SUM(futures_contracts) FROM sessions"
             ).fetchone()
             index = db.execute("SELECT COUNT(*) FROM daily_index").fetchone()[0]
         return {
