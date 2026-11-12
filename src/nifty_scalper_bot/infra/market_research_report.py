@@ -8,16 +8,18 @@ Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
 observational quotes cannot authorize changing any live entry or risk policy.
+Date-scoped journal decisions must match the replay session's IST calendar date.
 """
 
 from __future__ import annotations
 
 import bisect
 import json
+import math
 import os
 import statistics
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -481,6 +483,33 @@ def _attach_structural_costs(
         outcome["cost_quantity_provenance"] = "unverified_default_nifty_lot_assumption"
 
 
+def _session_decision_rows(
+    rows: Sequence[Mapping[str, Any]], session_date: date
+) -> list[Mapping[str, Any]]:
+    """Scope canonical decision rows to one IST date before quote-time matching.
+
+    The canonical trade journal loader is not date-filtered. Mixing its old
+    decisions with one day's immutable option tape produces false missing-quote
+    outcomes even when that day's own quote stream has valid coverage.
+    """
+    start = datetime.combine(session_date, time.min, tzinfo=_IST).timestamp()
+    end = datetime.combine(
+        session_date + timedelta(days=1), time.min, tzinfo=_IST
+    ).timestamp()
+    scoped = []
+    for row in rows:
+        raw = row.get("timestamp")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            observed = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(observed) and start <= observed < end:
+            scoped.append(row)
+    return scoped
+
+
 def build_session_research_report(
     *,
     session_date: date,
@@ -557,9 +586,13 @@ def build_session_research_report(
             report["sampled_observations"] = sampled
             report["sampled_strata"] = strata
             if trade_db.is_file():
-                structural = canonicalize_setup_opportunities(
-                    load_candidate_decision_rows(trade_db)
-                )
+                raw_decisions = load_candidate_decision_rows(trade_db)
+                day_decisions = _session_decision_rows(raw_decisions, session_date)
+                report["structural_decision_rows_scoped"] = len(day_decisions)
+                report["structural_decision_rows_excluded_non_session"] = len(
+                    raw_decisions
+                ) - len(day_decisions)
+                structural = canonicalize_setup_opportunities(day_decisions)
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
                 _attach_structural_costs(events, quotes)
@@ -596,6 +629,12 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "replay_sha256": report.get("replay_sha256"),
         "tradable_ws_quote_ticks": report.get("tradable_ws_quote_ticks"),
         "independent_setup_count": report["independent_setup_count"],
+        "structural_decision_rows_scoped": report.get(
+            "structural_decision_rows_scoped"
+        ),
+        "structural_decision_rows_excluded_non_session": report.get(
+            "structural_decision_rows_excluded_non_session"
+        ),
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
     }
