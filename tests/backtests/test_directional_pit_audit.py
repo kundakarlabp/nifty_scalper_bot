@@ -157,9 +157,7 @@ def test_underlying_disagreement_and_unverified_roll_fail_closed(monkeypatch):
     evidence = proof()
     evidence["direction"] = direction(futures_bias="PE")
     result = audited({"events": {event()["event_id"]: evidence}}, monkeypatch)
-    assert result["results"][0]["underlying_status"] == (
-        "FRESH_SPOT_FUTURES_CONFLICT"
-    )
+    assert result["results"][0]["underlying_status"] == ("FRESH_SPOT_FUTURES_CONFLICT")
     assert result["results"][0]["modeled_entry_price"] is None
     evidence["direction"] = direction()
     evidence["direction"]["futures_roll_identity_verified"] = False
@@ -198,13 +196,9 @@ def test_quote_depth_only_yields_conditional_entry_not_broker_pnl(monkeypatch):
 
 def test_future_dated_signal_cannot_qualify_as_same_event(monkeypatch):
     evidence = proof()
-    evidence["strategy_intent"]["emitted_at"] = (
-        T0 + timedelta(minutes=1)
-    ).isoformat()
+    evidence["strategy_intent"]["emitted_at"] = (T0 + timedelta(minutes=1)).isoformat()
     result = audited({"events": {event()["event_id"]: evidence}}, monkeypatch)
-    assert result["results"][0]["entry_status"] == (
-        "VERIFIED_STRATEGY_INTENT_MISSING"
-    )
+    assert result["results"][0]["entry_status"] == ("VERIFIED_STRATEGY_INTENT_MISSING")
 
 
 def test_reject_corrupt_event_ids_and_live_mode(monkeypatch):
