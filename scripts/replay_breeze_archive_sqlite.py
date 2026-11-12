@@ -13,7 +13,7 @@ import argparse
 import json
 import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +156,8 @@ def prepare_causal_day(
         listed = _prior_listed_contracts(eod, prior_day, prior_close, day)
         if listed is None:
             return {
-                "status": "ABSTAIN", "reason": "previously_listed_contract_pair_missing",
+                "status": "ABSTAIN",
+                "reason": "previously_listed_contract_pair_missing",
                 "day": day, "prior_eod_day": prior_day,
             }
         fut, ce, pe = listed
