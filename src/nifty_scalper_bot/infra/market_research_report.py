@@ -589,9 +589,9 @@ def build_session_research_report(
                 raw_decisions = load_candidate_decision_rows(trade_db)
                 day_decisions = _session_decision_rows(raw_decisions, session_date)
                 report["structural_decision_rows_scoped"] = len(day_decisions)
-                report["structural_decision_rows_excluded_non_session"] = (
-                    len(raw_decisions) - len(day_decisions)
-                )
+                report["structural_decision_rows_excluded_non_session"] = len(
+                    raw_decisions
+                ) - len(day_decisions)
                 structural = canonicalize_setup_opportunities(day_decisions)
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
