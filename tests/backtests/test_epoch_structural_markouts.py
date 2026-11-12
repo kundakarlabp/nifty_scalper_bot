@@ -291,17 +291,23 @@ def test_recorded_full_book_requires_actual_token_and_all_five_levels():
         "tick_instrument_token_missing"
     )
 
-    incomplete = dict(full, depth={
-        "buy": full["depth"]["buy"][:4],
-        "sell": full["depth"]["sell"],
-    })
+    incomplete = dict(
+        full,
+        depth={
+            "buy": full["depth"]["buy"][:4],
+            "sell": full["depth"]["sell"],
+        },
+    )
     assert audit._recorded_full_book_quote(incomplete, _TOKENS[_CE1])[0] == (
         "five_level_depth_missing"
     )
-    reversed_bid = dict(full, depth={
-        "buy": list(reversed(full["depth"]["buy"])),
-        "sell": full["depth"]["sell"],
-    })
+    reversed_bid = dict(
+        full,
+        depth={
+            "buy": list(reversed(full["depth"]["buy"])),
+            "sell": full["depth"]["sell"],
+        },
+    )
     assert audit._recorded_full_book_quote(reversed_bid, _TOKENS[_CE1])[0] == (
         "five_level_order_invalid"
     )
@@ -309,18 +315,17 @@ def test_recorded_full_book_requires_actual_token_and_all_five_levels():
     assert audit._recorded_full_book_quote(conflicting_top, _TOKENS[_CE1])[0] == (
         "top_of_book_depth_conflict"
     )
-    assert audit._recorded_full_book_quote(
-        dict(full, source="rest"), _TOKENS[_CE1]
-    )[0] == "non_full_ws_source"
+    assert (
+        audit._recorded_full_book_quote(dict(full, source="rest"), _TOKENS[_CE1])[0]
+        == "non_full_ws_source"
+    )
 
 
 def test_catalog_token_requires_continuous_snapshot_identity():
     snapshot = _snapshot(_CE1)
     catalog = audit._recorded_option_tokens(snapshot)
     assert catalog[_CE1] == _TOKENS[_CE1]
-    assert audit._selected_snapshot_token(_CE1, snapshot, catalog) == (
-        _TOKENS[_CE1]
-    )
+    assert audit._selected_snapshot_token(_CE1, snapshot, catalog) == (_TOKENS[_CE1])
     snapshot["basket"]["token_by_symbol"][_CE1] = 909
     assert audit._selected_snapshot_token(_CE1, snapshot, catalog) is None
 
@@ -331,7 +336,8 @@ def test_full_book_evidence_is_not_an_executable_broker_fill(tmp_path, monkeypat
     db.touch()
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setattr(
-        audit, "load_candidate_decision_rows",
+        audit,
+        "load_candidate_decision_rows",
         lambda _db: [_row(times[0], _CE1)],
     )
     result = audit.audit_original_session(session, db)
