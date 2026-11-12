@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Build a private, research-only SQLite NIFTY candle catalogue from verified Breeze windows.
+"""Build a private, research-only SQLite NIFTY candle catalogue.
+
+Convert checksum-verified Breeze windows without modifying originals.
 
 Ownership: isolated offline research import and read-only export of named contracts.
 Safety: never decrypts, fetches, trades, or asserts executable quotes; rejects checksum
@@ -101,7 +103,9 @@ def verify_window(window: Path) -> tuple[list[Path], int]:
     return observations, len(verified)
 
 
-def contract_identity(p: dict[str, Any]) -> tuple[str, str, str | None, int | None, str]:
+def contract_identity(
+    p: dict[str, Any],
+) -> tuple[str, str, str | None, int | None, str]:
     product = p.get("product_type", "options")
     side = p.get("side")
     day = p.get("day")
@@ -224,7 +228,13 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
     return summary, normal_rows
 
 
-def build(windows_root: Path, database: Path, summary_file: Path, *, expected_windows: int = 25) -> dict[str, Any]:
+def build(
+    windows_root: Path,
+    database: Path,
+    summary_file: Path,
+    *,
+    expected_windows: int = 25,
+) -> dict[str, Any]:
     """Build an atomic, private SQLite research cache; immutable source is untouched."""
     root = windows_root.resolve()
     if not root.is_dir() or not 1 <= expected_windows <= 100:
@@ -278,7 +288,8 @@ def build(windows_root: Path, database: Path, summary_file: Path, *, expected_wi
                 cursor = db.execute(
                     "INSERT INTO series (trade_day,contract_key,product_type,expiry,"
                     "strike,side,status,observed_minutes,missing_minutes,"
-                    "flagged_boundary_minutes,quarantined_source_minutes,source_digest) "
+                    "flagged_boundary_minutes,quarantined_source_minutes,"
+                    "source_digest) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     tuple(info[k] for k in (
                         "trade_day","contract_key","product_type","expiry","strike",
@@ -299,8 +310,12 @@ def build(windows_root: Path, database: Path, summary_file: Path, *, expected_wi
                 counters["series"] += 1
                 counters["bars_1m"] += len(candles)
                 counters["gap_minutes"] += info["missing_minutes"]
-                counters["special_boundary_exclusions"] += info["flagged_boundary_minutes"]
-                counters["quarantined_source_minutes"] += info["quarantined_source_minutes"]
+                counters["special_boundary_exclusions"] += info[
+                    "flagged_boundary_minutes"
+                ]
+                counters["quarantined_source_minutes"] += info[
+                    "quarantined_source_minutes"
+                ]
                 if info["status"] == "QUARANTINED_SPECIAL_INDEX_CLOCK":
                     counters["quarantined_special_index_series"] += 1
             db.commit()
@@ -355,7 +370,9 @@ def export_series(
             "AND expiry IS ? AND strike IS ? AND side=?",
             (day, product, expiry, strike, side),
         ).fetchall()
-        if len(candidate) != 1 or candidate[0][1] in ("EMPTY", "QUARANTINED_SPECIAL_INDEX_CLOCK"):
+        if len(candidate) != 1 or candidate[0][1] in (
+            "EMPTY", "QUARANTINED_SPECIAL_INDEX_CLOCK"
+        ):
             raise ValueError("research_contract_day_not_available")
         source = conn.execute(
             "SELECT stamp,open,high,low,close,volume,oi FROM candles "
@@ -384,8 +401,13 @@ def export_series(
         os.replace(tmp, output)
     finally:
         tmp.unlink(missing_ok=True)
-    return {"bars": len(audit.bars), "incomplete_windows_excluded": len(audit.missing_windows),
-            "interval_minutes": interval, "research_only": True, "execution_eligible": False}
+    return {
+        "bars": len(audit.bars),
+        "incomplete_windows_excluded": len(audit.missing_windows),
+        "interval_minutes": interval,
+        "research_only": True,
+        "execution_eligible": False,
+    }
 
 
 def main() -> None:
