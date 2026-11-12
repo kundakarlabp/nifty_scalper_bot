@@ -1,7 +1,8 @@
 """Offline, fail-closed NIFTY volatility-structure research; no broker actions.
 
 Responsibilities: Evaluate quote-consistent entry geometry and conservative
-portfolio budget assumptions for condors and straddles using canonical costs.
+portfolio budget assumptions for condors, straddles and directional debit spreads
+using canonical costs.
 Ownership: Research-only option strategy screening and read-only cache mapping,
 not StrategyManager/execution.
 Safety: Requires explicit SHADOW mode and synchronized FULL-depth quotes; never
@@ -69,6 +70,24 @@ class LongStraddleAssessment:
     forecast_minus_implied_vol: float
     evidence_label: str = "RESEARCH_CANDIDATE"
     live_eligible: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DirectionalDebitSpreadAssessment:
+    """Entry quote geometry only; no fills, exit costs or broker authorization."""
+
+    structure: Literal["BULL_CALL_SPREAD", "BEAR_PUT_SPREAD"]
+    debit_per_unit: float
+    width_points: int
+    expiry_breakeven: float
+    gross_max_profit_rupees: float
+    gross_max_loss_rupees: float
+    entry_fees_rupees: float
+    spread_entry_cash_required_rupees: float
+    long_option_entry_cash_required_rupees: float
+    evidence_label: str = "RESEARCH_CANDIDATE"
+    live_eligible: bool = False
+    net_loss_bound_certified: bool = False
 
 
 def _validated(
@@ -192,6 +211,65 @@ def assess_credit_iron_condor(
     )
 
 
+def assess_directional_debit_spread(
+    *,
+    long_leg: VolatilityOptionQuote,
+    short_leg: VolatilityOptionQuote,
+    at: datetime,
+) -> DirectionalDebitSpreadAssessment:
+    """Compare matched single-long and vertical entry geometry, not profitability.
+
+    Uses long ask and short bid from the same synchronized, identified book.
+    Future liquidation, legging/margin, bid/ask deterioration, settlement and
+    stressed short-leg exposure are NOT evidenced or certified here.
+    """
+    quantity = _validated((long_leg, short_leg), at=at)
+    if (
+        long_leg.option_type == short_leg.option_type == "CE"
+        and long_leg.strike < short_leg.strike
+    ):
+        structure: Literal["BULL_CALL_SPREAD", "BEAR_PUT_SPREAD"] = (
+            "BULL_CALL_SPREAD"
+        )
+        width = short_leg.strike - long_leg.strike
+    elif (
+        long_leg.option_type == short_leg.option_type == "PE"
+        and long_leg.strike > short_leg.strike
+    ):
+        structure = "BEAR_PUT_SPREAD"
+        width = long_leg.strike - short_leg.strike
+    else:
+        raise ValueError("research_debit_spread_geometry_invalid")
+    debit = long_leg.ask - short_leg.bid
+    if not math.isfinite(debit) or not 0 < debit < width:
+        raise ValueError("research_debit_spread_debit_invalid")
+    buy_fee = estimate_order_cost(
+        turnover=long_leg.ask * quantity, side="BUY"
+    )
+    sell_fee = estimate_order_cost(
+        turnover=short_leg.bid * quantity, side="SELL"
+    )
+    entry_fees = buy_fee + sell_fee
+    breakeven = (
+        long_leg.strike + debit
+        if structure == "BULL_CALL_SPREAD"
+        else long_leg.strike - debit
+    )
+    return DirectionalDebitSpreadAssessment(
+        structure=structure,
+        debit_per_unit=debit,
+        width_points=width,
+        expiry_breakeven=breakeven,
+        gross_max_profit_rupees=(width - debit) * quantity,
+        gross_max_loss_rupees=debit * quantity,
+        entry_fees_rupees=entry_fees,
+        spread_entry_cash_required_rupees=debit * quantity + entry_fees,
+        long_option_entry_cash_required_rupees=(
+            long_leg.ask * quantity + buy_fee
+        ),
+    )
+
+
 def assess_long_atm_straddle(
     *,
     call: VolatilityOptionQuote,
@@ -251,7 +329,7 @@ class PortfolioBudgetScreen:
 
 def screen_volatility_portfolio_budget(
     *,
-    assessment: CondorAssessment | LongStraddleAssessment,
+    assessment: CondorAssessment | LongStraddleAssessment | DirectionalDebitSpreadAssessment,
     broker_required_margin: float | None,
     broker_free_margin: float | None,
     remaining_trade_risk: float | None,
@@ -268,7 +346,10 @@ def screen_volatility_portfolio_budget(
     """
     if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
         raise ValueError("volatility_research_requires_shadow_process")
-    if not isinstance(assessment, (CondorAssessment, LongStraddleAssessment)):
+    if not isinstance(
+        assessment,
+        (CondorAssessment, LongStraddleAssessment, DirectionalDebitSpreadAssessment),
+    ):
         raise ValueError("research_structure_not_supported")
 
     inputs = (
@@ -296,16 +377,12 @@ def screen_volatility_portfolio_budget(
     assert exit_settlement_fee_reserve is not None
     assert stressed_slippage_reserve is not None
 
-    gross_loss = (
-        assessment.gross_max_loss_rupees
-        if isinstance(assessment, CondorAssessment)
-        else assessment.premium_plus_entry_fees_rupees
-    )
-    entry_cost = (
-        assessment.entry_fees_rupees
-        if isinstance(assessment, CondorAssessment)
-        else 0.0
-    )
+    if isinstance(assessment, LongStraddleAssessment):
+        gross_loss = assessment.premium_plus_entry_fees_rupees
+        entry_cost = 0.0
+    else:
+        gross_loss = assessment.gross_max_loss_rupees
+        entry_cost = assessment.entry_fees_rupees
     if (
         not math.isfinite(gross_loss)
         or not math.isfinite(entry_cost)
