@@ -19,21 +19,37 @@ def test_encrypted_window_round_trip_to_private_research_sqlite(tmp_path):
     cert = tmp_path / "recipient.pem"
     subprocess.run(
         [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(key), "-out", str(cert), "-days", "1",
-            "-subj", "/CN=offline-research-fixture",
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=offline-research-fixture",
         ],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     payload = {
-        "schema_version": 1, "day": "2025-02-03",
-        "expiry": "2025-02-27", "strike": 22500, "side": "PE",
+        "schema_version": 1,
+        "day": "2025-02-03",
+        "expiry": "2025-02-27",
+        "strike": 22500,
+        "side": "PE",
         "source": "icici_breeze_historical_v2",
         "product_type": "options",
         "normalized_timestamp_convention": "bar_start",
-        "promotion_eligible": False, "candles": [], "provider_rows": [],
+        "promotion_eligible": False,
+        "candles": [],
+        "provider_rows": [],
         "candles_sha256": digest_json([]),
         "provider_rows_sha256": digest_json([]),
     }
@@ -53,9 +69,18 @@ def test_encrypted_window_round_trip_to_private_research_sqlite(tmp_path):
     cms = tmp_path / "history.cms"
     subprocess.run(
         [
-            "openssl", "cms", "-encrypt", "-binary", "-aes-256-gcm",
-            "-outform", "DER", "-in", str(raw_tar),
-            "-out", str(cms), str(cert),
+            "openssl",
+            "cms",
+            "-encrypt",
+            "-binary",
+            "-aes-256-gcm",
+            "-outform",
+            "DER",
+            "-in",
+            str(raw_tar),
+            "-out",
+            str(cms),
+            str(cert),
         ],
         check=True,
         stdout=subprocess.DEVNULL,
@@ -75,8 +100,10 @@ def test_encrypted_window_round_trip_to_private_research_sqlite(tmp_path):
     assert result["unsealed_verified_windows"] == 1
     assert zip_path.exists()
     report = build(
-        dest, tmp_path / "private" / "candles.sqlite",
-        tmp_path / "private" / "summary.json", expected_windows=1
+        dest,
+        tmp_path / "private" / "candles.sqlite",
+        tmp_path / "private" / "summary.json",
+        expected_windows=1,
     )
     assert report["verified_windows"] == 1
     assert report["series"] == 1
@@ -89,6 +116,9 @@ def test_missing_private_key_fails_closed(tmp_path):
     folder.mkdir()
     with pytest.raises(ValueError, match="unseal_inputs_missing"):
         unseal(
-            folder, tmp_path / "no-key.pem", tmp_path / "no-cert.pem",
-            tmp_path / "private", expected_windows=1
+            folder,
+            tmp_path / "no-key.pem",
+            tmp_path / "no-cert.pem",
+            tmp_path / "private",
+            expected_windows=1,
         )
