@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+"""Convert verified historical NIFTY F&O EOD references into a private SQLite catalogue.
+
+Responsibilities: Check source digests, validate EOD identities and produce dated references.
+Ownership: Offline historical reference conversion, separate from live trading.
+Safety: Read-only inputs and no same-day contract availability, broker I/O or fills.
 """Convert verified historical NSE NIFTY F&O EOD references into a private SQLite catalogue.
 
 Read-only input. Rows are EOD observations, made available no earlier than the
