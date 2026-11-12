@@ -612,6 +612,33 @@ jobs:
           --study-dir "$STUDY_DIR"
           --output "$STUDY_DIR/bounded_directional_pilot.json"
           --per-quarter 2
+      - name: Fail-closed point-in-time and underlying-direction audit
+        run: >-
+          python -m scripts.audit_directional_point_in_time
+          --pilot "$STUDY_DIR/bounded_directional_pilot.json"
+          --output "$STUDY_DIR/point_in_time_directional_gate.json"
+      - name: Display strict source evidence coverage
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(
+              (Path(os.environ["STUDY_DIR"]) / "point_in_time_directional_gate.json")
+              .read_text()
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## Point-in-time execution gate (SHADOW only)\\n\\n")
+              stream.write(
+                  f"Same reversal option-events: {report['matched_event_count']}; "
+                  "all missing historical source proof are UNRESOLVED.\\n\\n"
+              )
+              stream.write(f"Contract: {report['contract_status']}\\n\\n")
+              stream.write(f"Direction: {report['underlying_status']}\\n\\n")
+              stream.write(f"Entry: {report['entry_status']}\\n\\n")
+              stream.write("Bar OHLC, inferred expiry, fixed lot and continuous ")
+              stream.write("future labels never substitute for contemporaneous ")
+              stream.write("master, as-of underlying context or FULL bid/ask.\\n")
+          PY
       - name: Display bounded descriptive results
         run: |
           python - <<'PY'
@@ -653,6 +680,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bounded-directional-pilot-${{ github.sha }}
-          path: ${{ env.STUDY_DIR }}/bounded_directional_pilot.json
+          path: |
+            ${{ env.STUDY_DIR }}/bounded_directional_pilot.json
+            ${{ env.STUDY_DIR }}/point_in_time_directional_gate.json
           if-no-files-found: warn
           retention-days: 30
