@@ -260,7 +260,7 @@ def test_debit_spread_crosses_book_and_preserves_single_long_comparator(
         ),
         (
             quote("CE", 24000, token=31),
-            quote("CE", 24100, token=32, ask=18, bid_quantity=0),
+            replace(quote("CE", 24100, token=32, ask=18), bid_quantity=0),
             "research_contract_or_depth_unverified",
         ),
         (
