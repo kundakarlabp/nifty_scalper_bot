@@ -5,6 +5,9 @@ Responsibilities: Verify writer sidecars and isolate original process epochs;
 reconcile every IST-day decision through candidate-inclusion and setup-ID
 denominators, report missing selected quote context by role, and measure exact-
 contract forward quote coverage without crossing a restart or basket change.
+Independently classify recorded five-level WS FULL observations against the
+captured instrument catalog and active selected-contract phase; these stricter
+quote markouts are NOT exchange fill or live execution evidence.
 Boundaries: Offline SHADOW-only, no broker or network calls and no live changes.
 Safety: Missing quote paths, incomplete segment fidelity and absent fills never
 become synthesized outcomes or a strategy-promotion recommendation.
@@ -235,6 +238,8 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
                 full_book_quotes[(phase_id, symbol)].append((timestamp, *book))
     if first_ts is None or last_ts is None or not selections:
         raise ValueError("epoch_audit_empty_epoch")
+    if sum(full_book_reasons.values()) != selected_full_book_ticks:
+        raise ValueError("epoch_audit_full_book_denominator_mismatch")
     quotes, quote_sha, quote_count = load_archive_quotes(path)
     return {
         "run_id": run_id,
@@ -270,7 +275,7 @@ def _exact_selected(
     if side not in {"CE", "PE"}:
         return "unsupported_option_side"
     selections = context["selections"]
-    active: tuple[float, str, str] | None = None
+    active: tuple[float, str, str, int] | None = None
     for snapshot in selections:
         if snapshot[0] <= at:
             active = snapshot
