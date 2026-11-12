@@ -1,3 +1,6 @@
+# File purpose: On-demand, broker-free bounded historical directional study.
+# Key responsibilities: Prepare verified public data and preserve research results.
+# Operational constraints: Owner-only issue trigger, SHADOW mode and no LIVE deployment.
 name: Bounded directional hypothesis pilot
 
 on:
