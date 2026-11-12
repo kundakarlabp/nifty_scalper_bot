@@ -1,7 +1,5 @@
 """Broker-free bounded directional pilot: cohort and fail-closed tests."""
 import json
-from pathlib import Path
-
 import pytest
 
 from scripts import run_bounded_directional_comparison as pilot
