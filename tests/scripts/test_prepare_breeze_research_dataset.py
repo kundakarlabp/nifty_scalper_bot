@@ -17,9 +17,7 @@ from scripts.prepare_breeze_research_dataset import (
 
 def _payload(*, special=False, skip=(), changed=0, expiry="2025-02-27"):
     day = date(2025, 10, 21) if special else date(2025, 2, 3)
-    start = datetime.fromisoformat(
-        f"{day}T{'13:45' if special else '09:15'}:00+05:30"
-    )
+    start = datetime.fromisoformat(f"{day}T{'13:45' if special else '09:15'}:00+05:30")
     bars = [
         [
             (start + timedelta(minutes=i)).isoformat(),
@@ -37,7 +35,12 @@ def _payload(*, special=False, skip=(), changed=0, expiry="2025-02-27"):
         bars.append(
             [
                 (start + timedelta(minutes=60)).isoformat(),
-                161.0, 162.0, 160.0, 161.5, 100, 1000,
+                161.0,
+                162.0,
+                160.0,
+                161.5,
+                100,
+                1000,
             ]
         )
         expiry = "2025-10-28"
@@ -93,8 +96,14 @@ def test_build_and_export_keep_gap_and_research_only(tmp_path):
     assert output.stat().st_mode & 0o077 == 0
     path = tmp_path / "private" / "CE-5m.csv"
     exported = export_series(
-        output, path, day="2025-02-03", product="options",
-        expiry="2025-02-27", strike=22500, side="CE", interval=5
+        output,
+        path,
+        day="2025-02-03",
+        product="options",
+        expiry="2025-02-27",
+        strike=22500,
+        side="CE",
+        interval=5,
     )
     assert exported["bars"] == 2
     assert exported["incomplete_windows_excluded"] == 73
@@ -119,8 +128,10 @@ def test_hash_mismatch_blocks_any_build(tmp_path):
         verify_window(source / "one")
     with pytest.raises(ValueError, match="window_member_sha256_mismatch"):
         build(
-            source, tmp_path / "cache.sqlite",
-            tmp_path / "summary.json", expected_windows=1
+            source,
+            tmp_path / "cache.sqlite",
+            tmp_path / "summary.json",
+            expected_windows=1,
         )
     assert not (tmp_path / "cache.sqlite").exists()
 
@@ -130,8 +141,12 @@ def test_conflicting_overlapping_windows_are_not_merged(tmp_path):
     _window(source, "one", _payload())
     _window(source, "two", _payload(changed=1))
     with pytest.raises(ValueError, match="overlap_contract_history_conflict"):
-        build(source, tmp_path / "cache.sqlite", tmp_path / "summary.json",
-              expected_windows=2)
+        build(
+            source,
+            tmp_path / "cache.sqlite",
+            tmp_path / "summary.json",
+            expected_windows=2,
+        )
     assert not (tmp_path / "cache.sqlite").exists()
 
 
@@ -139,14 +154,18 @@ def test_special_boundary_observation_is_flagged_not_filled(tmp_path):
     source = tmp_path / "src"
     _window(source, "one", _payload(special=True))
     output = tmp_path / "research.sqlite"
-    result = build(
-        source, output, tmp_path / "summary.json", expected_windows=1
-    )
+    result = build(source, output, tmp_path / "summary.json", expected_windows=1)
     assert result["bars_1m"] == 60
     assert result["special_boundary_exclusions"] == 1
     exported = export_series(
-        output, tmp_path / "15m.csv", day="2025-10-21", product="options",
-        expiry="2025-10-28", strike=22500, side="CE", interval=15
+        output,
+        tmp_path / "15m.csv",
+        day="2025-10-21",
+        product="options",
+        expiry="2025-10-28",
+        strike=22500,
+        side="CE",
+        interval=15,
     )
     assert exported["bars"] == 4
     assert exported["incomplete_windows_excluded"] == 0
@@ -155,9 +174,14 @@ def test_special_boundary_observation_is_flagged_not_filled(tmp_path):
 def test_export_rejects_incomplete_contract_identity(tmp_path):
     with pytest.raises(ValueError, match="research_identity_incomplete"):
         export_series(
-            tmp_path / "none.sqlite", tmp_path / "out.csv",
-            day="2025-02-03", product="options",
-            expiry="2025-02-27", strike=None, side="CE", interval=5
+            tmp_path / "none.sqlite",
+            tmp_path / "out.csv",
+            day="2025-02-03",
+            product="options",
+            expiry="2025-02-27",
+            strike=None,
+            side="CE",
+            interval=5,
         )
 
 
@@ -170,22 +194,34 @@ def test_muhurat_spot_legacy_clock_is_quarantined(tmp_path):
     payload["side"] = "INDEX"
     payload["candles"] = [
         [
-            (datetime.fromisoformat("2025-10-21T09:15:00+05:30")
-             + timedelta(minutes=i)).isoformat(),
-            100.0, 102.0, 99.0, 101.0, 100, None,
+            (
+                datetime.fromisoformat("2025-10-21T09:15:00+05:30")
+                + timedelta(minutes=i)
+            ).isoformat(),
+            100.0,
+            102.0,
+            99.0,
+            101.0,
+            100,
+            None,
         ]
         for i in range(370)
     ]
     payload["candles_sha256"] = digest_json(payload["candles"])
     _window(source, "one", payload)
     database = tmp_path / "private.sqlite"
-    report = build(source, database, tmp_path / "summary.json",
-                   expected_windows=1)
+    report = build(source, database, tmp_path / "summary.json", expected_windows=1)
     assert report["quarantined_special_index_series"] == 1
     assert report["quarantined_source_minutes"] == 370
     assert report["bars_1m"] == 0
     with pytest.raises(ValueError, match="research_contract_day_not_available"):
         export_series(
-            database, tmp_path / "invalid.csv", day="2025-10-21",
-            product="cash", expiry=None, strike=None, side="INDEX", interval=1
+            database,
+            tmp_path / "invalid.csv",
+            day="2025-10-21",
+            product="cash",
+            expiry=None,
+            strike=None,
+            side="INDEX",
+            interval=1,
         )
