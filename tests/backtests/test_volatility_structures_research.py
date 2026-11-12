@@ -255,7 +255,7 @@ def test_debit_spread_crosses_book_and_preserves_single_long_comparator(
         ),
         (
             quote("CE", 24000, ask=200, token=31),
-            quote("CE", 24100, bid=20, token=32),
+            quote("CE", 24100, bid=20, ask=21, token=32),
             "research_debit_spread_debit_invalid",
         ),
         (
