@@ -33,6 +33,7 @@ CREATE TABLE series (
   observed_minutes INTEGER NOT NULL,
   missing_minutes INTEGER NOT NULL,
   flagged_boundary_minutes INTEGER NOT NULL,
+  quarantined_source_minutes INTEGER NOT NULL,
   source_digest TEXT NOT NULL,
   timestamp_verified INTEGER NOT NULL DEFAULT 0,
   execution_eligible INTEGER NOT NULL DEFAULT 0,
@@ -163,6 +164,7 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
     window_end = datetime.combine(session, stop)
     normal_rows: list[list[Any]] = []
     boundaries = 0
+    quarantined = 0
     for row in payload["candles"]:
         if not isinstance(row, list) or len(row) != 7:
             raise ValueError("breeze_candle_schema_invalid")
@@ -180,19 +182,29 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
             normal_rows.append(row)
         elif session == date(2025, 10, 21) and naive == window_end:
             boundaries += 1
+        elif session == date(2025, 10, 21) and product == "cash":
+            # Archived Muhurat spot source contains regular-session timestamps.
+            # Preserve explicit quarantine metadata but never expose such bars.
+            quarantined += 1
         else:
             raise ValueError("breeze_candle_outside_verified_session")
     if boundaries > 1:
         raise ValueError("breeze_duplicate_special_boundary")
+    if quarantined:
+        if product != "cash" or session != date(2025, 10, 21):
+            raise ValueError("unexpected_source_quarantine")
+        normal_rows = []
     audit = aggregate_breeze_session(
         normal_rows, day=session, interval_minutes=1,
         session_start=start, session_end=stop
     )
     if len(audit.bars) != len(normal_rows):
         raise ValueError("breeze_normalized_series_conflict")
-    state = "EMPTY" if not normal_rows else (
-        "SPECIAL_BOUNDARY_FLAGGED" if boundaries else (
-            "PARTIAL" if audit.missing_windows else "COMPLETE"
+    state = "QUARANTINED_SPECIAL_INDEX_CLOCK" if quarantined else (
+        "EMPTY" if not normal_rows else (
+            "SPECIAL_BOUNDARY_FLAGGED" if boundaries else (
+                "PARTIAL" if audit.missing_windows else "COMPLETE"
+            )
         )
     )
     summary = {
@@ -206,6 +218,7 @@ def validated_series(payload: dict[str, Any]) -> tuple[dict[str, Any], list[list
         "observed_minutes": len(normal_rows),
         "missing_minutes": len(audit.missing_windows),
         "flagged_boundary_minutes": boundaries,
+        "quarantined_source_minutes": quarantined,
         "source_digest": payload["candles_sha256"],
     }
     return summary, normal_rows
@@ -242,6 +255,8 @@ def build(windows_root: Path, database: Path, summary_file: Path, *, expected_wi
         "bars_1m": 0,
         "gap_minutes": 0,
         "special_boundary_exclusions": 0,
+        "quarantined_special_index_series": 0,
+        "quarantined_source_minutes": 0,
     }
     try:
         tmp.touch(mode=0o600, exist_ok=False)
@@ -263,11 +278,13 @@ def build(windows_root: Path, database: Path, summary_file: Path, *, expected_wi
                 cursor = db.execute(
                     "INSERT INTO series (trade_day,contract_key,product_type,expiry,"
                     "strike,side,status,observed_minutes,missing_minutes,"
-                    "flagged_boundary_minutes,source_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "flagged_boundary_minutes,quarantined_source_minutes,source_digest) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     tuple(info[k] for k in (
                         "trade_day","contract_key","product_type","expiry","strike",
                         "side","status","observed_minutes","missing_minutes",
-                        "flagged_boundary_minutes","source_digest"
+                        "flagged_boundary_minutes","quarantined_source_minutes",
+                        "source_digest"
                     )),
                 )
                 n = cursor.lastrowid
@@ -283,6 +300,9 @@ def build(windows_root: Path, database: Path, summary_file: Path, *, expected_wi
                 counters["bars_1m"] += len(candles)
                 counters["gap_minutes"] += info["missing_minutes"]
                 counters["special_boundary_exclusions"] += info["flagged_boundary_minutes"]
+                counters["quarantined_source_minutes"] += info["quarantined_source_minutes"]
+                if info["status"] == "QUARANTINED_SPECIAL_INDEX_CLOCK":
+                    counters["quarantined_special_index_series"] += 1
             db.commit()
             audit_result = db.execute("PRAGMA integrity_check").fetchone()[0]
             if audit_result != "ok":
@@ -335,7 +355,7 @@ def export_series(
             "AND expiry IS ? AND strike IS ? AND side=?",
             (day, product, expiry, strike, side),
         ).fetchall()
-        if len(candidate) != 1 or candidate[0][1] == "EMPTY":
+        if len(candidate) != 1 or candidate[0][1] in ("EMPTY", "QUARANTINED_SPECIAL_INDEX_CLOCK"):
             raise ValueError("research_contract_day_not_available")
         source = conn.execute(
             "SELECT stamp,open,high,low,close,volume,oi FROM candles "
