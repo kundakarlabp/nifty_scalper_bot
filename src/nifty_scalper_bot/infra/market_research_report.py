@@ -7,7 +7,8 @@ execution costs, adverse excursion and volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
-observational quotes cannot authorize changing any live entry or risk policy.\nDate-scoped journal decisions must match the replay session's IST calendar date.
+observational quotes cannot authorize changing any live entry or risk policy.
+Date-scoped journal decisions must match the replay session's IST calendar date.
 """
 
 from __future__ import annotations
