@@ -24,7 +24,8 @@ RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
 RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
 RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
-ALLOW_INTRADAY_RELEASE=false
+AUTO_RELEASE_COOLDOWN_SECONDS="${AUTO_RELEASE_COOLDOWN_SECONDS:-900}"
+AUTO_RELEASE_LAST_SUCCESS_FILE="${CONFIG_DIR}/auto_release_last_success_epoch"
 AUTO_MODE=false
 WAIT_FOR_LOCK=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -39,7 +40,6 @@ for arg in "$@"; do
   case "$arg" in
     --force|--force-restart) FORCE_RESTART=true ;;
     --auto) AUTO_MODE=true ;;
-    --emergency-intraday) ALLOW_INTRADAY_RELEASE=true ;;
     --wait-for-lock) WAIT_FOR_LOCK=true ;;
     *) printf '[lightsail-release] unknown argument: %s\n' "$arg" >&2; exit 2 ;;
   esac
@@ -51,21 +51,23 @@ log() { printf '[lightsail-release] %s\n' "$*"; }
 record_release_restart() {
   local stage="$1" old_sha="$2" new_sha="$3" events_file="$APP_DIR/data/release_restart_events.jsonl"
   mkdir -p "$(dirname "$events_file")" || { log "WARNING: release provenance directory unavailable"; return 0; }
-  printf '{"version":1,"at_ist":"%s","stage":"%s","previous_sha":"%s","candidate_sha":"%s","auto":%s,"emergency_intraday":%s}\n' \
+  printf '{"version":1,"at_ist":"%s","stage":"%s","previous_sha":"%s","candidate_sha":"%s","auto":%s,"force_restart":%s}\n' \
     "$(TZ=Asia/Kolkata date -Is)" "$stage" "$old_sha" "$new_sha" \
-    "$AUTO_MODE" "$ALLOW_INTRADAY_RELEASE" >> "$events_file" || \
+    "$AUTO_MODE" "$FORCE_RESTART" >> "$events_file" || \
     log "WARNING: release restart provenance could not be persisted"
-  logger -t niftybot-deploy "RELEASE_RESTART_PROVENANCE stage=$stage previous_sha=${old_sha:0:12} candidate_sha=${new_sha:0:12} auto=$AUTO_MODE emergency_intraday=$ALLOW_INTRADAY_RELEASE" 2>/dev/null || true
+  logger -t niftybot-deploy "RELEASE_RESTART_PROVENANCE stage=$stage previous_sha=${old_sha:0:12} candidate_sha=${new_sha:0:12} auto=$AUTO_MODE force_restart=$FORCE_RESTART" 2>/dev/null || true
 }
 
-# Conservative weekday envelope. A confirmed healthy engine is not routinely
-# restarted during opening warmup, NSE session or the post-close safety interval.
-routine_market_window_ist() {
-  local weekday hour_minute
-  weekday="$(TZ=Asia/Kolkata date +%u)"
-  hour_minute="$(TZ=Asia/Kolkata date +%H%M)"
-  [ "$weekday" -le 5 ] || return 1
-  [ "$((10#$hour_minute))" -ge 900 ] && [ "$((10#$hour_minute))" -lt 1545 ]
+# Coalesce closely spaced validated merges without a market-hours schedule.
+# A cooldown is advisory for healthy AUTO releases only, never broker recovery.
+recent_successful_release() {
+  local last now interval="${AUTO_RELEASE_COOLDOWN_SECONDS:-900}"
+  [[ "$interval" =~ ^[0-9]{1,5}$ ]] || interval=900
+  [ -f "$AUTO_RELEASE_LAST_SUCCESS_FILE" ] || return 1
+  last="$(cat "$AUTO_RELEASE_LAST_SUCCESS_FILE" 2>/dev/null || true)"
+  [[ "$last" =~ ^[0-9]{10,}$ ]] || return 1
+  now="$(date +%s)"
+  [ "$now" -ge "$last" ] && [ "$((now - last))" -lt "$interval" ]
 }
 
 write_status() {
@@ -753,15 +755,15 @@ if [ "$AUTO_MODE" = true ]; then
     write_status fetch_failed "git fetch failed"; exit 1;
   }
   AFTER="$(git rev-parse origin/main)"
-  # Release changes may merge at any time; a healthy running engine must not
-  # be interrupted for a routine unattended checkout/restart in market hours.
-  # An explicit emergency override still passes broker-flat, stop and CI gates.
-  if [ "$ALLOW_INTRADAY_RELEASE" != true ] \
-    && routine_market_window_ist \
-    && { [ "$BEFORE" != "$AFTER" ] || [ -f "$RESTART_PENDING_FILE" ] || [ "$FORCE_RESTART" = true ]; } \
+  # Preserve merge-anytime and the no-market-clock release contract.
+  # Consolidate rapid automatic releases only after the last verified restart;
+  # --force still follows all downstream CI, broker-flat and rollback gates.
+  if [ "$FORCE_RESTART" != true ] \
+    && { [ "$BEFORE" != "$AFTER" ] || [ -f "$RESTART_PENDING_FILE" ]; } \
+    && recent_successful_release \
     && service_healthy_confirmed "$BEFORE"; then
-    write_status deferred_market_window "healthy engine ${BEFORE:0:7}; routine candidate ${AFTER:0:7} queued until after 15:45 IST"
-    log "Routine engine restart deferred within IST market window"
+    write_status deferred_release_cooldown "healthy engine ${BEFORE:0:7}; candidate ${AFTER:0:7} queued until automatic restart cooldown ends"
+    log "Routine automatic engine restart coalesced after recent healthy release"
     poll_research_request
     exit 0
   fi
@@ -1111,6 +1113,10 @@ record_release_restart requested "$BEFORE" "$AFTER"
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
   record_release_restart verified_healthy "$BEFORE" "$AFTER"
+  mkdir -p "$CONFIG_DIR" || true
+  if date +%s > "$AUTO_RELEASE_LAST_SUCCESS_FILE.tmp"; then
+    mv -f "$AUTO_RELEASE_LAST_SUCCESS_FILE.tmp" "$AUTO_RELEASE_LAST_SUCCESS_FILE" || true
+  fi
   rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"
   # Auxiliary networking hardening happens only after the guarded engine
   # restart passed release checks. It never restarts or reconfigures trading.
