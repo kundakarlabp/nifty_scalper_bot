@@ -283,7 +283,7 @@ def _configured_epoch_data_dir(root: Path, env_file: str) -> Path:
             raise ValueError("epoch_audit_data_dir_unreadable") from exc
     if configured.startswith(("'", '"')) and configured[-1:] == configured[0]:
         configured = configured[1:-1]
-    if any(ch in configured for ch in ("\\x00", "\\r", "\\n", "$", "`")):
+    if any(ch in configured for ch in ("\x00", "\r", "\n", "$", "`")):
         raise ValueError("epoch_audit_data_dir_invalid")
     if not configured:
         return (root / "data").resolve()
@@ -372,6 +372,13 @@ def start_job(
     import fcntl
 
     request = validate_request(payload)
+    env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
+    # Resolve operator provenance before taking the single-flight worker lock.
+    original_data_dir = (
+        _configured_epoch_data_dir(root, env_file)
+        if request.get("mode") == "epoch_audit"
+        else None
+    )
     directory = root / "data/research"
     directory.mkdir(parents=True, exist_ok=True)
     lock = (directory / "worker.lock").open("a")
@@ -491,9 +498,8 @@ def start_job(
     interpreter = root / ".venv/bin/python"
     if not interpreter.is_file():
         interpreter = Path(sys.executable)
-    env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
-    if request.get("mode") == "epoch_audit":
-        env["DATA_DIR"] = str(_configured_epoch_data_dir(root, env_file))
+    if original_data_dir is not None:
+        env["DATA_DIR"] = str(original_data_dir)
     queued = {
         **request,
         "state": "queued",
