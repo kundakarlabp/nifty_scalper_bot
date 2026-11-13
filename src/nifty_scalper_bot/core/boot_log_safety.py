@@ -206,6 +206,11 @@ class BootLogRateControl(logging.Filter):
         _normalize_readiness_telemetry(record)
         _downgrade_routine_diagnostic(record)
         event = _event(record)
+        # A detailed, source-throttled ORDERFLOW_CONTEXT_EVIDENCE record already
+        # covers each context vote; this generic INFO duplicate adds no detail.
+        # Preserve warning/error records without suppression.
+        if event == "elite_strategy_context_vote" and record.levelno < logging.WARNING:
+            return False
         if event == "POSITION_RECONCILE_FAILED":
             for key in tuple(self._last):
                 if key[0] == "POSITION_RECONCILE_SUCCESS":
