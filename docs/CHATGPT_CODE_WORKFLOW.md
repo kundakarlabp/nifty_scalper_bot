@@ -117,6 +117,8 @@ The public façade delegates to the risk-aware focused ring: it runs delta-aware
 
 ## Validation and merge rule
 
+**No market-hours merge restriction:** Code edits, CI, and GitHub PR merges are allowed before, during, and after NSE trading hours. Do not schedule or defer the merge solely until after market close. A user's instruction to **validate and merge** authorizes the agent to complete the merge immediately after required review, successful exact-head validation, and base/head verification; no separate manual merge step is needed. A merge is distinct from production activation: the existing deployer may defer a restart for non-flat positions, pending orders, unacknowledged entry hold, CI, or health failures. Never bypass those safeguards.
+
 `python scripts/agent_task.py check --files ...` is the single fast pre-push command for hosts with a working tree. It performs safe style fixing plus the risk-aware focused validation ring.
 
 For GitHub-connector-only work, use the staged remote equivalent:
