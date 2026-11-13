@@ -2804,7 +2804,10 @@ class StrategyRunner:
                         if source_count >= minimum
                         else _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS
                     )
-                    if now - last_request >= interval:
+                    # The first structural attempt must be immediate, even
+                    # on a freshly booted host where monotonic() < 600 s.
+                    # Backoff applies only after an actual scheduled request.
+                    if normalized not in request_state or now - last_request >= interval:
                         if self._schedule_runtime_history_ensure(
                             normalized,
                             role=role,
