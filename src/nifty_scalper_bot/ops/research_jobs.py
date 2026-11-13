@@ -304,9 +304,7 @@ def _launch_systemd_worker(
 
     timeout = _worker_wait_timeout_seconds(request)
     extra_env = (
-        [
-            f"--setenv=DATA_DIR={_configured_epoch_data_dir(root, env_file)}"
-        ]
+        [f"--setenv=DATA_DIR={_configured_epoch_data_dir(root, env_file)}"]
         if request.get("mode") == "epoch_audit"
         else []
     )
