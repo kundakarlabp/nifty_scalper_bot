@@ -50,7 +50,11 @@ def validate_request(
 ) -> dict[str, Any]:
     """Accept bounded, dated offline requests; never commands or arbitrary paths."""
     allowed = {
-        "id", "days", "mode", "session_date", "profile",
+        "id",
+        "days",
+        "mode",
+        "session_date",
+        "profile",
         "expected_uncompressed_sha256",
     }
     if set(payload) - allowed:
