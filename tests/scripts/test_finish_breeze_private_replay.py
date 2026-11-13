@@ -204,3 +204,48 @@ def test_modified_cms_member_is_rejected_before_key_search(tmp_path: Path) -> No
         destination.writestr("history.cms.sha256", checksum)
     with pytest.raises(ValueError, match="archive_transport_checksum_mismatch"):
         verified_transports(folder, expected_windows=1)
+
+
+def test_verified_plaintext_window_reuses_existing_conversion_without_cms(
+    tmp_path: Path,
+) -> None:
+    key, cert, folder, _ = _fixture(tmp_path)
+    first = tmp_path / "first_recovery"
+    original = execute(
+        archives=folder,
+        certificate=cert,
+        output_root=first,
+        search_directories=(tmp_path,),
+        expected_windows=1,
+    )
+    assert original["intraday_sqlite_built"]
+    second = tmp_path / "from_plaintext"
+    recovered = execute(
+        archives=None,
+        extracted_windows=first / "windows",
+        certificate=cert,
+        output_root=second,
+        expected_windows=1,
+    )
+    assert recovered["intraday_sqlite_built"]
+    assert recovered["original_cms_key_not_required"] is True
+    assert not recovered["matching_owner_key_found"]
+    assert recovered["source_reconstruction"]["bars_1m"] == 1
+    assert key.exists()
+
+
+def test_live_mode_is_rejected_before_key_use(tmp_path: Path, monkeypatch) -> None:
+    key, cert, folder, _ = _fixture(tmp_path)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    with pytest.raises(ValueError, match="research_requires_shadow_process"):
+        execute(
+            archives=folder,
+            certificate=cert,
+            output_root=tmp_path / "output",
+            search_directories=(tmp_path,),
+            expected_windows=1,
+            run_strategies=True,
+            eod_db=tmp_path / "not-needed.sqlite",
+        )
+    assert key.exists()
+    assert not (tmp_path / "output").exists()
