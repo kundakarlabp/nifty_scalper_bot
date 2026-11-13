@@ -688,7 +688,9 @@ class OrderFlowStrategy(EliteStrategy):
                         "effective_context_alignment": effective_context_alignment,
                         "effective_context_conflict": effective_context_conflict,
                         "context_alignment_source": context_alignment_source,
-                        "context_alignment_block_reason": context_alignment_block_reason,
+                        "context_alignment_block_reason": (
+                            context_alignment_block_reason
+                        ),
                         "ofi_ready": ofi_ready,
                         "ofi_1s_normalized": ofi_value,
                         "ofi_update_count_1s": ofi_updates,
