@@ -136,7 +136,7 @@ def test_worker_reads_original_local_tape_without_broker_or_archive_fetch(
 
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setattr(worker, "ROOT", tmp_path)
-    monkeypatch.setattr("nifty_scalper_bot.config.paths.get_data_dir", lambda: data_dir)
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
     monkeypatch.setattr(
         "nifty_scalper_bot.ops.research_jobs.require_epoch_audit_offmarket",
         lambda moment: None,
@@ -176,9 +176,10 @@ def test_worker_fails_closed_on_live_mode_and_missing_original(tmp_path, monkeyp
         "nifty_scalper_bot.ops.research_jobs.require_epoch_audit_offmarket",
         lambda moment: None,
     )
-    monkeypatch.setattr(
-        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
-    )
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    with pytest.raises(ValueError, match="epoch_audit_canonical_data_dir_missing"):
+        worker.run_worker(_payload(), tmp_path / "unused.env")
+    (tmp_path / "data").mkdir()
     with pytest.raises(ValueError, match="epoch_audit_original_tape_missing"):
         worker.run_worker(_payload(), tmp_path / "unused.env")
 
