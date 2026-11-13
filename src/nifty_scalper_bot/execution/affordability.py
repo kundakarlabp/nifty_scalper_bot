@@ -50,6 +50,8 @@ class MinimumLotAffordability:
     current_day_loss: float | None = None
     completed_trade_costs_today: float | None = None
     day_loss_source: str | None = None
+    cash_shortfall: float | None = None
+    plan_risk_shortfall: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -415,6 +417,17 @@ def evaluate_minimum_lot_affordability(
         reason = "affordable"
         capacity_blocker = None
 
+    # Quantify why a genuine one-lot option is infeasible, without changing
+    # the stop, contract-selection policy, risk ceiling or broker admission.
+    # A missing authoritative budget remains unknown, never a zero shortfall.
+    cash_shortfall = max(0.0, required - executable_capacity)
+    plan_risk_shortfall = (
+        max(0.0, plan_cost_inclusive_risk - effective_one_lot_risk_budget)
+        if plan_cost_inclusive_risk is not None
+        and effective_one_lot_risk_budget is not None
+        else None
+    )
+
     return MinimumLotAffordability(
         normalized_symbol,
         affordable,
@@ -444,6 +457,8 @@ def evaluate_minimum_lot_affordability(
         current_day_loss=current_day_loss,
         completed_trade_costs_today=completed_trade_costs_today,
         day_loss_source=day_loss_source,
+        cash_shortfall=cash_shortfall,
+        plan_risk_shortfall=plan_risk_shortfall,
     )
 
 
