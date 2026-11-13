@@ -1,4 +1,4 @@
-"""Stage verified Breeze SQLite candles for existing offline strategy-component research.
+"""Stage verified Breeze SQLite candles for offline strategy research.
 
 Responsibilities: Point-in-time EOD contract referencing, gap-aware session gating,
 optional existing strategy-research replay and inspectable exclusion counts.
@@ -57,7 +57,9 @@ def _previous_spot(conn: sqlite3.Connection, day: str) -> float | None:
     return float(row[1])
 
 
-def _series(conn: sqlite3.Connection, day: str) -> dict[tuple[str, str | None, int | None, str], dict[str, Any]]:
+def _series(
+    conn: sqlite3.Connection, day: str
+) -> dict[tuple[str, str | None, int | None, str], dict[str, Any]]:
     result: dict[tuple[str, str | None, int | None, str], dict[str, Any]] = {}
     rows = conn.execute(
         "SELECT id,product_type,expiry,strike,side,observed_minutes,"
@@ -184,7 +186,11 @@ def _prepare_day(
     sorted_times = sorted(synchronized)
     blocks: list[list[str]] = []
     for stamp in sorted_times:
-        if not blocks or datetime.fromisoformat(stamp) - datetime.fromisoformat(blocks[-1][-1]) != timedelta(minutes=1):
+        contiguous = bool(blocks) and (
+            datetime.fromisoformat(stamp) - datetime.fromisoformat(blocks[-1][-1])
+            == timedelta(minutes=1)
+        )
+        if not contiguous:
             blocks.append([stamp])
         else:
             blocks[-1].append(stamp)
@@ -254,7 +260,9 @@ def _prepare_day(
     return report
 
 
-def _verify_research_source(path: Path, summary_path: Path, expected_windows: int) -> dict[str, Any]:
+def _verify_research_source(
+    path: Path, summary_path: Path, expected_windows: int
+) -> dict[str, Any]:
     if not summary_path.is_file():
         raise ValueError("breeze_validation_summary_missing")
     summary = json.loads(summary_path.read_text())
