@@ -1,4 +1,4 @@
-"""No broker or AppDeploy dependencies in private Supabase heartbeat."""
+"""Private Supabase heartbeat is independent of broker order execution."""
 
 from __future__ import annotations
 
