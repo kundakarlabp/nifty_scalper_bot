@@ -1,7 +1,8 @@
 """Isolated, resource-bounded research jobs and recorded-feed replay.
 
 Responsibilities: Manage single-flight collection and credential-free historical
-replay, date-pin completed sessions, and partition genuine process epochs.
+replay, date-pin completed sessions, partition genuine process epochs, and admit
+pinned SHADOW-only original-tape audits strictly outside market hours.
 run_recorded_replays supports unchanged captured-config and paired exits research.
 Safety: Never import live application entrypoints, send broker orders, invent
 missing quotes or treat an invalid replay as a successful backtest.
@@ -33,6 +34,22 @@ _SYSTEMD_RESEARCH_UNIT = "niftybot-research-worker.service"
 _SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
+def require_epoch_audit_offmarket(moment: datetime) -> None:
+    """Reserve the entire bounded worker lifetime before 05:00 IST."""
+    if moment.tzinfo is None:
+        raise ValueError("epoch_audit_timezone_required")
+    local = moment.astimezone(IST)
+    if 5 <= local.hour < 17:
+        raise ValueError("epoch_audit_off_market_only")
+    next_protected_start = local.replace(hour=5, minute=0, second=0, microsecond=0)
+    if local.hour >= 17:
+        next_protected_start += timedelta(days=1)
+    # Include the systemd worker's termination grace and a 5-minute buffer.
+    budget_seconds = _worker_wait_timeout_seconds({"mode": "epoch_audit"}) + 300
+    if (next_protected_start - local).total_seconds() <= budget_seconds:
+        raise ValueError("epoch_audit_insufficient_offmarket_budget")
+
+
 def validate_request(
     payload: dict[str, Any],
     *,
@@ -40,15 +57,22 @@ def validate_request(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Accept bounded, dated offline requests; never commands or arbitrary paths."""
-    allowed = {"id", "days", "mode", "session_date", "profile"}
+    allowed = {
+        "id",
+        "days",
+        "mode",
+        "session_date",
+        "profile",
+        "expected_uncompressed_sha256",
+    }
     if set(payload) - allowed:
-        raise ValueError("Only id, days, mode, session_date and profile are supported")
+        raise ValueError("Unsupported research request field")
     job_id = payload.get("id")
     days = payload.get("days", 30)
     mode = payload.get("mode", "all")
     profile = payload.get("profile", "paired_adaptive")
-    if mode not in {"all", "components", "runtime"}:
-        raise ValueError("mode must be all, components or runtime")
+    if mode not in {"all", "components", "runtime", "epoch_audit"}:
+        raise ValueError("unsupported research mode")
     if profile not in {"paired_adaptive", "captured_baseline"}:
         raise ValueError("unsupported research replay profile")
     if profile != "paired_adaptive" and mode != "runtime":
@@ -63,8 +87,21 @@ def validate_request(
     local_now = clock.astimezone(IST)
     current_date = today or local_now.date()
     pinned = payload.get("session_date")
+    source_digest = payload.get("expected_uncompressed_sha256")
+    if mode == "epoch_audit":
+        if days != 1 or pinned is None or "profile" in payload:
+            raise ValueError("epoch_audit_requires_one_pinned_day")
+        if (
+            type(source_digest) is not str
+            or re.fullmatch(r"[a-fA-F0-9]{64}", source_digest) is None
+        ):
+            raise ValueError("epoch_audit_requires_source_sha256")
+        # The same guard runs again in the independent worker.
+        require_epoch_audit_offmarket(local_now)
+    elif source_digest is not None:
+        raise ValueError("source_digest_only_valid_for_epoch_audit")
     if pinned is not None:
-        if mode != "runtime" or days != 1:
+        if mode not in {"runtime", "epoch_audit"} or days != 1:
             raise ValueError("pinned_session_requires_one_day_runtime")
         if not isinstance(pinned, str) or not re.fullmatch(
             r"\d{4}-\d{2}-\d{2}", pinned
@@ -91,6 +128,10 @@ def validate_request(
         request["session_date"] = end.isoformat()
     if "profile" in payload:
         request["profile"] = profile
+    if mode == "epoch_audit":
+        if not isinstance(source_digest, str):
+            raise ValueError("epoch_audit_requires_source_sha256")
+        request["expected_uncompressed_sha256"] = source_digest.lower()
     return request
 
 
@@ -105,6 +146,8 @@ def _worker_wait_timeout_seconds(request: dict[str, Any]) -> int:
     """Return a bounded parent wait budget aligned with requested research work."""
 
     mode = str(request.get("mode") or "all")
+    if mode == "epoch_audit":
+        return _COMPONENT_WORKER_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
     if mode == "runtime":
         return _RUNTIME_REPLAY_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
     if mode == "components":
@@ -157,7 +200,7 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
     identity = ("id", "days", "mode")
     if not all(existing.get(key) == request.get(key) for key in identity):
         return False
-    special = ("session_date", "profile")
+    special = ("session_date", "profile", "expected_uncompressed_sha256")
     if any(key in existing or key in request for key in special):
         return all(
             existing.get(key) == request.get(key) for key in (*special, "start", "end")
@@ -225,6 +268,31 @@ def _systemd_unit_state() -> str | None:
     return state or None
 
 
+def _configured_epoch_data_dir(root: Path, env_file: str) -> Path:
+    """Pass only the operator's canonical DATA_DIR, never broker credentials."""
+    configured = os.environ.get("DATA_DIR", "").strip()
+    protected_file = Path(env_file)
+    if protected_file.is_file():
+        try:
+            with protected_file.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if line.startswith("DATA_DIR="):
+                        configured = line.partition("=")[2].strip()
+        except OSError as exc:
+            raise ValueError("epoch_audit_data_dir_unreadable") from exc
+    if configured.startswith(("'", '"')) and configured[-1:] == configured[0]:
+        configured = configured[1:-1]
+    if any(ch in configured for ch in ("\x00", "\r", "\n", "$", "`")):
+        raise ValueError("epoch_audit_data_dir_invalid")
+    if not configured:
+        return (root / "data").resolve()
+    location = Path(configured).expanduser()
+    if not location.is_absolute():
+        raise ValueError("epoch_audit_data_dir_not_absolute")
+    return location.resolve()
+
+
 def _launch_systemd_worker(
     root: Path,
     request: dict[str, Any],
@@ -235,6 +303,11 @@ def _launch_systemd_worker(
     """Launch the fixed worker in an independent transient systemd service."""
 
     timeout = _worker_wait_timeout_seconds(request)
+    extra_env = (
+        [f"--setenv=DATA_DIR={_configured_epoch_data_dir(root, env_file)}"]
+        if request.get("mode") == "epoch_audit"
+        else []
+    )
     command = [
         "sudo",
         "-n",
@@ -260,6 +333,7 @@ def _launch_systemd_worker(
         "--setenv=SUPABASE_TRADE_REPLICATION_ENABLED=false",
         "--setenv=SUPABASE_LOG_ARCHIVE_ENABLED=false",
         f"--setenv=PYTHONPATH={root / 'src'}:{root}",
+        *extra_env,
         str(interpreter),
         str(root / "scripts/run_research_job.py"),
         "--worker",
@@ -296,6 +370,13 @@ def start_job(
     import fcntl
 
     request = validate_request(payload)
+    env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
+    # Resolve operator provenance before taking the single-flight worker lock.
+    original_data_dir = (
+        _configured_epoch_data_dir(root, env_file)
+        if request.get("mode") == "epoch_audit"
+        else None
+    )
     directory = root / "data/research"
     directory.mkdir(parents=True, exist_ok=True)
     lock = (directory / "worker.lock").open("a")
@@ -415,7 +496,8 @@ def start_job(
     interpreter = root / ".venv/bin/python"
     if not interpreter.is_file():
         interpreter = Path(sys.executable)
-    env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
+    if original_data_dir is not None:
+        env["DATA_DIR"] = str(original_data_dir)
     queued = {
         **request,
         "state": "queued",
@@ -440,11 +522,15 @@ def start_job(
                 interpreter=interpreter,
                 env_file=env_file,
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             queued.update(
                 state="failed",
                 error_type=type(exc).__name__,
-                error_code="research_systemd_launch_failed",
+                error_code=(
+                    "epoch_audit_data_dir_invalid"
+                    if isinstance(exc, ValueError)
+                    else "research_systemd_launch_failed"
+                ),
             )
             write_json(status_file, queued)
             write_json(directory / "latest.json", queued)
