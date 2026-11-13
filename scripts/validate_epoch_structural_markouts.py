@@ -154,8 +154,8 @@ def _recorded_full_book_quote(
     bid_levels, ask_levels = books
     if (
         bid_levels[0] >= ask_levels[0]
-        or any(a > b for a, b in zip(bid_levels[1:], bid_levels[:-1]))
-        or any(a < b for a, b in zip(ask_levels[1:], ask_levels[:-1]))
+        or any(a >= b for a, b in zip(bid_levels[1:], bid_levels[:-1]))
+        or any(a <= b for a, b in zip(ask_levels[1:], ask_levels[:-1]))
     ):
         return "five_level_order_invalid", None
     top_bid, top_ask = tick.get("bid"), tick.get("ask")
@@ -188,7 +188,7 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
     selected_full_book_ticks = 0
     unselected_option_ticks = 0
     phase_id = -1
-    phase_key: tuple[str, str, str] | None = None
+    phase_key: tuple[str, str, str, int | None, int | None] | None = None
     active: dict[str, int | str | None] = {}
     for event in iter_session(path):
         instant = datetime.fromisoformat(event["available_at"])
@@ -205,20 +205,25 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
             selection = tuple(
                 normalize_symbol(chosen[side]) for side in ("CE", "PE", "FUT")
             )
-            if selection != phase_key:
+            ce_token = _selected_snapshot_token(
+                selection[0], event["payload"], catalog
+            )
+            pe_token = _selected_snapshot_token(
+                selection[1], event["payload"], catalog
+            )
+            selection_identity = (*selection, ce_token, pe_token)
+            # The same CE/PE symbols can temporarily lose token provenance.
+            # A later restoration must never bridge quotes across that gap.
+            if selection_identity != phase_key:
                 phase_id += 1
-                phase_key = selection
+                phase_key = selection_identity
             selections.append((timestamp, selection[0], selection[1], phase_id))
             active = {
                 "phase": phase_id,
                 "CE": selection[0],
                 "PE": selection[1],
-                "CE_token": _selected_snapshot_token(
-                    selection[0], event["payload"], catalog
-                ),
-                "PE_token": _selected_snapshot_token(
-                    selection[1], event["payload"], catalog
-                ),
+                "CE_token": ce_token,
+                "PE_token": pe_token,
             }
         elif event["kind"] == "tick" and active:
             tick = event["payload"]
@@ -342,17 +347,29 @@ def _label(opportunity: Any, context: dict[str, Any], horizon: int) -> dict[str,
         None,
     )
     if latest_selection is not None:
-        strict_quotes = context["full_book_quotes"].get(
-            (latest_selection[3], symbol), ()
+        identity_changes_within_horizon = any(
+            ts < selection[0] <= ts + horizon
+            and selection[3] != latest_selection[3]
+            for selection in context["selections"]
         )
-        if strict_quotes:
-            strict_markout, strict_status = observed_markout(
-                strict_quotes, decision_ts=ts, horizon_s=horizon
+        if identity_changes_within_horizon:
+            entry["strict_full_depth_status"] = (
+                "selected_quote_identity_phase_changed_during_horizon"
             )
-            entry["strict_full_depth_markout"] = strict_markout
-            entry["strict_full_depth_status"] = strict_status
         else:
-            entry["strict_full_depth_status"] = "no_token_verified_full_depth_quotes"
+            strict_quotes = context["full_book_quotes"].get(
+                (latest_selection[3], symbol), ()
+            )
+            if strict_quotes:
+                strict_markout, strict_status = observed_markout(
+                    strict_quotes, decision_ts=ts, horizon_s=horizon
+                )
+                entry["strict_full_depth_markout"] = strict_markout
+                entry["strict_full_depth_status"] = strict_status
+            else:
+                entry["strict_full_depth_status"] = (
+                    "no_token_verified_full_depth_quotes"
+                )
     quotes = context["quotes"].get(symbol, ())
     timestamps = [row[0] for row in quotes]
     markout, status = observed_markout(
