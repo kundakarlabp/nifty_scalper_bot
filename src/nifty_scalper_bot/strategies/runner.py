@@ -6348,7 +6348,18 @@ class StrategyRunner:
             # The live builder owns the current minute.
             if end_ts > datetime.now(timezone.utc):
                 return
-            self._ingest_bar(symbol, bar, is_backfill=True)
+            # This callback receives both REST hydration and MDM's *finalized*
+            # WebSocket/clock-flush candles. Historically all of them were
+            # marked as backfill, so indicators advanced but LIVE candle versions
+            # stayed at zero all session and the entry runner remained HYDRATION.
+            # Only these MDM canonical close markers may advance live provenance;
+            # REST/other historical rows remain non-live, and the completed-
+            # minute/monotonicity checks above and in _ingest_bar still apply.
+            is_canonical_live_close = str(data.get("source") or "").strip().lower() in {
+                "ws_candle",
+                "clock_flush_candle",
+            }
+            self._ingest_bar(symbol, bar, is_backfill=not is_canonical_live_close)
 
             # 4. Force Registration
             with self._lock:
