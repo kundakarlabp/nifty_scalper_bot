@@ -190,3 +190,5 @@ residual risk is explicit
 ```
 
 Do not merge because the explanation sounds plausible. Merge only when the diff and validation support it.
+
+**Merge timing:** There is no market-hours, market-close, or after-hours-only restriction on code edits, validation, or GitHub merges. When the user has asked for validation and merge, complete it after the exact-head evidence is green without seeking a second manual approval or waiting for the session to end. Production rollout is a different step: retain the release runner's broker-flat, terminal-order, entry-hold, CI, health, and rollback checks, which can defer activation on actual safety grounds.
