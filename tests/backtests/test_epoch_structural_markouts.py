@@ -17,15 +17,24 @@ _CE2 = "NFO:NIFTY26N0323750CE"
 _PE = "NFO:NIFTY26N0323700PE"
 _FUT = "NFO:NIFTY26NOVFUT"
 _SPOT = "NSE:NIFTY 50"
+_TOKENS = {_CE1: 101, _CE2: 102, _PE: 103, _FUT: 104, _SPOT: 105}
 
 
 def _snapshot(ce: str) -> dict:
     return {
-        "instruments": [{"instrument_token": 1}],
+        "instruments": [
+            {
+                "instrument_token": token,
+                "tradingsymbol": symbol.split(":")[-1],
+                "exchange": symbol.split(":")[0],
+            }
+            for symbol, token in _TOKENS.items()
+        ],
         "basket": {
             "selected_ce": ce,
             "selected_pe": _PE,
             "futures_symbol": _FUT,
+            "token_by_symbol": dict(_TOKENS),
         },
         "effective_settings": {"risk": {"enabled": True}},
         "runner_config": {"strategy": "test"},
@@ -41,6 +50,7 @@ def _tick(symbol: str) -> dict:
     }
     return {
         "symbol": symbol,
+        "instrument_token": _TOKENS[symbol],
         "source": "ws_full",
         "depth_available": True,
         "tradable_quote": True,
@@ -116,6 +126,17 @@ def test_original_two_epochs_never_mix_decisions_or_quotes(tmp_path, monkeypatch
         o["status"] for o in result["outcomes"] if o["horizon_seconds"] == 60
     ]
     assert grouped[60]["cost_modelled"] == 2
+    assert grouped[60]["strict_full_depth_valid"] == 2
+    assert grouped[60]["strict_full_depth_missing"] == 0
+    assert grouped[900]["strict_full_depth_valid"] == 0
+    assert all(
+        epoch["full_book_token_verified_ticks"] > 0 for epoch in result["epochs"]
+    )
+    assert all(
+        sum(epoch["full_book_tick_reasons"].values())
+        == epoch["selected_option_full_book_candidate_ticks"]
+        for epoch in result["epochs"]
+    )
     assert grouped[900]["quote_valid"] == 0
     assert grouped[900]["status_counts"] == {"horizon_crosses_epoch_end": 2}
     assert all(item["writer_integrity_verified"] for item in result["epochs"])
@@ -249,4 +270,152 @@ def test_missing_futures_quote_context_remains_explicitly_unlabelled(
         and row["markout"] is None
         and row["cost_scenarios"] is None
         for row in report["outcomes"]
+    )
+
+
+def test_recorded_full_book_requires_actual_token_and_all_five_levels():
+    full = _tick(_CE1)
+    reason, book = audit._recorded_full_book_quote(full, _TOKENS[_CE1])
+    assert reason == "recorded_full_book_token_verified"
+    assert book == (99.0, 101.0)
+
+    wrong_token = dict(full, instrument_token=998)
+    assert audit._recorded_full_book_quote(wrong_token, _TOKENS[_CE1])[0] == (
+        "tick_instrument_token_mismatch"
+    )
+    assert audit._recorded_full_book_quote(full, None)[0] == (
+        "selected_catalog_token_unverified"
+    )
+    missing_token = {k: v for k, v in full.items() if k != "instrument_token"}
+    assert audit._recorded_full_book_quote(missing_token, _TOKENS[_CE1])[0] == (
+        "tick_instrument_token_missing"
+    )
+
+    incomplete = dict(
+        full,
+        depth={
+            "buy": full["depth"]["buy"][:4],
+            "sell": full["depth"]["sell"],
+        },
+    )
+    assert audit._recorded_full_book_quote(incomplete, _TOKENS[_CE1])[0] == (
+        "five_level_depth_missing"
+    )
+    reversed_bid = dict(
+        full,
+        depth={
+            "buy": list(reversed(full["depth"]["buy"])),
+            "sell": full["depth"]["sell"],
+        },
+    )
+    assert audit._recorded_full_book_quote(reversed_bid, _TOKENS[_CE1])[0] == (
+        "five_level_order_invalid"
+    )
+    duplicate_bid_prices = dict(
+        full,
+        depth={
+            "buy": [dict(full["depth"]["buy"][0]) for _ in range(5)],
+            "sell": full["depth"]["sell"],
+        },
+    )
+    assert (
+        audit._recorded_full_book_quote(duplicate_bid_prices, _TOKENS[_CE1])[0]
+        == "five_level_order_invalid"
+    )
+    duplicate_ask_prices = dict(
+        full,
+        depth={
+            "buy": full["depth"]["buy"],
+            "sell": [dict(full["depth"]["sell"][0]) for _ in range(5)],
+        },
+    )
+    assert (
+        audit._recorded_full_book_quote(duplicate_ask_prices, _TOKENS[_CE1])[0]
+        == "five_level_order_invalid"
+    )
+
+    conflicting_top = dict(full, bid=98.0)
+    assert audit._recorded_full_book_quote(conflicting_top, _TOKENS[_CE1])[0] == (
+        "top_of_book_depth_conflict"
+    )
+    assert (
+        audit._recorded_full_book_quote(dict(full, source="rest"), _TOKENS[_CE1])[0]
+        == "non_full_ws_source"
+    )
+
+
+def test_catalog_token_requires_continuous_snapshot_identity():
+    snapshot = _snapshot(_CE1)
+    catalog = audit._recorded_option_tokens(snapshot)
+    assert catalog[_CE1] == _TOKENS[_CE1]
+    assert audit._selected_snapshot_token(_CE1, snapshot, catalog) == (_TOKENS[_CE1])
+    snapshot["basket"]["token_by_symbol"][_CE1] = 909
+    assert audit._selected_snapshot_token(_CE1, snapshot, catalog) is None
+
+
+def test_full_book_evidence_is_not_an_executable_broker_fill(tmp_path, monkeypatch):
+    session, _runs, times = _two_run_source(tmp_path)
+    db = tmp_path / "trades.db"
+    db.touch()
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setattr(
+        audit,
+        "load_candidate_decision_rows",
+        lambda _db: [_row(times[0], _CE1)],
+    )
+    result = audit.audit_original_session(session, db)
+    record = next(x for x in result["outcomes"] if x["horizon_seconds"] == 60)
+    assert record["strict_full_depth_markout"] is not None
+    assert record["strict_full_depth_status"] == "observed_bid_path_not_broker_fill"
+    assert result["actual_broker_fills_verified"] is False
+    assert result["promotion_eligible"] is False
+
+
+def test_mid_epoch_token_identity_gap_cannot_bridge_full_book_markout(
+    tmp_path, monkeypatch
+):
+    directory = tmp_path / "replay_archive"
+    start = datetime.fromisoformat("2026-11-11T09:20:00+05:30")
+    recorder = ReplayArchive(directory)
+    recorder.record("snapshot", _snapshot(_CE1), start)
+    for symbol in (_CE1, _PE, _FUT, _SPOT):
+        recorder.record("tick", _tick(symbol), start + timedelta(seconds=3))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=9))
+    invalid = _snapshot(_CE1)
+    invalid["basket"]["token_by_symbol"][_CE1] = 999
+    recorder.record("snapshot", invalid, start + timedelta(seconds=10))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=11))
+    recorder.record("snapshot", _snapshot(_CE1), start + timedelta(seconds=13))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=14))
+    for offset in range(20, 86, 5):
+        recorder.record("tick", _tick(_CE1), start + timedelta(seconds=offset))
+    recorder.close()
+
+    db = tmp_path / "trades.db"
+    db.touch()
+    decisions = [
+        _row((start + timedelta(seconds=5)).timestamp(), _CE1, "before_gap"),
+        _row((start + timedelta(seconds=11)).timestamp(), _CE1, "during_gap"),
+        _row((start + timedelta(seconds=15)).timestamp(), _CE1, "restored"),
+    ]
+    monkeypatch.setattr(audit, "load_candidate_decision_rows", lambda _db: decisions)
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    result = audit.audit_original_session(directory / "2026-11-11.jsonl", db)
+    assert result["independent_same_epoch_setups"] == 3
+    sixty = [r for r in result["outcomes"] if r["horizon_seconds"] == 60]
+    by_time = {int(r["decision_timestamp"]): r for r in sixty}
+    for offset in (5, 11):
+        item = by_time[int((start + timedelta(seconds=offset)).timestamp())]
+        assert item["strict_full_depth_markout"] is None
+        assert item["strict_full_depth_status"] == (
+            "selected_quote_identity_phase_changed_during_horizon"
+        )
+    restored = by_time[int((start + timedelta(seconds=15)).timestamp())]
+    assert restored["strict_full_depth_markout"] is not None
+    assert restored["strict_full_depth_status"] == "observed_bid_path_not_broker_fill"
+    epoch = result["epochs"][0]
+    assert epoch["full_book_tick_reasons"]["selected_catalog_token_unverified"] == 1
+    assert epoch["full_book_token_verified_ticks"] > 0
+    assert sum(epoch["full_book_tick_reasons"].values()) == (
+        epoch["selected_option_full_book_candidate_ticks"]
     )
