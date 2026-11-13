@@ -145,16 +145,27 @@ def verified_transports(
 
 def execute(
     *,
-    archives: Path,
+    archives: Path | None,
     certificate: Path,
     output_root: Path | None,
     direct_key: Path | None = None,
     search_directories: tuple[Path, ...] = (),
     expected_windows: int = 25,
     preflight_only: bool = False,
+    extracted_windows: Path | None = None,
+    eod_db: Path | None = None,
+    run_strategies: bool = False,
+    permit_partial: bool = False,
 ) -> dict[str, Any]:
-    """Never make output or change source unless a matching existing key is found."""
-    observed = verified_transports(archives, expected_windows=expected_windows)
+    """Never mutate source; accept either old CMS or verified plaintext windows."""
+    if (archives is None) == (extracted_windows is None):
+        raise ValueError("select_one_historical_source")
+    if extracted_windows is None:
+        observed = verified_transports(archives, expected_windows=expected_windows)
+    else:
+        if not extracted_windows.is_dir():
+            raise ValueError("plaintext_research_source_missing")
+        observed = {"verified_archives": 0, "encrypted_bytes": 0}
     report: dict[str, Any] = {
         **observed,
         "key_checked_by_public_fingerprint": False,
@@ -164,21 +175,25 @@ def execute(
         "live_promotion_eligible": False,
         "source_archives_modified": False,
         "intraday_sqlite_built": False,
+        "original_cms_key_not_required": extracted_windows is not None,
     }
     if preflight_only:
         return report
-    key = matching_key(
-        certificate, direct_key=direct_key, search_directories=search_directories
-    )
-    report["key_checked_by_public_fingerprint"] = True
-    report["matching_owner_key_found"] = bool(key)
-    if key is None:
-        report["blocker"] = "original_cms_private_key_not_accessible_here"
-        return report
+    if extracted_windows is None:
+        key = matching_key(
+            certificate, direct_key=direct_key, search_directories=search_directories
+        )
+        report["key_checked_by_public_fingerprint"] = True
+        report["matching_owner_key_found"] = bool(key)
+        if key is None:
+            report["blocker"] = "original_cms_private_key_not_accessible_here"
+            return report
+    else:
+        key = None
     if output_root is None:
         raise ValueError("private_output_root_required")
     output = output_root.resolve()
-    source = archives.resolve()
+    source = (extracted_windows or archives).resolve()
     if (
         output == source
         or output.is_relative_to(source)
@@ -188,15 +203,20 @@ def execute(
         raise ValueError("private_output_must_be_new_and_outside_source")
     output.mkdir(parents=True, mode=0o700)
     os.chmod(output, 0o700)
-    unseal_result = unseal(
-        archives,
-        key,
-        certificate,
-        output / "windows",
-        expected_windows=expected_windows,
-    )
+    if extracted_windows is None:
+        unseal_result = unseal(
+            archives,
+            key,
+            certificate,
+            output / "windows",
+            expected_windows=expected_windows,
+        )
+        source_windows = output / "windows"
+    else:
+        unseal_result = {"unsealed_verified_windows": 0}
+        source_windows = extracted_windows
     converted = build(
-        output / "windows",
+        source_windows,
         output / "nifty_intraday_research.sqlite",
         output / "coverage_summary.json",
         expected_windows=expected_windows,
@@ -223,6 +243,24 @@ def execute(
             "execution_grade_ready": False,
         }
     )
+    if eod_db is not None:
+        if expected_windows == 25 and not report["minute_reconciliation"][
+            "exact_match_to_prior_audit"
+        ]:
+            report["offline_research_blocker"] = "source_minute_audit_not_reconciled"
+        else:
+            from scripts.stage_breeze_sqlite_research import run
+
+            stage = run(
+                output / "nifty_intraday_research.sqlite",
+                eod_db,
+                output / "research_sessions",
+                summary_path=output / "coverage_summary.json",
+                expected_windows=expected_windows,
+                permit_partial=permit_partial,
+                execute=run_strategies,
+            )
+            report["offline_research"] = stage
     (output / "pipeline_readiness.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n"
     )
@@ -232,7 +270,9 @@ def execute(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archives", required=True, type=Path)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--archives", type=Path)
+    source_group.add_argument("--extracted-windows", type=Path)
     parser.add_argument(
         "--certificate",
         type=Path,
@@ -242,7 +282,12 @@ def main() -> int:
     parser.add_argument("--key", type=Path)
     parser.add_argument("--key-search-dir", action="append", type=Path, default=[])
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--eod-db", type=Path)
+    parser.add_argument("--run-strategies", action="store_true")
+    parser.add_argument("--permit-partial", action="store_true")
     args = parser.parse_args()
+    if args.run_strategies and args.eod_db is None:
+        parser.error("--run-strategies requires --eod-db")
     roots = tuple(args.key_search_dir) or (
         Path.home() / "Downloads",
         Path.home() / "Documents",
@@ -255,6 +300,10 @@ def main() -> int:
         direct_key=args.key,
         search_directories=roots,
         preflight_only=args.preflight_only,
+        extracted_windows=args.extracted_windows,
+        eod_db=args.eod_db,
+        run_strategies=args.run_strategies,
+        permit_partial=args.permit_partial,
     )
     # Print only bounded status fields: no secret, arbitrary path or raw bars.
     print(
@@ -269,6 +318,9 @@ def main() -> int:
                     "blocker",
                     "minute_reconciliation",
                     "execution_grade_ready",
+                    "original_cms_key_not_required",
+                    "offline_research",
+                    "offline_research_blocker",
                 )
             },
             sort_keys=True,
