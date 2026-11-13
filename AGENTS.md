@@ -116,6 +116,12 @@ The façade performs debt-safe style preflight, SSOT-driven focused validation, 
 
 For GitHub-connector-only work, keep iterative PRs in **draft** so CI runs the focused remote gate only. Mark the PR ready once to trigger the full final validation matrix on the intended merge head. If another commit is required, return the PR to draft before editing. Final-head GitHub `final-validation` remains authoritative before merge.
 
+### Merge at any time; deploy only when broker-safe
+
+Code corrections, PR validation, and GitHub merges may happen **at any time**, including during NSE trading hours. Do not impose a market-hours merge blackout, wait for 15:30 IST, or delay an otherwise validated merge until the market closes. When the user has requested **validate and merge**, the agent may complete that merge after the exact final-head checks, review, and base/head verification; a second manual merge authorization is not required.
+
+A GitHub merge is **not** a production restart. The existing release runner independently requires exact-main push CI and broker-safe entry hold, terminal-order/flat-position reconciliation, health checks, and rollback. It may defer *activation* for real broker exposure or failed safety evidence, never solely because of the clock. Do not weaken those deployment or live-trading protections to accelerate a merge.
+
 Before merge, verify the exact validated base/head through the same façade when a working tree is available:
 
 ```bash
