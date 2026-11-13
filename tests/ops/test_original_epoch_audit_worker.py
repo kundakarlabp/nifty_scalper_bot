@@ -197,7 +197,7 @@ def test_systemd_epoch_audit_inherits_only_canonical_data_path(
     config = tmp_path / "protected" / "bot.env"
     config.parent.mkdir()
     config.write_text(
-        f'DATA_DIR="{actual}"\\nBROKER_API_KEY=SENSITIVE_DO_NOT_EXPORT\\n',
+        f'DATA_DIR="{actual}"\nBROKER_API_KEY=SENSITIVE_DO_NOT_EXPORT\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("DATA_DIR", "/stale-parent-value")
@@ -232,10 +232,10 @@ def test_canonical_data_dir_rejects_unsupported_indirections(tmp_path, monkeypat
     monkeypatch.delenv("DATA_DIR", raising=False)
     env_file = tmp_path / "operator.env"
     for bad in ("relative/path", "$HOME/recordings"):
-        env_file.write_text(f"DATA_DIR={bad}\\n", encoding="utf-8")
+        env_file.write_text(f"DATA_DIR={bad}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="epoch_audit_data_dir_"):
             _configured_epoch_data_dir(tmp_path, str(env_file))
-    env_file.write_text("BROKER_API_KEY=UNREAD\\n", encoding="utf-8")
+    env_file.write_text("BROKER_API_KEY=UNREAD\n", encoding="utf-8")
     assert _configured_epoch_data_dir(tmp_path, str(env_file)) == (
         tmp_path / "data"
     ).resolve()
