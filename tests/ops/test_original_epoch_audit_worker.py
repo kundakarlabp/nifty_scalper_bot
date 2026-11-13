@@ -184,9 +184,7 @@ def test_worker_fails_closed_on_live_mode_and_missing_original(tmp_path, monkeyp
         worker.run_worker(_payload(), tmp_path / "unused.env")
 
 
-def test_systemd_epoch_audit_inherits_only_canonical_data_path(
-    tmp_path, monkeypatch
-):
+def test_systemd_epoch_audit_inherits_only_canonical_data_path(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from nifty_scalper_bot.ops import research_jobs
@@ -237,6 +235,7 @@ def test_canonical_data_dir_rejects_unsupported_indirections(tmp_path, monkeypat
         with pytest.raises(ValueError, match="epoch_audit_data_dir_"):
             _configured_epoch_data_dir(tmp_path, str(env_file))
     env_file.write_text("BROKER_API_KEY=UNREAD\n", encoding="utf-8")
-    assert _configured_epoch_data_dir(tmp_path, str(env_file)) == (
-        tmp_path / "data"
-    ).resolve()
+    assert (
+        _configured_epoch_data_dir(tmp_path, str(env_file))
+        == (tmp_path / "data").resolve()
+    )
