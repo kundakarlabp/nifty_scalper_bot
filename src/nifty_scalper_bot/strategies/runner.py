@@ -4894,10 +4894,15 @@ class StrategyRunner:
             return "strike_unverified", policy
         if abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
             return "strike_jump", policy
+        # A cheaper adjacent contract is not inherently lower quality.
+        # Its own executable quote, stop geometry, net R:R and cost-inclusive
+        # one-lot risk are independently checked by the candidate selector,
+        # affordability gate and final broker preflight. Keep the premium
+        # deviation guard for more expensive replacements.
         if (
             original_trade_price > 0.0
-            and candidate_trade_price > 0.0
-            and abs(candidate_trade_price - original_trade_price)
+            and candidate_trade_price > original_trade_price
+            and (candidate_trade_price - original_trade_price)
             / original_trade_price
             * 100.0
             > max_premium_pct
