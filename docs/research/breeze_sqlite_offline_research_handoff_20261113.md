@@ -7,25 +7,25 @@
 Keep the matching old RSA private key on the machine, not in ChatGPT, GitHub or Google Drive. The *existing* `scripts.finish_breeze_private_replay` locates it using the public certificate fingerprint and, after successful decryption, validates all inner file checksums, converts the windows into a private intraday SQLite, reconciles the original 1,454,867 1m observations, stages strictly eligible sessions and invokes the existing `strategy_research.run_archived_research` in shadow mode.
 
 ```sh
-EXECUTION_MODE=SHADOW ENABLE_LIVE=false ALLOW_REAL_BROKER=false \\
-python -m scripts.finish_breeze_private_replay \\
-  --archives /private/owner/Breeze-original-25-ZIPs \\
-  --certificate deploy/breeze_transport_recipient.pem \\
-  --key-search-dir "$HOME/Documents" \\
-  --key-search-dir "$HOME/Downloads" \\
-  --output-root /private/nifty-research-run-20261113 \\
-  --eod-db /private/nifty_eod_reference.sqlite \\
+EXECUTION_MODE=SHADOW ENABLE_LIVE=false ALLOW_REAL_BROKER=false \
+python -m scripts.finish_breeze_private_replay \
+  --archives /private/owner/Breeze-original-25-ZIPs \
+  --certificate deploy/breeze_transport_recipient.pem \
+  --key-search-dir "$HOME/Documents" \
+  --key-search-dir "$HOME/Downloads" \
+  --output-root /private/nifty-research-run-20261113 \
+  --eod-db /private/nifty_eod_reference.sqlite \
   --permit-partial --run-strategies
 ```
 
 If the matching private key was lost but **verified plaintext** history was already extracted in a trusted private folder, use this same entrypoint without any CMS key:
 
 ```sh
-EXECUTION_MODE=SHADOW ENABLE_LIVE=false ALLOW_REAL_BROKER=false \\
-python -m scripts.finish_breeze_private_replay \\
-  --extracted-windows /private/owner/extracted-Breeze-25-windows \\
-  --output-root /private/nifty-research-run-plaintext \\
-  --eod-db /private/nifty_eod_reference.sqlite \\
+EXECUTION_MODE=SHADOW ENABLE_LIVE=false ALLOW_REAL_BROKER=false \
+python -m scripts.finish_breeze_private_replay \
+  --extracted-windows /private/owner/extracted-Breeze-25-windows \
+  --output-root /private/nifty-research-run-plaintext \
+  --eod-db /private/nifty_eod_reference.sqlite \
   --permit-partial --run-strategies
 ```
 
