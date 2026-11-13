@@ -287,6 +287,13 @@ def build(
         "verified_files": verified_files,
         "input_contract_files": len(sources),
         "identical_duplicates": 0,
+        "source_observations_1m": 0,
+        "cash_source_bars": 0,
+        "futures_source_bars": 0,
+        "options_source_bars": 0,
+        "cash_admitted_bars": 0,
+        "futures_admitted_bars": 0,
+        "options_admitted_bars": 0,
         "series": 0,
         "bars_1m": 0,
         "gap_minutes": 0,
@@ -311,6 +318,10 @@ def build(
                     counters["identical_duplicates"] += 1
                     continue
                 known[identity] = info
+                family = info["product_type"]
+                counters["source_observations_1m"] += len(payload["candles"])
+                counters[f"{family}_source_bars"] += len(payload["candles"])
+                counters[f"{family}_admitted_bars"] += len(candles)
                 cursor = db.execute(
                     "INSERT INTO series (trade_day,contract_key,product_type,expiry,"
                     "strike,side,status,observed_minutes,missing_minutes,"
@@ -361,6 +372,12 @@ def build(
         report = {
             **counters,
             "study": "NIFTY_BREEZE_IDENTIFIED_OHLCV",
+            "source_accounting_balanced": (
+                counters["source_observations_1m"]
+                == counters["bars_1m"]
+                + counters["quarantined_source_minutes"]
+                + counters["special_boundary_exclusions"]
+            ),
             "research_only": True,
             "historical_quote_depth_present": False,
             "source_clock_convention_verified": False,
