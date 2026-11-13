@@ -318,9 +318,10 @@ def test_recorded_full_book_requires_actual_token_and_all_five_levels():
             "sell": full["depth"]["sell"],
         },
     )
-    assert audit._recorded_full_book_quote(
-        duplicate_bid_prices, _TOKENS[_CE1]
-    )[0] == "five_level_order_invalid"
+    assert (
+        audit._recorded_full_book_quote(duplicate_bid_prices, _TOKENS[_CE1])[0]
+        == "five_level_order_invalid"
+    )
     duplicate_ask_prices = dict(
         full,
         depth={
@@ -328,9 +329,10 @@ def test_recorded_full_book_requires_actual_token_and_all_five_levels():
             "sell": [dict(full["depth"]["sell"][0]) for _ in range(5)],
         },
     )
-    assert audit._recorded_full_book_quote(
-        duplicate_ask_prices, _TOKENS[_CE1]
-    )[0] == "five_level_order_invalid"
+    assert (
+        audit._recorded_full_book_quote(duplicate_ask_prices, _TOKENS[_CE1])[0]
+        == "five_level_order_invalid"
+    )
 
     conflicting_top = dict(full, bid=98.0)
     assert audit._recorded_full_book_quote(conflicting_top, _TOKENS[_CE1])[0] == (
