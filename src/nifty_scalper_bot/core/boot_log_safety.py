@@ -1,7 +1,10 @@
 """Rate controls for unchanged boot and live-readiness diagnostics.
 
-This module is observational only. It does not alter contracts, orders,
-strategy admission, or readiness decisions.
+Responsibility: central logger filters normalize context-only strategy roles,
+suppress duplicate generic OrderFlow INFO votes, and retain state-change and
+periodic boot/readiness visibility. Logger filtering owns observability only.
+Safety: no contract selection, trading admission, orders, or position state is
+modified; critical warnings and errors are never hidden by this change.
 """
 
 from __future__ import annotations
