@@ -46,13 +46,14 @@ def test_epoch_request_requires_sha_day_and_offmarket_clock():
         with pytest.raises(ValueError):
             validate_request(invalid, now=after_close)
 
-    for blocked in ("2026-11-13T05:00:00+05:30",
-                    "2026-11-13T09:30:00+05:30",
-                    "2026-11-13T16:59:59+05:30"):
+    for blocked in (
+        "2026-11-13T05:00:00+05:30",
+        "2026-11-13T09:30:00+05:30",
+        "2026-11-13T16:59:59+05:30",
+    ):
         with pytest.raises(ValueError, match="epoch_audit_off_market_only"):
             validate_request(_payload(), now=datetime.fromisoformat(blocked))
-    for permitted in ("2026-11-13T04:59:00+05:30",
-                      "2026-11-13T17:00:00+05:30"):
+    for permitted in ("2026-11-13T04:59:00+05:30", "2026-11-13T17:00:00+05:30"):
         require_epoch_audit_offmarket(datetime.fromisoformat(permitted))
 
 
@@ -100,30 +101,28 @@ def test_worker_reads_original_local_tape_without_broker_or_archive_fetch(
             "journal_same_day_decision_rows": 40,
             "journal_assigned_same_epoch_decision_rows": 39,
             "independent_same_epoch_setups": 30,
-            "grouped_outcomes": [{
-                "strategy": "smc",
-                "horizon_seconds": 60,
-                "strict_full_depth_valid": 4,
-                "strict_full_depth_missing": 26,
-            }],
+            "grouped_outcomes": [
+                {
+                    "strategy": "smc",
+                    "horizon_seconds": 60,
+                    "strict_full_depth_valid": 4,
+                    "strict_full_depth_missing": 26,
+                }
+            ],
             "epochs": [
                 {
                     "event_count": 100,
                     "snapshot_count": 2,
                     "writer_integrity_verified": True,
                     "full_book_token_verified_ticks": 22,
-                    "full_book_tick_reasons": {
-                        "recorded_full_book_token_verified": 22
-                    },
+                    "full_book_tick_reasons": {"recorded_full_book_token_verified": 22},
                 },
                 {
                     "event_count": 200,
                     "snapshot_count": 2,
                     "writer_integrity_verified": True,
                     "full_book_token_verified_ticks": 50,
-                    "full_book_tick_reasons": {
-                        "recorded_full_book_token_verified": 50
-                    },
+                    "full_book_tick_reasons": {"recorded_full_book_token_verified": 50},
                 },
             ],
             "outcomes": [{"symbol": "NFO:PRIVATE", "markout": {"entry_ask": 10}}],
@@ -133,8 +132,7 @@ def test_worker_reads_original_local_tape_without_broker_or_archive_fetch(
 
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setattr(worker, "ROOT", tmp_path)
-    monkeypatch.setattr("nifty_scalper_bot.config.paths.get_data_dir",
-                        lambda: data_dir)
+    monkeypatch.setattr("nifty_scalper_bot.config.paths.get_data_dir", lambda: data_dir)
     monkeypatch.setattr(
         "nifty_scalper_bot.ops.research_jobs.require_epoch_audit_offmarket",
         lambda moment: None,
@@ -151,9 +149,7 @@ def test_worker_reads_original_local_tape_without_broker_or_archive_fetch(
     assert result["backtest_completed"] is False
     assert result["promotion_eligible"] is False
     assert result["epoch_audit"]["original_epoch_count"] == 2
-    assert result["epoch_audit"]["grouped_outcomes"][0][
-        "strict_full_depth_valid"
-    ] == 4
+    assert result["epoch_audit"]["grouped_outcomes"][0]["strict_full_depth_valid"] == 4
     assert "outcomes" not in result["epoch_audit"]
     private = json.loads(
         (data_dir / "research/original-epoch-test/epoch_audit.json").read_text()
@@ -176,7 +172,8 @@ def test_worker_fails_closed_on_live_mode_and_missing_original(tmp_path, monkeyp
         "nifty_scalper_bot.ops.research_jobs.require_epoch_audit_offmarket",
         lambda moment: None,
     )
-    monkeypatch.setattr("nifty_scalper_bot.config.paths.get_data_dir",
-                        lambda: tmp_path / "data")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
     with pytest.raises(ValueError, match="epoch_audit_original_tape_missing"):
         worker.run_worker(_payload(), tmp_path / "unused.env")
