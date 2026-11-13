@@ -25,6 +25,11 @@ from scripts.unseal_breeze_private_windows import unseal
 
 ORIGINAL_WINDOW_BYTES = 107_821_151
 ORIGINAL_MINUTE_OBSERVATIONS = 1_454_867
+ORIGINAL_FAMILY_SOURCE_BARS = {
+    "cash": 184_786,
+    "futures": 536_695,
+    "options": 733_386,
+}
 SKIP_DIRS = frozenset(
     (".git", ".cache", ".venv", "venv", "node_modules", "__pycache__", "site-packages")
 )
@@ -234,6 +239,10 @@ def execute(
         + converted["quarantined_source_minutes"]
         + converted["special_boundary_exclusions"]
     )
+    family_matches = {
+        family: converted[f"{family}_source_bars"] == expected
+        for family, expected in ORIGINAL_FAMILY_SOURCE_BARS.items()
+    }
     report.update(
         {
             "intraday_sqlite_built": True,
@@ -242,9 +251,19 @@ def execute(
             "minute_reconciliation": {
                 "original_audit_minutes": ORIGINAL_MINUTE_OBSERVATIONS,
                 "admitted_plus_explicit_exclusions": admitted_plus_excluded,
+                "raw_source_observations": converted["source_observations_1m"],
+                "raw_source_by_family": {
+                    kind: converted[f"{kind}_source_bars"]
+                    for kind in ORIGINAL_FAMILY_SOURCE_BARS
+                },
+                "raw_source_family_matches": family_matches,
                 "exact_match_to_prior_audit": (
                     expected_windows == 25
                     and admitted_plus_excluded == ORIGINAL_MINUTE_OBSERVATIONS
+                    and converted["source_observations_1m"]
+                    == ORIGINAL_MINUTE_OBSERVATIONS
+                    and converted["source_accounting_balanced"] is True
+                    and all(family_matches.values())
                     and converted["identical_duplicates"] == 0
                 ),
             },
