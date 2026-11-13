@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Unblock private Breeze intraday research with an owner-local CMS key.
 
-Responsibilities: Verify sealed 25-window transports, locate a matching local
-key by public-key fingerprint, decrypt and build a separate research-only DB.
-Ownership: Offline private workstation. Never invoked by the live runner.
-Safety: No key material, trading credentials, remote calls or source mutation.
+Responsibilities: Verify sealed 25-window transports or owner-verified plaintext,
+locate an existing local CMS key when needed, build the private intraday DB,
+and optionally stage matched historical contracts for offline strategy replay.
+Ownership: Offline private workstation; never invoked by the live runner.
+Safety: No key export, broker credentials, remote calls, source mutation,
+unsupported live execution or historical bid/ask reconstruction.
 """
 
 from __future__ import annotations
