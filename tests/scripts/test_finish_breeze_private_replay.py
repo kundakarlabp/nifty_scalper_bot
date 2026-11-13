@@ -206,7 +206,9 @@ def test_modified_cms_member_is_rejected_before_key_search(tmp_path: Path) -> No
         verified_transports(folder, expected_windows=1)
 
 
-def test_verified_plaintext_window_reuses_existing_conversion_without_cms(tmp_path: Path) -> None:
+def test_verified_plaintext_window_reuses_existing_conversion_without_cms(
+    tmp_path: Path,
+) -> None:
     key, cert, folder, _ = _fixture(tmp_path)
     first = tmp_path / "first_recovery"
     original = execute(
