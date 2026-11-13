@@ -311,6 +311,27 @@ def test_recorded_full_book_requires_actual_token_and_all_five_levels():
     assert audit._recorded_full_book_quote(reversed_bid, _TOKENS[_CE1])[0] == (
         "five_level_order_invalid"
     )
+    duplicate_bid_prices = dict(
+        full,
+        depth={
+            "buy": [dict(full["depth"]["buy"][0]) for _ in range(5)],
+            "sell": full["depth"]["sell"],
+        },
+    )
+    assert audit._recorded_full_book_quote(
+        duplicate_bid_prices, _TOKENS[_CE1]
+    )[0] == "five_level_order_invalid"
+    duplicate_ask_prices = dict(
+        full,
+        depth={
+            "buy": full["depth"]["buy"],
+            "sell": [dict(full["depth"]["sell"][0]) for _ in range(5)],
+        },
+    )
+    assert audit._recorded_full_book_quote(
+        duplicate_ask_prices, _TOKENS[_CE1]
+    )[0] == "five_level_order_invalid"
+
     conflicting_top = dict(full, bid=98.0)
     assert audit._recorded_full_book_quote(conflicting_top, _TOKENS[_CE1])[0] == (
         "top_of_book_depth_conflict"
@@ -346,3 +367,53 @@ def test_full_book_evidence_is_not_an_executable_broker_fill(tmp_path, monkeypat
     assert record["strict_full_depth_status"] == "observed_bid_path_not_broker_fill"
     assert result["actual_broker_fills_verified"] is False
     assert result["promotion_eligible"] is False
+
+
+def test_mid_epoch_token_identity_gap_cannot_bridge_full_book_markout(
+    tmp_path, monkeypatch
+):
+    directory = tmp_path / "replay_archive"
+    start = datetime.fromisoformat("2026-11-11T09:20:00+05:30")
+    recorder = ReplayArchive(directory)
+    recorder.record("snapshot", _snapshot(_CE1), start)
+    for symbol in (_CE1, _PE, _FUT, _SPOT):
+        recorder.record("tick", _tick(symbol), start + timedelta(seconds=3))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=9))
+    invalid = _snapshot(_CE1)
+    invalid["basket"]["token_by_symbol"][_CE1] = 999
+    recorder.record("snapshot", invalid, start + timedelta(seconds=10))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=11))
+    recorder.record("snapshot", _snapshot(_CE1), start + timedelta(seconds=13))
+    recorder.record("tick", _tick(_CE1), start + timedelta(seconds=14))
+    for offset in range(20, 86, 5):
+        recorder.record("tick", _tick(_CE1), start + timedelta(seconds=offset))
+    recorder.close()
+
+    db = tmp_path / "trades.db"
+    db.touch()
+    decisions = [
+        _row((start + timedelta(seconds=5)).timestamp(), _CE1, "before_gap"),
+        _row((start + timedelta(seconds=11)).timestamp(), _CE1, "during_gap"),
+        _row((start + timedelta(seconds=15)).timestamp(), _CE1, "restored"),
+    ]
+    monkeypatch.setattr(audit, "load_candidate_decision_rows", lambda _db: decisions)
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    result = audit.audit_original_session(directory / "2026-11-11.jsonl", db)
+    assert result["independent_same_epoch_setups"] == 3
+    sixty = [r for r in result["outcomes"] if r["horizon_seconds"] == 60]
+    by_time = {int(r["decision_timestamp"]): r for r in sixty}
+    for offset in (5, 11):
+        item = by_time[int((start + timedelta(seconds=offset)).timestamp())]
+        assert item["strict_full_depth_markout"] is None
+        assert item["strict_full_depth_status"] == (
+            "selected_quote_identity_phase_changed_during_horizon"
+        )
+    restored = by_time[int((start + timedelta(seconds=15)).timestamp())]
+    assert restored["strict_full_depth_markout"] is not None
+    assert restored["strict_full_depth_status"] == "observed_bid_path_not_broker_fill"
+    epoch = result["epochs"][0]
+    assert epoch["full_book_tick_reasons"]["selected_catalog_token_unverified"] == 1
+    assert epoch["full_book_token_verified_ticks"] > 0
+    assert sum(epoch["full_book_tick_reasons"].values()) == (
+        epoch["selected_option_full_book_candidate_ticks"]
+    )
