@@ -181,3 +181,61 @@ def test_worker_fails_closed_on_live_mode_and_missing_original(tmp_path, monkeyp
     )
     with pytest.raises(ValueError, match="epoch_audit_original_tape_missing"):
         worker.run_worker(_payload(), tmp_path / "unused.env")
+
+
+def test_systemd_epoch_audit_inherits_only_canonical_data_path(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops import research_jobs
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    actual = tmp_path / "outside-checkout" / "market-evidence"
+    actual.mkdir(parents=True)
+    config = tmp_path / "protected" / "bot.env"
+    config.parent.mkdir()
+    config.write_text(
+        f'DATA_DIR="{actual}"\\nBROKER_API_KEY=SENSITIVE_DO_NOT_EXPORT\\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATA_DIR", "/stale-parent-value")
+    assert research_jobs._configured_epoch_data_dir(root, str(config)) == (
+        actual.resolve()
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(research_jobs.subprocess, "run", fake_run)
+    research_jobs._launch_systemd_worker(
+        root,
+        {"id": "strict-epoch", "mode": "epoch_audit"},
+        interpreter=root / "python",
+        env_file=str(config),
+    )
+    assert len(calls) == 1
+    assert f"--setenv=DATA_DIR={actual.resolve()}" in calls[0]
+    assert "--setenv=EXECUTION_MODE=SHADOW" in calls[0]
+    assert "--property=CPUWeight=5" in calls[0]
+    assert "--property=IOWeight=10" in calls[0]
+    assert "SENSITIVE_DO_NOT_EXPORT" not in str(calls[0])
+    assert "BROKER_API_KEY" not in str(calls[0])
+
+
+def test_canonical_data_dir_rejects_unsupported_indirections(tmp_path, monkeypatch):
+    from nifty_scalper_bot.ops.research_jobs import _configured_epoch_data_dir
+
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    env_file = tmp_path / "operator.env"
+    for bad in ("relative/path", "$HOME/recordings"):
+        env_file.write_text(f"DATA_DIR={bad}\\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="epoch_audit_data_dir_"):
+            _configured_epoch_data_dir(tmp_path, str(env_file))
+    env_file.write_text("BROKER_API_KEY=UNREAD\\n", encoding="utf-8")
+    assert _configured_epoch_data_dir(tmp_path, str(env_file)) == (
+        tmp_path / "data"
+    ).resolve()
