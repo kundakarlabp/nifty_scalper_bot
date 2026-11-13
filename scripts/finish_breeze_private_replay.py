@@ -271,9 +271,10 @@ def execute(
         }
     )
     if eod_db is not None:
-        if expected_windows == 25 and not report["minute_reconciliation"][
-            "exact_match_to_prior_audit"
-        ]:
+        if (
+            expected_windows == 25
+            and not report["minute_reconciliation"]["exact_match_to_prior_audit"]
+        ):
             report["offline_research_blocker"] = "source_minute_audit_not_reconciled"
         else:
             from scripts.stage_breeze_sqlite_research import run
