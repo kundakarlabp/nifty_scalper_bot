@@ -15,9 +15,7 @@ def _manager(*, authoritative_snapshot: bool = False) -> SimpleNamespace:
     risk = SimpleNamespace(
         account_balance=15_466.0,
         settings=SimpleNamespace(per_trade_risk_pct=5.0),
-        _switches=SimpleNamespace(
-            max_day_loss=773.30, day_loss=lambda: 0.0
-        ),
+        _switches=SimpleNamespace(max_day_loss=773.30, day_loss=lambda: 0.0),
     )
     if authoritative_snapshot:
         risk.snapshot = lambda: None  # fail closed; no stale switch fallback
@@ -41,9 +39,7 @@ def _decision(
         symbol=symbol,
         quote={"bid": bid, "ask": ask, "tick_size": 0.05},
         order_manager=_manager(authoritative_snapshot=unavailable_snapshot),
-        data_hub=SimpleNamespace(
-            get_available_balance=lambda force=False: 15_466.0
-        ),
+        data_hub=SimpleNamespace(get_available_balance=lambda force=False: 15_466.0),
         fallback_balance=15_466.0,
         plan_entry_price=ask,
         plan_stop_loss=stop,
