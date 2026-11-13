@@ -6623,6 +6623,24 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             strategy_runner.notify_entry_order_failed
         )
     market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
+
+    # Passive OHLCV parity must fire on closed canonical bars, even when no
+    # strategy is evaluated. Subscribe after the runner so its indicator
+    # projection has the first opportunity to ingest the same finalized bar.
+    from nifty_scalper_bot.core.research_observability import (
+        observe_completed_selected_pair,
+    )
+
+    def _audit_selected_bar(bar: dict[str, Any]) -> None:
+        try:
+            observe_completed_selected_pair(strategy_manager, bar, market_data_manager)
+        except Exception as exc:  # noqa: BLE001 - observation cannot block orders
+            LOGGER.warning(
+                "OPTION_PARITY_OBSERVER_FAILED error_type=%s",
+                type(exc).__name__,
+            )
+
+    market_data_manager.subscribe_bars(_audit_selected_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
     settings.enable_live = bool(live_toggle_env or live_simulation_mode)
     mandatory_paper = not live_possible

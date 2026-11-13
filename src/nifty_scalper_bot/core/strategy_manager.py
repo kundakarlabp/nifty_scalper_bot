@@ -52,7 +52,6 @@ from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
 from nifty_scalper_bot.core.research_observability import (
     record_strategy_rejection_sample,
-    sample_selected_option_parity,
 )
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
@@ -3733,13 +3732,6 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             self._record_strategy_evaluation_observability(strategy_name)
-            if strategy_name == "VWAPPro" and symbol_is_option:
-                # Independent of the VWAP decision and its zero-volume gate.
-                # Samples both selected CE/PE; no extra tick subscription.
-                try:
-                    sample_selected_option_parity(self)
-                except Exception:  # noqa: BLE001
-                    pass  # Observability must never modify entry behavior.
             if base_signal is None:
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")

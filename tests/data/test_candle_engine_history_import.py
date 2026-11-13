@@ -315,3 +315,22 @@ def test_historical_import_does_not_finalize_current_exchange_minute() -> None:
     )
     assert result is None
     assert engine.get_current_candle()["timestamp"] == current_minute
+
+
+def test_historical_overlap_revision_only_advances_on_real_correction() -> None:
+    """Idempotent REST refreshes do not repeatedly invalidate downstream bars."""
+    engine = CandleEngine(symbol="NFO:T")
+    engine.import_history(pd.DataFrame([_row(0)]), mode="bootstrap")
+    assert engine.get_history_correction_revision() == 0
+
+    corrected = pd.DataFrame([_row(0, volume=35.0)])
+    engine.import_history(corrected, source="historical")
+    assert engine.get_history_correction_revision() == 1
+    assert engine.get_completed_bars()[0]["volume"] == 35.0
+
+    engine.import_history(corrected, source="historical")
+    assert engine.get_history_correction_revision() == 1
+    assert engine.diagnostics()["history_correction_revision"] == 1
+
+    engine.import_history(pd.DataFrame([_row(0, volume=37.0)]), source="historical")
+    assert engine.get_history_correction_revision() == 2

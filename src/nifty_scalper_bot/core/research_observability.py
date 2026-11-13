@@ -2,6 +2,8 @@
 
 Responsibilities: Preserve once-per-minute rejected SMC, VWAP and ORB
 decision-time scalar evidence and selected-option volume parity in journald.
+Canonical bar callback: observe_completed_selected_pair checks paired selected
+closed minutes before calling sample_selected_option_parity; no strategy vote.
 Boundaries: ReplayArchive remains the only high-frequency full-depth quote tape;
 the existing daily log archiver mirrors samples without a second database.
 Safety: Missing or nonfinite evidence is omitted, never assumed to pass, and
@@ -93,6 +95,45 @@ def _completed(rows: Any) -> list[Mapping[str, Any]]:
         and row.get("is_provisional") is not True
         and _minute_key(row.get("timestamp") or row.get("start"))
     ]
+
+
+def observe_completed_selected_pair(
+    owner: Any, bar: Mapping[str, Any], mdm: Any
+) -> list[dict[str, Any]]:
+    """Audit both selected options on canonical bar completion, not strategy votes.
+
+    Both contracts must have finalized the triggering minute. The normal
+    parity sampler owns the once-per-minute latch; nothing here mutates
+    the execution path or forces any additional market-data request.
+    """
+    hub = getattr(owner, "_data_hub", None)
+    selector = getattr(hub, "get_selected_option_symbols", None)
+    latest = getattr(mdm, "get_latest_closed_bar", None)
+    if not callable(selector) or not callable(latest):
+        return []
+    try:
+        selected = tuple(
+            dict.fromkeys(
+                normalize_symbol(str(value))
+                for value in selector()
+                if value and normalize_symbol(str(value)).endswith(("CE", "PE"))
+            )
+        )
+        observed_symbol = normalize_symbol(str(bar.get("symbol") or ""))
+        if len(selected) != 2 or observed_symbol not in selected:
+            return []
+        minute = _minute_key(bar.get("timestamp") or bar.get("start"))
+        if minute is None:
+            return []
+        for option in selected:
+            row = latest(option)
+            if not isinstance(row, Mapping):
+                return []
+            if _minute_key(row.get("timestamp") or row.get("start")) != minute:
+                return []
+    except (AttributeError, TypeError, ValueError):
+        return []
+    return sample_selected_option_parity(owner)
 
 
 def sample_selected_option_parity(
