@@ -34,6 +34,14 @@ _SYSTEMD_RESEARCH_UNIT = "niftybot-research-worker.service"
 _SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
+def require_epoch_audit_offmarket(moment: datetime) -> None:
+    """Reject heavy tape audits during pre-open and the trading session."""
+    if moment.tzinfo is None:
+        raise ValueError("epoch_audit_timezone_required")
+    if 5 <= moment.astimezone(IST).hour < 17:
+        raise ValueError("epoch_audit_off_market_only")
+
+
 def validate_request(
     payload: dict[str, Any],
     *,
@@ -76,9 +84,8 @@ def validate_request(
             or re.fullmatch(r"[a-fA-F0-9]{64}", source_digest) is None
         ):
             raise ValueError("epoch_audit_requires_source_sha256")
-        # Bounded research must not compete with a live or pre-open session.
-        if 5 <= local_now.hour < 17:
-            raise ValueError("epoch_audit_off_market_only")
+        # The same guard runs again in the independent worker.
+        require_epoch_audit_offmarket(local_now)
     elif source_digest is not None:
         raise ValueError("source_digest_only_valid_for_epoch_audit")
     if pinned is not None:
