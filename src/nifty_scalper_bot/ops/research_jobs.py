@@ -268,6 +268,31 @@ def _systemd_unit_state() -> str | None:
     return state or None
 
 
+def _configured_epoch_data_dir(root: Path, env_file: str) -> Path:
+    """Pass only the operator's canonical DATA_DIR, never broker credentials."""
+    configured = os.environ.get("DATA_DIR", "").strip()
+    protected_file = Path(env_file)
+    if protected_file.is_file():
+        try:
+            with protected_file.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if line.startswith("DATA_DIR="):
+                        configured = line.partition("=")[2].strip()
+        except OSError as exc:
+            raise ValueError("epoch_audit_data_dir_unreadable") from exc
+    if configured.startswith(("'", '"')) and configured[-1:] == configured[0]:
+        configured = configured[1:-1]
+    if any(ch in configured for ch in ("\\x00", "\\r", "\\n", "$", "`")):
+        raise ValueError("epoch_audit_data_dir_invalid")
+    if not configured:
+        return (root / "data").resolve()
+    location = Path(configured).expanduser()
+    if not location.is_absolute():
+        raise ValueError("epoch_audit_data_dir_not_absolute")
+    return location.resolve()
+
+
 def _launch_systemd_worker(
     root: Path,
     request: dict[str, Any],
@@ -278,6 +303,13 @@ def _launch_systemd_worker(
     """Launch the fixed worker in an independent transient systemd service."""
 
     timeout = _worker_wait_timeout_seconds(request)
+    extra_env = (
+        [
+            f"--setenv=DATA_DIR={_configured_epoch_data_dir(root, env_file)}"
+        ]
+        if request.get("mode") == "epoch_audit"
+        else []
+    )
     command = [
         "sudo",
         "-n",
@@ -303,6 +335,7 @@ def _launch_systemd_worker(
         "--setenv=SUPABASE_TRADE_REPLICATION_ENABLED=false",
         "--setenv=SUPABASE_LOG_ARCHIVE_ENABLED=false",
         f"--setenv=PYTHONPATH={root / 'src'}:{root}",
+        *extra_env,
         str(interpreter),
         str(root / "scripts/run_research_job.py"),
         "--worker",
@@ -459,6 +492,8 @@ def start_job(
     if not interpreter.is_file():
         interpreter = Path(sys.executable)
     env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
+    if request.get("mode") == "epoch_audit":
+        env["DATA_DIR"] = str(_configured_epoch_data_dir(root, env_file))
     queued = {
         **request,
         "state": "queued",
@@ -483,11 +518,15 @@ def start_job(
                 interpreter=interpreter,
                 env_file=env_file,
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             queued.update(
                 state="failed",
                 error_type=type(exc).__name__,
-                error_code="research_systemd_launch_failed",
+                error_code=(
+                    "epoch_audit_data_dir_invalid"
+                    if isinstance(exc, ValueError)
+                    else "research_systemd_launch_failed"
+                ),
             )
             write_json(status_file, queued)
             write_json(directory / "latest.json", queued)
