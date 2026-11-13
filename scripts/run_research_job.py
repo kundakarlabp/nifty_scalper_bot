@@ -44,7 +44,9 @@ def safe_error_code(exc: Exception) -> str:
         "active_nifty_future_unavailable": "active_nifty_future_unavailable",
         "operator_env_file_unavailable": "operator_env_file_unavailable",
         "epoch_audit_original_tape_missing": "epoch_audit_original_tape_missing",
-        "epoch_audit_canonical_trade_db_missing": "epoch_audit_canonical_trade_db_missing",
+        "epoch_audit_canonical_trade_db_missing": (
+            "epoch_audit_canonical_trade_db_missing"
+        ),
         "epoch_audit_pinned_uncompressed_sha256_mismatch": (
             "epoch_audit_source_sha256_mismatch"
         ),
@@ -99,16 +101,18 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     """Use fixed bounded offline research without entering broker order paths."""
     if request.get("mode") == "epoch_audit":
         from datetime import datetime
-        from zoneinfo import ZoneInfo
 
         from scripts.validate_epoch_structural_markouts import audit_original_session
 
         from nifty_scalper_bot.config.paths import get_data_dir
+        from nifty_scalper_bot.ops.research_jobs import (
+            IST,
+            require_epoch_audit_offmarket,
+        )
 
         if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
             raise ValueError("epoch_audit_requires_shadow")
-        if 5 <= datetime.now(ZoneInfo("Asia/Kolkata")).hour < 17:
-            raise ValueError("epoch_audit_off_market_only")
+        require_epoch_audit_offmarket(datetime.now(IST))
         day = request["session_date"]
         data_dir = get_data_dir()
         folder = data_dir / "replay_archive"
