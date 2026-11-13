@@ -166,9 +166,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
                     {
                         "event_count": epoch["event_count"],
                         "snapshot_count": epoch["snapshot_count"],
-                        "writer_integrity_verified": epoch[
-                            "writer_integrity_verified"
-                        ],
+                        "writer_integrity_verified": epoch["writer_integrity_verified"],
                         "full_book_token_verified_ticks": epoch[
                             "full_book_token_verified_ticks"
                         ],
