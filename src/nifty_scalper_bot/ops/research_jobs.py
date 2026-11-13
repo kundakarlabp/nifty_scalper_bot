@@ -1,7 +1,8 @@
 """Isolated, resource-bounded research jobs and recorded-feed replay.
 
 Responsibilities: Manage single-flight collection and credential-free historical
-replay, date-pin completed sessions, and partition genuine process epochs.
+replay, date-pin completed sessions, partition genuine process epochs, and admit
+pinned SHADOW-only original-tape audits strictly outside market hours.
 run_recorded_replays supports unchanged captured-config and paired exits research.
 Safety: Never import live application entrypoints, send broker orders, invent
 missing quotes or treat an invalid replay as a successful backtest.
@@ -40,15 +41,18 @@ def validate_request(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Accept bounded, dated offline requests; never commands or arbitrary paths."""
-    allowed = {"id", "days", "mode", "session_date", "profile"}
+    allowed = {
+        "id", "days", "mode", "session_date", "profile",
+        "expected_uncompressed_sha256",
+    }
     if set(payload) - allowed:
-        raise ValueError("Only id, days, mode, session_date and profile are supported")
+        raise ValueError("Unsupported research request field")
     job_id = payload.get("id")
     days = payload.get("days", 30)
     mode = payload.get("mode", "all")
     profile = payload.get("profile", "paired_adaptive")
-    if mode not in {"all", "components", "runtime"}:
-        raise ValueError("mode must be all, components or runtime")
+    if mode not in {"all", "components", "runtime", "epoch_audit"}:
+        raise ValueError("unsupported research mode")
     if profile not in {"paired_adaptive", "captured_baseline"}:
         raise ValueError("unsupported research replay profile")
     if profile != "paired_adaptive" and mode != "runtime":
@@ -63,8 +67,22 @@ def validate_request(
     local_now = clock.astimezone(IST)
     current_date = today or local_now.date()
     pinned = payload.get("session_date")
+    source_digest = payload.get("expected_uncompressed_sha256")
+    if mode == "epoch_audit":
+        if days != 1 or pinned is None or "profile" in payload:
+            raise ValueError("epoch_audit_requires_one_pinned_day")
+        if (
+            type(source_digest) is not str
+            or re.fullmatch(r"[a-fA-F0-9]{64}", source_digest) is None
+        ):
+            raise ValueError("epoch_audit_requires_source_sha256")
+        # Bounded research must not compete with a live or pre-open session.
+        if 5 <= local_now.hour < 17:
+            raise ValueError("epoch_audit_off_market_only")
+    elif source_digest is not None:
+        raise ValueError("source_digest_only_valid_for_epoch_audit")
     if pinned is not None:
-        if mode != "runtime" or days != 1:
+        if mode not in {"runtime", "epoch_audit"} or days != 1:
             raise ValueError("pinned_session_requires_one_day_runtime")
         if not isinstance(pinned, str) or not re.fullmatch(
             r"\d{4}-\d{2}-\d{2}", pinned
@@ -91,6 +109,8 @@ def validate_request(
         request["session_date"] = end.isoformat()
     if "profile" in payload:
         request["profile"] = profile
+    if mode == "epoch_audit":
+        request["expected_uncompressed_sha256"] = source_digest.lower()
     return request
 
 
@@ -105,6 +125,8 @@ def _worker_wait_timeout_seconds(request: dict[str, Any]) -> int:
     """Return a bounded parent wait budget aligned with requested research work."""
 
     mode = str(request.get("mode") or "all")
+    if mode == "epoch_audit":
+        return _COMPONENT_WORKER_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
     if mode == "runtime":
         return _RUNTIME_REPLAY_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
     if mode == "components":
@@ -157,7 +179,7 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
     identity = ("id", "days", "mode")
     if not all(existing.get(key) == request.get(key) for key in identity):
         return False
-    special = ("session_date", "profile")
+    special = ("session_date", "profile", "expected_uncompressed_sha256")
     if any(key in existing or key in request for key in special):
         return all(
             existing.get(key) == request.get(key) for key in (*special, "start", "end")
