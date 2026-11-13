@@ -158,6 +158,12 @@ def execute(
     permit_partial: bool = False,
 ) -> dict[str, Any]:
     """Never mutate source; accept either old CMS or verified plaintext windows."""
+    if run_strategies and (
+        os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW"
+        or os.getenv("ENABLE_LIVE", "false").lower() == "true"
+        or os.getenv("ALLOW_REAL_BROKER", "false").lower() == "true"
+    ):
+        raise ValueError("research_requires_shadow_process")
     if (archives is None) == (extracted_windows is None):
         raise ValueError("select_one_historical_source")
     if extracted_windows is None:
