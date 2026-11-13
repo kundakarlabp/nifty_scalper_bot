@@ -5481,6 +5481,8 @@ class StrategyRunner:
                             "required",
                             "executable_capacity",
                             "plan_cost_inclusive_risk",
+                            "cash_shortfall",
+                            "plan_risk_shortfall",
                             "effective_one_lot_risk_budget",
                             "remaining_daily_risk_budget",
                         )
