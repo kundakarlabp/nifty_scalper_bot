@@ -108,8 +108,7 @@ def _find_pair(
         (
             {**c, **avail[("futures", c["expiry"], None, "FUT")]}
             for c in _available_contracts(eod, previous, "FUT")
-            if c["expiry"] >= day
-            and ("futures", c["expiry"], None, "FUT") in avail
+            if c["expiry"] >= day and ("futures", c["expiry"], None, "FUT") in avail
         ),
         None,
     )
@@ -170,9 +169,7 @@ def _prepare_day(
     selected = [("INDEX", index), ("FUT", fut), ("CE", ce), ("PE", pe)]
     originals = {kind: _candles(breeze, item["id"]) for kind, item in selected}
     first, minutes = _session_grid(day)
-    expected = {
-        (first + timedelta(minutes=i)).isoformat() for i in range(minutes)
-    }
+    expected = {(first + timedelta(minutes=i)).isoformat() for i in range(minutes)}
     present = {kind: {row[0] for row in rows} for kind, rows in originals.items()}
     synchronized = set.intersection(*(stamps for stamps in present.values()))
     synchronized &= expected
@@ -328,7 +325,10 @@ def run(
         for session in days:
             try:
                 item = _prepare_day(
-                    breeze, eod, session, output_root / session,
+                    breeze,
+                    eod,
+                    session,
+                    output_root / session,
                     permit_partial=permit_partial,
                 )
             except (ValueError, sqlite3.Error) as exc:
@@ -341,6 +341,7 @@ def run(
                 from nifty_scalper_bot.backtesting.strategy_research import (
                     run_archived_research,
                 )
+
                 try:
                     result = run_archived_research(output_root / session)
                 except Exception as exc:
@@ -390,9 +391,14 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=500)
     args = parser.parse_args()
     result = run(
-        args.breeze_db, args.eod_db, args.output_root,
-        summary_path=args.summary, expected_windows=args.expected_windows, day=args.day,
-        permit_partial=args.permit_partial, execute=args.run_strategies,
+        args.breeze_db,
+        args.eod_db,
+        args.output_root,
+        summary_path=args.summary,
+        expected_windows=args.expected_windows,
+        day=args.day,
+        permit_partial=args.permit_partial,
+        execute=args.run_strategies,
         limit=args.limit,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
