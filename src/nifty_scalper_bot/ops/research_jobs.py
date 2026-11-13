@@ -121,6 +121,8 @@ def validate_request(
     if "profile" in payload:
         request["profile"] = profile
     if mode == "epoch_audit":
+        if not isinstance(source_digest, str):
+            raise ValueError("epoch_audit_requires_source_sha256")
         request["expected_uncompressed_sha256"] = source_digest.lower()
     return request
 
