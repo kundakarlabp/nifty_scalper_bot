@@ -1,3 +1,14 @@
+"""NIFTY OrderFlow strategy: compute context-only depth and temporal OFI evidence.
+
+Responsibility: derive same-contract microstructure confirmation and conflict
+metadata from prepared quotes, while the canonical underlying direction and
+broker-safe entry/risk checks retain authority.
+Observability: _should_log_context_evidence emits one per-symbol evidence
+snapshot every five minutes, or a material state change at most once per
+minute. Numeric tick, OFI and depth churn do not cause additional INFO logs.
+Safety: logging cadence does not change context votes or signal metadata.
+"""
+
 from __future__ import annotations
 
 import os
