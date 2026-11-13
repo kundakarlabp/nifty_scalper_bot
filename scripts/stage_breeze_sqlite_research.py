@@ -14,8 +14,8 @@ import hashlib
 import json
 import os
 import sqlite3
-from contextlib import closing
 from collections import Counter
+from contextlib import closing
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
