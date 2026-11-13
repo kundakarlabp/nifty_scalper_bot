@@ -147,3 +147,101 @@ def test_gap_repair_accepts_only_observed_historical_minute() -> None:
     assert repaired[0].timestamp == confirmed
     assert repaired[0].synthetic is False
     assert repaired[0].volume == 25
+
+def _canonical_live_bar_runner() -> StrategyRunner:
+    """Minimal real _ingest_bar path without network, orders or broker state."""
+    import logging
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger("test.canonical_close_live_version")
+    runner._lock = __import__("threading").RLock()
+    runner._active_symbols = set()
+    runner._data_phase = {}
+    runner._symbol_state = {}
+    runner._symbol_states = {}
+    runner._symbol_history = {}
+    runner._last_bar_ts = {}
+    runner._candle_versions = {"NFO:NIFTY26N1725100CE": 0}
+    runner._live_bar_seen = set()
+    runner._vwap_state = {}
+    runner._hydration_ready_streak = {}
+    runner._bracket_manager = None
+    runner._update_symbol_readiness = lambda _symbol: None
+    runner._should_log_throttled = lambda *_args, **_kwargs: False
+
+    class Indicators:
+        def __init__(self):
+            self.bars = []
+
+        def update_bar(self, _symbol, bar):
+            self.bars.append(bar.timestamp)
+
+        def get_vwap(self, _symbol):
+            return 110.0
+
+    runner._indicator_engine = Indicators()
+    return runner
+
+
+def _canonical_test_bar(minute: datetime, source: str) -> dict:
+    return {
+        "symbol": "NFO:NIFTY26N1725100CE",
+        "timestamp": minute,
+        "open": 110.0,
+        "high": 112.0,
+        "low": 109.0,
+        "close": 111.0,
+        "volume": 65_000,
+        "source": source,
+    }
+
+
+def test_closed_ws_and_clock_flush_bars_advance_live_versions() -> None:
+    """Only finalized MDM publications change LIVE provenance or live VWAP."""
+    symbol = "NFO:NIFTY26N1725100CE"
+    minute = datetime.now(timezone.utc).replace(
+        second=0, microsecond=0
+    ) - timedelta(minutes=3)
+    for canonical_source in ("ws_candle", "clock_flush_candle"):
+        runner = _canonical_live_bar_runner()
+        runner.ingest_historical_bar(_canonical_test_bar(minute, "historical"))
+        assert runner._candle_versions[symbol] == 0
+        assert runner._data_phase[symbol] == "HYDRATION"
+        assert symbol not in runner._live_bar_seen
+
+        closed = _canonical_test_bar(
+            minute + timedelta(minutes=1), canonical_source
+        )
+        runner.ingest_historical_bar(closed)
+        assert runner._candle_versions[symbol] == 1
+        assert runner._data_phase[symbol] == "LIVE"
+        assert symbol in runner._live_bar_seen
+        assert runner._symbol_state[symbol].vwap == 111.0
+        assert len(runner._indicator_engine.bars) == 2
+
+        runner.ingest_historical_bar(closed)
+        assert runner._candle_versions[symbol] == 1
+        assert len(runner._indicator_engine.bars) == 2
+
+        runner.ingest_historical_bar(
+            _canonical_test_bar(minute + timedelta(minutes=2), canonical_source)
+        )
+        assert runner._candle_versions[symbol] == 2
+        assert len(runner._indicator_engine.bars) == 3
+
+
+def test_rest_history_and_current_partial_never_mark_live() -> None:
+    """A current partial bar is never accepted, even with a WS source label."""
+    symbol = "NFO:NIFTY26N1725100CE"
+    runner = _canonical_live_bar_runner()
+    minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    runner.ingest_historical_bar(
+        _canonical_test_bar(minute - timedelta(minutes=2), "historical")
+    )
+    runner.ingest_historical_bar(
+        _canonical_test_bar(minute - timedelta(minutes=1), "rest_history")
+    )
+    runner.ingest_historical_bar(_canonical_test_bar(minute, "ws_candle"))
+    assert runner._candle_versions[symbol] == 0
+    assert runner._data_phase[symbol] == "HYDRATION"
+    assert len(runner._indicator_engine.bars) == 2
