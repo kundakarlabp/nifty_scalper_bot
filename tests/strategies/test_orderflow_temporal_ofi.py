@@ -455,3 +455,91 @@ def test_adaptive_reversal_holdoff_is_never_shorter_than_ten_seconds(
     assert cleared is not None
     assert cleared.metadata["ofi_reversal_holdoff_seconds"] == 10.0
     assert cleared.metadata["ofi_reversal_holdoff_active"] is False
+
+
+def test_orderflow_context_logging_ignores_numeric_churn_until_five_minutes(
+    monkeypatch,
+) -> None:
+    """High-frequency OFI and quote versions never generate INFO floods."""
+    logger = Mock()
+    monkeypatch.setattr(order_flow_module, "LOGGER", logger)
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = _strategy()
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=0.50, supports=True)
+    indicators.pop("_expected_support")
+
+    def emitted() -> int:
+        return sum(
+            call.kwargs.get("extra", {}).get("event") == "ORDERFLOW_CONTEXT_EVIDENCE"
+            for call in logger.info.call_args_list
+        )
+
+    first = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert first is not None
+    assert first.metadata["effective_context_alignment"] is True
+    assert emitted() == 1
+
+    for timestamp, version, ofi in (
+        (101.0, 4, 0.40),
+        (150.0, 5, 0.30),
+        (399.0, 6, 0.60),
+    ):
+        clock[0] = timestamp
+        indicators["quote_update_version"] = version
+        indicators["ofi_1s_normalized"] = ofi
+        indicators["ofi_3s_normalized"] = ofi
+        signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+        assert signal is not None
+        assert signal.metadata["ofi_1s_normalized"] == ofi
+        assert emitted() == 1
+
+    clock[0] = 400.0
+    assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
+    assert emitted() == 2
+
+    # A new contract has independent visibility at its first observation.
+    other = SYMBOL.replace("25000CE", "25050CE")
+    assert strategy._evaluate_signal(other, indicators, 100.25) is not None
+    assert emitted() == 3
+
+
+def test_orderflow_material_context_change_logs_after_one_minute(
+    monkeypatch,
+) -> None:
+    logger = Mock()
+    monkeypatch.setattr(order_flow_module, "LOGGER", logger)
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = _strategy()
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=0.50, supports=True)
+    indicators.pop("_expected_support")
+
+    first = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+    assert first is not None
+    assert first.metadata["effective_context_alignment"] is True
+
+    indicators["ofi_1s_normalized"] = -0.50
+    indicators["ofi_3s_normalized"] = -0.50
+    for timestamp in (101.0, 159.0):
+        clock[0] = timestamp
+        adverse = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+        assert adverse is not None
+        assert adverse.metadata["effective_context_conflict"] is True
+    assert logger.info.call_count == 1
+
+    clock[0] = 160.0
+    changed = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+    assert changed is not None
+    assert changed.metadata["effective_context_conflict"] is True
+    assert logger.info.call_count == 2
+    assert (
+        logger.info.call_args.kwargs["extra"]["context_alignment_block_reason"]
+        == "adverse_microstructure"
+    )
+
+    clock[0] = 161.0
+    assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
+    assert logger.info.call_count == 2
