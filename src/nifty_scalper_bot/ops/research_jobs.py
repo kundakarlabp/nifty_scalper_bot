@@ -35,11 +35,23 @@ _SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
 def require_epoch_audit_offmarket(moment: datetime) -> None:
-    """Reject heavy tape audits during pre-open and the trading session."""
+    """Reserve the entire bounded worker lifetime before 05:00 IST."""
     if moment.tzinfo is None:
         raise ValueError("epoch_audit_timezone_required")
-    if 5 <= moment.astimezone(IST).hour < 17:
+    local = moment.astimezone(IST)
+    if 5 <= local.hour < 17:
         raise ValueError("epoch_audit_off_market_only")
+    next_protected_start = local.replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    if local.hour >= 17:
+        next_protected_start += timedelta(days=1)
+    # Include the systemd worker's termination grace and a 5-minute buffer.
+    budget_seconds = (
+        _worker_wait_timeout_seconds({"mode": "epoch_audit"}) + 300
+    )
+    if (next_protected_start - local).total_seconds() <= budget_seconds:
+        raise ValueError("epoch_audit_insufficient_offmarket_budget")
 
 
 def validate_request(
