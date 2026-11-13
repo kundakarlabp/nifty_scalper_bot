@@ -1,4 +1,4 @@
-"""Offline Breeze research bridge: causal identities, SHA checks and no fabricated fills."""
+"""Breeze bridge tests: causal identities, SHA checks and no fabricated fills."""
 
 import hashlib
 import json
@@ -25,13 +25,21 @@ def _sources(tmp_path: Path, *, previous: bool = True, gaps: tuple[int, ...] = (
         )
         if previous:
             db.execute("INSERT INTO sessions VALUES ('2025-02-03', '2025-02-04')")
-            db.execute("INSERT INTO daily_index VALUES ('2025-02-03', 23500, '2025-02-04')")
+            db.execute(
+                "INSERT INTO daily_index VALUES ('2025-02-03', 23500, '2025-02-04')"
+            )
             db.executemany(
                 "INSERT INTO contract_eod VALUES (?,?,?,?,?,?)",
                 [
                     ("2025-02-03", "NIFTY25FEBFUT", "2025-02-27", None, 75, "FUT"),
-                    ("2025-02-03", "NIFTY25FEB0623500CE", "2025-02-06", 23500, 75, "CE"),
-                    ("2025-02-03", "NIFTY25FEB0623500PE", "2025-02-06", 23500, 75, "PE"),
+                    (
+                        "2025-02-03", "NIFTY25FEB0623500CE",
+                        "2025-02-06", 23500, 75, "CE",
+                    ),
+                    (
+                        "2025-02-03", "NIFTY25FEB0623500PE",
+                        "2025-02-06", 23500, 75, "PE",
+                    ),
                 ],
             )
         # Same-day data cannot repair lack of previous EOD master.
@@ -60,7 +68,10 @@ def _sources(tmp_path: Path, *, previous: bool = True, gaps: tuple[int, ...] = (
             count = 90 - (len(gaps) if side == "CE" else 0)
             db.execute(
                 "INSERT INTO series VALUES (?,?,?,?,?,?,?,?,?)",
-                (sid, "2025-02-04", kind, expiry, strike, side, count, 375 - count, "PARTIAL"),
+                (
+                    sid, "2025-02-04", kind, expiry, strike, side,
+                    count, 375 - count, "PARTIAL",
+                ),
             )
             for minute in range(90):
                 if side == "CE" and minute in gaps:
@@ -131,13 +142,18 @@ def test_same_day_master_never_backfilled(tmp_path):
         day="2025-02-04", permit_partial=True,
     )
     assert result["staged_days"] == 0
-    assert result["rejections"] == {"previous_eod_contract_master_or_spot_unavailable": 1}
+    assert result["rejections"] == {
+        "previous_eod_contract_master_or_spot_unavailable": 1
+    }
 
 
 def test_provenance_digest_mismatch_prevents_dataset_staging(tmp_path):
     breeze, eod, summary = _sources(tmp_path)
     with sqlite3.connect(breeze) as db:
-        db.execute("DELETE FROM candles WHERE rowid = (SELECT rowid FROM candles WHERE series_id=1 LIMIT 1)")
+        db.execute(
+            "DELETE FROM candles WHERE rowid = "
+            "(SELECT rowid FROM candles WHERE series_id=1 LIMIT 1)"
+        )
         db.commit()
     with pytest.raises(ValueError, match="breeze_database_digest_mismatch"):
         run(
