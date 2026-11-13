@@ -47,6 +47,9 @@ def safe_error_code(exc: Exception) -> str:
         "epoch_audit_canonical_trade_db_missing": (
             "epoch_audit_canonical_trade_db_missing"
         ),
+        "epoch_audit_canonical_data_dir_missing": (
+            "epoch_audit_canonical_data_dir_missing"
+        ),
         "epoch_audit_pinned_uncompressed_sha256_mismatch": (
             "epoch_audit_source_sha256_mismatch"
         ),
@@ -104,7 +107,6 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
 
         from scripts.validate_epoch_structural_markouts import audit_original_session
 
-        from nifty_scalper_bot.config.paths import get_data_dir
         from nifty_scalper_bot.ops.research_jobs import (
             IST,
             require_epoch_audit_offmarket,
@@ -114,7 +116,14 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             raise ValueError("epoch_audit_requires_shadow")
         require_epoch_audit_offmarket(datetime.now(IST))
         day = request["session_date"]
-        data_dir = get_data_dir()
+        # Never allow the general writable-data fallback to substitute a
+        # different session or journal when canonical evidence is unavailable.
+        recorded_dir = os.environ.get("DATA_DIR", "")
+        if not recorded_dir or not Path(recorded_dir).is_absolute():
+            raise ValueError("epoch_audit_canonical_data_dir_missing")
+        data_dir = Path(recorded_dir).resolve()
+        if not data_dir.is_dir():
+            raise ValueError("epoch_audit_canonical_data_dir_missing")
         folder = data_dir / "replay_archive"
         compacted = folder / f"{day}.jsonl.gz"
         plain = folder / f"{day}.jsonl"
