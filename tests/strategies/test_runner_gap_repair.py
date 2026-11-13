@@ -148,6 +148,7 @@ def test_gap_repair_accepts_only_observed_historical_minute() -> None:
     assert repaired[0].synthetic is False
     assert repaired[0].volume == 25
 
+
 def _canonical_live_bar_runner() -> StrategyRunner:
     """Minimal real _ingest_bar path without network, orders or broker state."""
     import logging
@@ -199,9 +200,8 @@ def _canonical_test_bar(minute: datetime, source: str) -> dict:
 def test_closed_ws_and_clock_flush_bars_advance_live_versions() -> None:
     """Only finalized MDM publications change LIVE provenance or live VWAP."""
     symbol = "NFO:NIFTY26N1725100CE"
-    minute = datetime.now(timezone.utc).replace(
-        second=0, microsecond=0
-    ) - timedelta(minutes=3)
+    now_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    minute = now_minute - timedelta(minutes=3)
     for canonical_source in ("ws_candle", "clock_flush_candle"):
         runner = _canonical_live_bar_runner()
         runner.ingest_historical_bar(_canonical_test_bar(minute, "historical"))
@@ -209,9 +209,7 @@ def test_closed_ws_and_clock_flush_bars_advance_live_versions() -> None:
         assert runner._data_phase[symbol] == "HYDRATION"
         assert symbol not in runner._live_bar_seen
 
-        closed = _canonical_test_bar(
-            minute + timedelta(minutes=1), canonical_source
-        )
+        closed = _canonical_test_bar(minute + timedelta(minutes=1), canonical_source)
         runner.ingest_historical_bar(closed)
         assert runner._candle_versions[symbol] == 1
         assert runner._data_phase[symbol] == "LIVE"
