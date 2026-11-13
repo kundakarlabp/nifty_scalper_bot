@@ -205,12 +205,8 @@ def _epoch_context(path: Path, run_id: str) -> dict[str, Any]:
             selection = tuple(
                 normalize_symbol(chosen[side]) for side in ("CE", "PE", "FUT")
             )
-            ce_token = _selected_snapshot_token(
-                selection[0], event["payload"], catalog
-            )
-            pe_token = _selected_snapshot_token(
-                selection[1], event["payload"], catalog
-            )
+            ce_token = _selected_snapshot_token(selection[0], event["payload"], catalog)
+            pe_token = _selected_snapshot_token(selection[1], event["payload"], catalog)
             selection_identity = (*selection, ce_token, pe_token)
             # The same CE/PE symbols can temporarily lose token provenance.
             # A later restoration must never bridge quotes across that gap.
@@ -348,8 +344,7 @@ def _label(opportunity: Any, context: dict[str, Any], horizon: int) -> dict[str,
     )
     if latest_selection is not None:
         identity_changes_within_horizon = any(
-            ts < selection[0] <= ts + horizon
-            and selection[3] != latest_selection[3]
+            ts < selection[0] <= ts + horizon and selection[3] != latest_selection[3]
             for selection in context["selections"]
         )
         if identity_changes_within_horizon:
