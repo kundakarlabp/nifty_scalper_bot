@@ -1,13 +1,13 @@
 # Production HTTP access — canonical diagnostic route
 
-**Last independently tested:** 2026-10-25 (IST). **Host:** AWS Lightsail `niftyscalper2`, Mumbai `ap-south-1a`, static public IPv4 `65.0.255.84`, private IPv4 `172.26.15.134`. **Do not route via AppDeploy** or assume the GitHub connector can administer AWS firewall rules.
+**Last independently tested:** 2026-10-25 (IST). **Host:** AWS Lightsail `niftyscalper2`, Mumbai `ap-south-1a`, static public IPv4 `65.0.255.84`, private IPv4 `172.26.15.134`. Use the existing AWS and Supabase diagnostic paths; do not assume the GitHub connector can administer AWS firewall rules.
 
 ## Canonical architecture
 
 - **GitHub `main`** is the code/configuration source of truth. CI-validated changes are installed by the **single** guarded `deploy/lightsail_release.sh` on Lightsail; do not bypass broker-flat, terminal-order, and entry-hold gates.
 - **AWS Lightsail** owns the runtime/systemd units and private credentials at `/home/ubuntu/.config/niftybot/niftybot.env`.
 - **Supabase** project `dehdptgkqbrkyzyodicd`, table `public.nifty_runtime_heartbeat`, is a **read-only** off-host observer of the local engine, release, admin, and Streamlit services. This heartbeat is sent about every 120 seconds; it does **not** establish public internet reachability.
-- **Do not use SSH or the retired AppDeploy relay to read live logs**. For HTTP inspection, first try direct public requests using a real external web client that can reach arbitrary IP ports. Some ChatGPT runtimes and Supabase's `extensions.http_get()` time out even when the endpoint is publicly reachable.
+- **Do not use SSH or retired external relays to read live logs**. For HTTP inspection, first try direct public requests using a real external web client that can reach arbitrary IP ports. Some ChatGPT runtimes and Supabase's `extensions.http_get()` time out even when the endpoint is publicly reachable.
 
 ## Direct endpoints and expected semantics
 

@@ -14,9 +14,9 @@ Use the configured direct production health/status endpoints first when availabl
 If direct network access fails:
 
 - do **not** conclude that the bot is down;
-- use the repository/operator-approved relay or observability integration available in the current private environment;
-- never add private relay URLs, credentials, tokens, or operator-only endpoints to this public repository;
-- do not redeploy a healthy relay merely to read logs.
+- use the existing AWS-hosted admin dashboard and private Supabase heartbeat/log archives;
+- never add private operator URLs, credentials, tokens, or account-only endpoints to this public repository;
+- do not create, reactivate, or rely on external network relays to read logs.
 
 A TCP/connectivity failure from the current client is evidence about that path, not proof of engine failure.
 

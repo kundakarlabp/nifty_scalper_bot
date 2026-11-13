@@ -156,5 +156,7 @@ connection timeouts from Supabase SQL HTTP and restricted tool environments.
 Never label the bot down from those timeouts alone. Supabase heartbeat is
 host-local monitoring, not proof of public ingress. Control-plane access is
 separate: HTTPS requires a publicly trusted certificate and authentication;
-independent port 8081 must bind to localhost. Do not use AppDeploy/SSH,
-change trading risk, or bypass broker-safe deployment to troubleshoot HTTP.
+independent port 8081 must bind to localhost. Diagnose through the
+existing AWS admin endpoints and private Supabase telemetry. Do not use
+retired third-party relays or SSH, change trading risk, or bypass broker-safe
+deployment to troubleshoot HTTP.
