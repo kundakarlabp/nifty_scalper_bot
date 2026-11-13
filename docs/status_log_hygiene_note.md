@@ -3,7 +3,7 @@
 ## Live execution review — 10 September 2026, Asia/Kolkata
 
 Source register: production snapshot at 14:07 IST on `c5de7bd8`, and
-14:05–14:09 order logs retrieved through the existing Supabase/AppDeploy relay.
+14:05–14:09 order logs retrieved through the historical remote diagnostics path.
 Repeated prebroker rejections reported net R:R 0.96–1.07 against 1.50. A selected
 contract changed during one attempt; transient overload rejected another.
 Follow-up health after market close reports deployed `1987552c`, authenticated
