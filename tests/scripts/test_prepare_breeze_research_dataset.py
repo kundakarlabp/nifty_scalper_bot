@@ -90,6 +90,10 @@ def test_build_and_export_keep_gap_and_research_only(tmp_path):
     assert result["series"] == 1
     assert result["identical_duplicates"] == 1
     assert result["bars_1m"] == 14
+    assert result["source_observations_1m"] == 14
+    assert result["options_source_bars"] == 14
+    assert result["options_admitted_bars"] == 14
+    assert result["source_accounting_balanced"] is True
     assert result["gap_minutes"] == 361
     assert result["execution_grade_ready"] is False
     assert not result["historical_quote_depth_present"]
@@ -157,6 +161,8 @@ def test_special_boundary_observation_is_flagged_not_filled(tmp_path):
     result = build(source, output, tmp_path / "summary.json", expected_windows=1)
     assert result["bars_1m"] == 60
     assert result["special_boundary_exclusions"] == 1
+    assert result["source_observations_1m"] == 61
+    assert result["source_accounting_balanced"] is True
     exported = export_series(
         output,
         tmp_path / "15m.csv",
