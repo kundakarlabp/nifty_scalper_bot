@@ -53,7 +53,13 @@ def test_epoch_request_requires_sha_day_and_offmarket_clock():
     ):
         with pytest.raises(ValueError, match="epoch_audit_off_market_only"):
             validate_request(_payload(), now=datetime.fromisoformat(blocked))
-    for permitted in ("2026-11-13T04:59:00+05:30", "2026-11-13T17:00:00+05:30"):
+    with pytest.raises(
+        ValueError, match="epoch_audit_insufficient_offmarket_budget"
+    ):
+        validate_request(
+            _payload(), now=datetime.fromisoformat("2026-11-13T03:59:00+05:30")
+        )
+    for permitted in ("2026-11-13T02:59:00+05:30", "2026-11-13T17:00:00+05:30"):
         require_epoch_audit_offmarket(datetime.fromisoformat(permitted))
 
 
