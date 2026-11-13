@@ -316,7 +316,7 @@ def test_replacement_prefilter_skips_affordable_plus_100_before_plus_50(
         ("NFO:NIFTY2691523500PE", 65.0, "side_mismatch"),
         ("NFO:NIFTY2692223550CE", 65.0, "expiry_mismatch"),
         ("NFO:NIFTY2691523600CE", 65.0, "strike_jump"),
-        ("NFO:NIFTY2691523550CE", 40.0, "premium_jump"),
+        ("NFO:NIFTY2691523550CE", 120.0, "premium_jump"),
         ("NFO:NIFTY2691523450CE", 65.0, "not_in_active_basket"),
     ],
 )
@@ -342,6 +342,26 @@ def test_replacement_contract_policy_is_fail_closed(
         candidate_trade_price=price,
     )
     assert blocked == expected_reason
+
+
+def test_cheaper_adjacent_replacement_is_reassessed_not_premium_vetoed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("STRICT_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("ALLOW_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("MAX_REPLACEMENT_STRIKE_DISTANCE", "50")
+    monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
+    runner = object.__new__(StrategyRunner)
+    original = "NFO:NIFTY2691523500CE"
+    cheaper = "NFO:NIFTY2691523550CE"
+    runner._active_option_symbols = {original, cheaper}
+    blocked, _policy = runner._candidate_replacement_contract_guard(
+        original_symbol=original,
+        selected_symbol=cheaper,
+        original_trade_price=160.0,
+        candidate_trade_price=80.0,
+    )
+    assert blocked is None
 
 
 def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
