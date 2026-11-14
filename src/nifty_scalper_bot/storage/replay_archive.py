@@ -8,6 +8,8 @@ Ownership: MarketDataManager owns tick quality; ReplayArchive owns the local
 capture and source-preserving integrity sidecars.
 Safety: Do not block trading, manufacture quotes, or infer fills. Dropped,
 coalesced, or corrupted records invalidate research evidence.
+verify_raw_ingress_session checks exact per-contract/generation receipt sequences
+and observed-versus-persisted per-day counts before certifying a wire tape.
 """
 
 from __future__ import annotations
@@ -380,3 +382,81 @@ def archive_fingerprint(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
+    """Fail closed on missing pre-queue wire observations per symbol/epoch.
+
+    This *wire* evidence is separate from the normalized decision-replay tape.
+    It proves locally received observations were captured, not that Zerodha
+    transmitted every exchange quote or that a strategy replay is executable.
+    """
+    day = (
+        path.name.removesuffix(".jsonl.gz")
+        if path.name.endswith(".jsonl.gz")
+        else path.stem
+    )
+    seen: dict[str, dict[str, int]] = {}
+    last_sequence: dict[tuple[str, str], int] = {}
+    for event in iter_session(path):
+        run = str(event["run_id"])
+        payload = event["payload"]
+        if payload.get("capture_stream") != "raw_ws_ingress":
+            raise ValueError("raw_ingress_stream_identity_missing")
+        if event["kind"] == "snapshot":
+            continue
+        receipt = payload.get("receipt")
+        wire = payload.get("wire")
+        if not isinstance(receipt, dict) or not isinstance(wire, dict):
+            raise ValueError("raw_ingress_wire_or_receipt_missing")
+        symbol = receipt.get("symbol")
+        token = receipt.get("token")
+        generation = receipt.get("generation")
+        sequence = receipt.get("sequence")
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or type(generation) is not int
+            or type(sequence) is not int
+            or sequence <= 0
+        ):
+            raise ValueError("raw_ingress_identity_invalid")
+        identity = f"{symbol}|{token}|{generation}"
+        prior = last_sequence.get((run, identity))
+        if prior is not None and sequence != prior + 1:
+            raise ValueError("raw_ingress_contract_epoch_sequence_gap")
+        last_sequence[run, identity] = sequence
+        bucket = seen.setdefault(run, {})
+        bucket[identity] = bucket.get(identity, 0) + 1
+
+    for run, by_identity in seen.items():
+        integrity = json.loads(
+            (path.parent / f"{run}.integrity.json").read_text()
+        )
+        starting = integrity.get("upstream_start")
+        ending = integrity.get("upstream_latest")
+        if not isinstance(starting, dict) or not isinstance(ending, dict):
+            raise ValueError("raw_ingress_upstream_counts_missing")
+        if int(ending.get("capture_errors", 0)) != 0:
+            raise ValueError("raw_ingress_capture_error_observed")
+        for identity, count in by_identity.items():
+            key = f"day_receipt:{day}|{identity}"
+            expected = int(ending.get(key, 0)) - int(starting.get(key, 0))
+            if expected != count:
+                raise ValueError("raw_ingress_contract_epoch_count_mismatch")
+        for key, value in ending.items():
+            prefix = f"day_receipt:{day}|"
+            if not key.startswith(prefix):
+                continue
+            identity = key.removeprefix(prefix)
+            expected = int(value) - int(starting.get(key, 0))
+            if by_identity.get(identity, 0) != expected:
+                raise ValueError("raw_ingress_contract_epoch_missing")
+    if not seen:
+        raise ValueError("raw_ingress_no_wire_observations")
+    return {
+        "verified": True,
+        "wire_events": sum(sum(by_id.values()) for by_id in seen.values()),
+        "counts_by_run_and_contract_epoch": seen,
+        "sha256": archive_fingerprint(path),
+    }
+
