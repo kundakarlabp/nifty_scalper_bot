@@ -7,6 +7,8 @@ Ownership: Research-only option strategy screening and read-only cache mapping,
 not StrategyManager/execution.
 Safety: Requires explicit SHADOW mode and synchronized FULL-depth quotes; never
 registers a strategy, creates orders, or certifies historical/live profitability.
+Same-day expiry may be assessed only before market close with verified fresh
+contract/depth evidence; this does not authorize live 0DTE execution.
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ def _validated(
         type(first.lot_size) is not int
         or first.lot_size <= 0
         or not isinstance(first.expiry, date)
-        or first.expiry <= market_time.date()
+        or first.expiry < market_time.date()
     ):
         raise ValueError("research_expiry_or_lot_invalid")
 
