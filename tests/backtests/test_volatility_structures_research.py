@@ -188,7 +188,7 @@ def test_quote_from_unverified_expiry_or_after_hours_cannot_be_researched():
 
 
 def test_zero_dte_same_session_quotes_can_be_assessed_in_shadow() -> None:
-    """Tuesday expiry is researchable while still actively trading, not LIVE eligible."""
+    """Research only: validate verified Tuesday expiry books during the session."""
     at = datetime(2026, 11, 17, 10, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
     quote_time = at - timedelta(milliseconds=250)
     legs = {
