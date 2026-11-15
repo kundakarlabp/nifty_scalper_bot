@@ -178,13 +178,50 @@ def test_volatility_research_cannot_be_used_outside_explicit_shadow(monkeypatch,
 
 def test_quote_from_unverified_expiry_or_after_hours_cannot_be_researched():
     legs = condor()
-    legs["long_put"] = replace(legs["long_put"], expiry=_AT.date())
+    legs["long_put"] = replace(legs["long_put"], expiry=_AT.date() - timedelta(days=1))
     with pytest.raises(ValueError, match="research_expiry_or_lot_invalid"):
         assess_credit_iron_condor(**legs)
     legs = condor()
     legs["at"] = _AT.replace(hour=16)
     with pytest.raises(ValueError, match="research_outside_market_session"):
         assess_credit_iron_condor(**legs)
+
+
+def test_zero_dte_same_session_quotes_can_be_assessed_in_shadow() -> None:
+    """Tuesday expiry is researchable while still actively trading, not LIVE eligible."""
+    at = datetime(2026, 11, 17, 10, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+    quote_time = at - timedelta(milliseconds=250)
+    legs = {
+        role: replace(leg, expiry=at.date(), observed_at=quote_time)
+        for role, leg in condor().items()
+        if role != "at"
+    }
+    assessed_condor = assess_credit_iron_condor(**legs, at=at)
+    assert assessed_condor.gross_max_loss_rupees > 0
+    assert assessed_condor.live_eligible is False
+    assert assessed_condor.net_loss_bound_certified is False
+
+    long_call = replace(
+        quote("CE", 24000, bid=95, ask=100, token=41),
+        expiry=at.date(),
+        observed_at=quote_time,
+    )
+    short_call = replace(
+        quote("CE", 24100, bid=50, ask=55, token=42),
+        expiry=at.date(),
+        observed_at=quote_time,
+    )
+    assessed_spread = assess_directional_debit_spread(
+        long_leg=long_call, short_leg=short_call, at=at
+    )
+    assert assessed_spread.structure == "BULL_CALL_SPREAD"
+    assert assessed_spread.live_eligible is False
+    assert assessed_spread.net_loss_bound_certified is False
+
+    with pytest.raises(ValueError, match="research_outside_market_session"):
+        assess_directional_debit_spread(
+            long_leg=long_call, short_leg=short_call, at=at.replace(hour=16)
+        )
 
 
 @pytest.mark.parametrize("spot", [23940.0, float("nan"), 0.0])
