@@ -1,4 +1,11 @@
-"""Read-only, evidence-qualified per-strategy dashboard readiness."""
+"""Purpose: Produce read-only, strategy-specific readiness evidence for dashboards.
+
+Responsibilities: Report VWAP completed-history sufficiency independently
+for each selected option; distinguish recent ORB opening-range evaluation and
+SMC confirmation observations from current execution permission.
+Boundaries: Pure computation on already captured runtime and strategy telemetry.
+Safety: Incomplete information yields UNKNOWN, not an invented eligible trade.
+"""
 from __future__ import annotations
 
 import os
