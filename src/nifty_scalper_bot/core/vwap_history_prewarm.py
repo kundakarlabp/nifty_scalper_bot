@@ -43,16 +43,27 @@ def prioritized_vwap_symbols(
         return ()
     selected = (selected_ce, selected_pe)
     candidates = {s for s in universe if _series_strike(s) is not None}
+    def rank(symbol: str) -> tuple[int, int, str, str]:
+        parsed = _series_strike(symbol)
+        if parsed is None:
+            return (1, 999999, "", symbol)
+        expiry, strike, side = parsed
+        return (
+            0 if expiry == ce[0] else 1,
+            abs(strike - (ce[1] if side == "CE" else pe[1])),
+            side,
+            symbol,
+        )
+
     ranked = sorted(
-        (s for s in candidates if s not in selected),
-        key=lambda s: (
-            0 if _series_strike(s)[0] == ce[0] else 1,
-            abs(_series_strike(s)[1] - (ce[1] if s.endswith("CE") else pe[1])),
-            _series_strike(s)[2],
-            s,
-        ),
+        (symbol for symbol in candidates if symbol not in selected),
+        key=rank,
     )
-    adjacent = [s for s in ranked if _series_strike(s)[0] == ce[0]]
+    adjacent = [
+        symbol
+        for symbol in ranked
+        if (parsed := _series_strike(symbol)) is not None and parsed[0] == ce[0]
+    ]
     return tuple(dict.fromkeys((*selected, *adjacent)))[: max(2, limit)]
 
 
