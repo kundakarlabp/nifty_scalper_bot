@@ -258,6 +258,13 @@ def render() -> None:
     proof = status.get("install_proof") or {}
     proof_status = status.get("install_proof_display") or install_proof_display(proof)
     pnl_total, closed = pnl_summary(rows_all)
+    strategy = status.get("strategy_readiness") or {}
+    orb = strategy.get("ORBPro") or {}
+    smc = strategy.get("SMC") or {}
+    vwap = strategy.get("VWAPPro") or {}
+    vwap_ce = vwap.get("ce") or {}
+    vwap_pe = vwap.get("pe") or {}
+    vwap_target = vwap.get("required_bars") or "?"
     primary = status.get("primary_blocker") or next((b for b in status.get("blockers", []) if b), "—")
     engine_status = engine_display_status(status)
     broker_state = status.get("broker_authenticated")
@@ -301,6 +308,11 @@ def render() -> None:
             (status.get("updater") or {}).get("state") or "unknown",
             "warn" if status.get("stale") else "",
         )
+        + '</div><div class="cards">'
+        + card("ORB range", "EVALUATED (RECENT)" if orb.get("state") == "RANGE_EVALUATED_RECENTLY" else "WAITING / UNKNOWN")
+        + card("SMC setup", "AWAITING CONFIRMATION" if smc.get("state") in {"AWAITING_CONFIRMATION", "RECENT_CONFIRMATION_WAIT"} else smc.get("state") or "UNKNOWN")
+        + card("VWAP history", f"CE {vwap_ce.get('usable_bars') if vwap_ce.get('usable_bars') is not None else '?'} / {vwap_target} · PE {vwap_pe.get('usable_bars') if vwap_pe.get('usable_bars') is not None else '?'} / {vwap_target}", "warn" if vwap.get("state") == "WARMING" else "")
+        + card("Strategy evidence", "RECENT / READ-ONLY")
         + "</div>" + feed_html(rows),
         unsafe_allow_html=True,
     )
