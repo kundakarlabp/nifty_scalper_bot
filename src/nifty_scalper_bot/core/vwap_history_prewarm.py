@@ -112,7 +112,10 @@ class VwapHistoryPrewarmer:
                 break
             if symbol in self._inflight:
                 continue
-            if now - self._last_attempt.get(symbol, float("-inf")) < self.cooldown_seconds:
+            if (
+                now - self._last_attempt.get(symbol, float("-inf"))
+                < self.cooldown_seconds
+            ):
                 continue
             try:
                 if int(completed_bars(symbol)) >= self.target_bars:
