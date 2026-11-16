@@ -13599,9 +13599,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                 )
             except (TypeError, ValueError, OverflowError):
                 _vwap_ema_target = 50
-            vwap_prewarmer = VwapHistoryPrewarmer(
-                target_bars=_vwap_ema_target
-            )
+            vwap_prewarmer = VwapHistoryPrewarmer(target_bars=_vwap_ema_target)
 
             def _vwap_cached_bars(sym: str) -> int:
                 try:
@@ -13618,7 +13616,8 @@ async def startup_sequence(ctx: BotContext) -> None:
                     getattr(ctx, "selected_pe", None),
                 }
                 return await ensure_symbol_runtime_history(
-                    ctx, sym,
+                    ctx,
+                    sym,
                     role="selected_option" if selected else "option_context",
                     phase="dynamic_update",
                     reason="vwap_adjacent_prewarm",
