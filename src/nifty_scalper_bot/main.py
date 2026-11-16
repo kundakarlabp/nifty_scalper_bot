@@ -1336,7 +1336,9 @@ def health_trading():
     signal_observability = _signal_observability(ctx)
     from nifty_scalper_bot.ops.strategy_readiness import build_strategy_readiness
 
-    strategy_readiness = build_strategy_readiness(structured_status, signal_observability)
+    strategy_readiness = build_strategy_readiness(
+        structured_status, signal_observability
+    )
     no_trade_diagnostics = _no_trade_diagnostics(
         signal_observability, structured_status.get("minimum_lot_affordability")
     )
