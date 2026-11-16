@@ -845,7 +845,18 @@ def execution_data_quality(
             value = float(raw)
         except (TypeError, ValueError):
             return None
-        return value if math.isfinite(value) and value >= 0 else None
+        if not math.isfinite(value):
+            return None
+        # Favorable price improvement has negative signed slippage; do not
+        # discard it. Durations and other unsigned observations stay >= 0.
+        if key not in {
+            "entry_slippage_bps",
+            "exit_slippage_bps",
+            "entry_slippage_cost",
+            "exit_slippage_cost",
+        } and value < 0:
+            return None
+        return value
 
     # JSON keys or entry-only observations do not establish measured exit quality.
     # This coverage is intentionally paired by trade, not min(sample counts).
