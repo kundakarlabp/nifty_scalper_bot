@@ -20,7 +20,11 @@ def _mapping(value: object) -> Mapping[str, Any]:
 def _dominant_reason(signals: Mapping[str, Any], strategy: str) -> str | None:
     windows = _mapping(signals.get("no_vote_reason_counts_by_strategy_window"))
     reasons = _mapping(windows.get(strategy))
-    valid = [(str(reason), int(n)) for reason, n in reasons.items() if isinstance(n, int) and n > 0]
+    valid = [
+        (str(reason), int(n))
+        for reason, n in reasons.items()
+        if isinstance(n, int) and n > 0
+    ]
     return max(valid, key=lambda item: item[1])[0] if valid else None
 
 
@@ -43,15 +47,27 @@ def build_strategy_readiness(
     for side in ("ce", "pe"):
         counts = _mapping(history.get(side))
         values = [counts.get(name) for name in ("mdm", "runner", "indicator")]
-        usable = min(int(v) for v in values) if all(isinstance(v, (int, float)) and v >= 0 for v in values) else None
+        usable = (
+            min(int(v) for v in values)
+            if all(isinstance(v, (int, float)) and v >= 0 for v in values)
+            else None
+        )
         pairs[side] = {
             "symbol": selected.get(side),
             "usable_bars": usable,
             "required_bars": required,
-            "history_ready": usable >= required if usable is not None and selected.get(side) else None,
+            "history_ready": (
+                usable >= required
+                if usable is not None and selected.get(side)
+                else None
+            ),
         }
     known = [x["history_ready"] for x in pairs.values()]
-    if not selected.get("ce") or not selected.get("pe") or any(v is None for v in known):
+    if (
+        not selected.get("ce")
+        or not selected.get("pe")
+        or any(v is None for v in known)
+    ):
         vwap_status = "UNKNOWN"
     else:
         vwap_status = "HISTORY_READY" if all(known) else "WARMING"
@@ -59,7 +75,11 @@ def build_strategy_readiness(
     orb_window = _mapping(observed.get("ORBPro"))
     past_full_range = any(
         int(orb_window.get(reason, 0) or 0) > 0
-        for reason in ("no_fresh_underlying_breakout", "orb_bar_already_evaluated", "awaiting_orb_retest")
+        for reason in (
+            "no_fresh_underlying_breakout",
+            "orb_bar_already_evaluated",
+            "awaiting_orb_retest",
+        )
     )
     orb_status = "RANGE_EVALUATED_RECENTLY" if past_full_range else (
         "AWAITING_RANGE_OR_EVIDENCE" if orb_window else "UNKNOWN"
@@ -75,7 +95,9 @@ def build_strategy_readiness(
     smc_reason = _dominant_reason(signals, "SMC")
     smc_status = (
         "AWAITING_CONFIRMATION" if smc_confirming
-        else "RECENT_CONFIRMATION_WAIT" if smc_reason in {"smc_awaiting_confirmation", "smc_trend_corroboration_missing"}
+        else "RECENT_CONFIRMATION_WAIT"
+        if smc_reason
+        in {"smc_awaiting_confirmation", "smc_trend_corroboration_missing"}
         else "NO_ACTIVE_SETUP_OBSERVED" if smc_reason
         else "UNKNOWN"
     )
@@ -95,6 +117,8 @@ def build_strategy_readiness(
         "SMC": {
             "state": smc_status,
             "recent_no_vote_reason": smc_reason,
-            "basis": "active_observability_lifecycle_or_recent_evaluations_not_execution",
+            "basis": (
+                "active_observability_lifecycle_or_recent_evaluations_not_execution"
+            ),
         },
     }
