@@ -13602,10 +13602,14 @@ async def startup_sequence(ctx: BotContext) -> None:
             vwap_prewarmer = VwapHistoryPrewarmer(target_bars=_vwap_ema_target)
 
             def _vwap_cached_bars(sym: str) -> int:
+                mdm = ctx.market_data_manager
+                runner = ctx.strategy_runner
+                if mdm is None or runner is None:
+                    return 0
                 try:
-                    mdm_count = len(ctx.market_data_manager.get_ohlc_bars(sym) or [])
-                    runner_count = ctx.strategy_runner.runner_history_count(sym)
-                    indicator_count = ctx.strategy_runner.indicator_history_count(sym)
+                    mdm_count = len(mdm.get_ohlc_bars(sym) or [])
+                    runner_count = runner.runner_history_count(sym)
+                    indicator_count = runner.indicator_history_count(sym)
                     return min(int(mdm_count), int(runner_count), int(indicator_count))
                 except (AttributeError, TypeError, ValueError):
                     return 0
