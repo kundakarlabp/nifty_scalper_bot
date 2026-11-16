@@ -100,19 +100,19 @@ orb = sr.get("ORBPro") or {}
 smc = sr.get("SMC") or {}
 vwap = sr.get("VWAPPro") or {}
 readiness_cols = st.columns(3)
-readiness_cols[0].metric(
-    "ORB",
+orb_label = (
     "RANGE EVALUATED"
     if orb.get("state") == "RANGE_EVALUATED_RECENTLY"
-    else "UNKNOWN / WAITING",
+    else "UNKNOWN / WAITING"
 )
+readiness_cols[0].metric("ORB", orb_label)
 readiness_cols[0].caption("Recent: " + label(orb.get("recent_no_vote_reason")))
-readiness_cols[1].metric(
-    "SMC",
+smc_label = (
     "AWAITING CONFIRMATION"
     if smc.get("state") in {"AWAITING_CONFIRMATION", "RECENT_CONFIRMATION_WAIT"}
-    else label(smc.get("state")),
+    else label(smc.get("state"))
 )
+readiness_cols[1].metric("SMC", smc_label)
 readiness_cols[1].caption("Recent: " + label(smc.get("recent_no_vote_reason")))
 _vwap_ce = vwap.get("ce") or {}
 _vwap_pe = vwap.get("pe") or {}
