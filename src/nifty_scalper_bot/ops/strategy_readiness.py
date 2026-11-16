@@ -48,11 +48,12 @@ def build_strategy_readiness(
     for side in ("ce", "pe"):
         counts = _mapping(history.get(side))
         values = [counts.get(name) for name in ("mdm", "runner", "indicator")]
-        usable = (
-            min(int(v) for v in values)
-            if all(isinstance(v, (int, float)) and v >= 0 for v in values)
-            else None
-        )
+        numeric = [
+            int(value)
+            for value in values
+            if isinstance(value, (int, float)) and value >= 0
+        ]
+        usable = min(numeric) if len(numeric) == len(values) else None
         pairs[side] = {
             "symbol": selected.get(side),
             "usable_bars": usable,
