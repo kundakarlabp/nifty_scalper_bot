@@ -1280,9 +1280,12 @@ def test_live_smc_rotation_preserves_setup_id_and_stale_quote_blocks(
     rotated = CE[:-7] + "24150CE"
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     rows.append(sweep)
-    assert strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
-    ) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
     assert (FUTURES, "CE") in strategy._events
 
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
@@ -1313,9 +1316,12 @@ def test_live_smc_rotation_keeps_opposing_context_veto(monkeypatch) -> None:
     rotated = CE[:-7] + "24150CE"
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     rows.append(sweep)
-    assert strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
-    ) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.append(confirm)
     opposite = _indicators(
@@ -1334,14 +1340,20 @@ def test_live_smc_rotated_option_cannot_rescue_invalidated_sweep(monkeypatch) ->
     rotated = CE[:-7] + "24150CE"
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     rows.append(sweep)
-    assert strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
-    ) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
     invalidation = _bar(
         31, open_=23984, high=23987, low=23970, close=23972, volume=2200
     )
     rows.append(invalidation)
-    assert strategy.generate_signal(
-        rotated, _indicators(latest_bar_ts=invalidation["timestamp"]), 138.60
-    ) is None
+    assert (
+        strategy.generate_signal(
+            rotated, _indicators(latest_bar_ts=invalidation["timestamp"]), 138.60
+        )
+        is None
+    )
     assert strategy.last_no_vote_reason == "smc_sweep_invalidated"
