@@ -1271,7 +1271,9 @@ def test_trend_smc_rejects_untimed_structure_without_volume(monkeypatch) -> None
     assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
 
 
-def test_live_smc_rotation_preserves_setup_id_and_stale_quote_blocks(monkeypatch) -> None:
+def test_live_smc_rotation_preserves_setup_id_and_stale_quote_blocks(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
     strategy = _strategy(rows)
