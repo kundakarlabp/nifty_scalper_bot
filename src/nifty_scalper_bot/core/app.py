@@ -13593,8 +13593,14 @@ async def startup_sequence(ctx: BotContext) -> None:
 
             # VWAP's 50-bar warm-up is independent of the 30-bar execution floor.
             # These best-effort tasks use the existing canonical MDM history owner.
+            try:
+                _vwap_ema_target = max(
+                    50, int(float(os.getenv("VWAP_EMA_PERIOD", "50") or "50"))
+                )
+            except (TypeError, ValueError, OverflowError):
+                _vwap_ema_target = 50
             vwap_prewarmer = VwapHistoryPrewarmer(
-                target_bars=max(50, int(os.getenv("VWAP_EMA_PERIOD", "50") or 50))
+                target_bars=_vwap_ema_target
             )
 
             def _vwap_cached_bars(sym: str) -> int:
@@ -13810,6 +13816,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             else "option_context"
                                         )
                                     )
+                                    if role == "option_context":
+                                        # Count failed fetches too: a transient
+                                        # error must not immediately duplicate
+                                        # the broker request in the prewarmer.
+                                        vwap_prewarmer.note_attempt(sym)
                                     runtime = await ensure_symbol_runtime_history(
                                         ctx,
                                         sym,
@@ -13825,8 +13836,6 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             )
                                         ),
                                     )
-                                    if role == "option_context":
-                                        vwap_prewarmer.note_attempt(sym)
                                     LOGGER.info(
                                         "RUNNER_HISTORY_INGESTED symbol=%s token=%s bars_ingested=%d source=%s runner_history_count=%d mdm_history_count=%d",
                                         sym,
