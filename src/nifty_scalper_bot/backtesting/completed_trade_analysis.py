@@ -836,6 +836,7 @@ def execution_data_quality(
     stale = sum(
         _STALE_QUOTE_EXIT_MARKER in trade.exit_reason.lower() for trade in trades
     )
+
     def metric(trade: CanonicalCompletedTrade, key: str) -> float | None:
         raw = trade.execution_quality.get(key)
         if raw is None or isinstance(raw, bool):
@@ -855,11 +856,7 @@ def execution_data_quality(
     )
 
     def values(key: str) -> list[float]:
-        return [
-            value
-            for trade in trades
-            if (value := metric(trade, key)) is not None
-        ]
+        return [value for trade in trades if (value := metric(trade, key)) is not None]
 
     entry_slippage = values("entry_slippage_bps")
     exit_slippage = values("exit_slippage_bps")
