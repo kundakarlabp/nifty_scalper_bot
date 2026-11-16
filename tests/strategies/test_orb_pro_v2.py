@@ -1298,3 +1298,52 @@ def test_orb_immutable_breakout_volume_failure_remains_terminal(
     context["futures_vwap_slope"] = 1.0
     assert strategy.generate_signal(CE, context, 50.0) is None
     assert strategy._events[key]["status"] == "CONTRACT_REJECTED"
+
+
+def test_first_post_range_futures_bar_evaluated_once_across_strike_rotation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    strategy = _strategy({FUTURE: rows})
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+    breakout = _bar(
+        15,
+        open_=24_008.0,
+        high=24_034.0,
+        low=24_006.0,
+        close=24_030.0,
+        volume=3_000.0,
+    )
+    rows.append(breakout)
+    indicators = _base_indicators("CE", breakout["timestamp"])
+    assert strategy.generate_signal(CE, indicators, 50.0) is not None
+    rotated_ce = CE[:-7] + "24100CE"
+    assert strategy.generate_signal(rotated_ce, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_bar_already_evaluated"
+    assert len(strategy._last_bar_by_key) == 1
+
+    # A genuinely new completed futures minute permits one new evaluation,
+    # but cannot replay the already-emitted breakout.
+    next_bar = _bar(
+        16,
+        open_=24_030.0,
+        high=24_036.0,
+        low=24_026.0,
+        close=24_032.0,
+        volume=1_200.0,
+    )
+    rows.append(next_bar)
+    next_indicators = _base_indicators("CE", next_bar["timestamp"])
+    assert strategy.generate_signal(rotated_ce, next_indicators, 50.0) is None
+    assert strategy.generate_signal(CE, next_indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_bar_already_evaluated"
+    assert len(strategy._last_bar_by_key) == 1

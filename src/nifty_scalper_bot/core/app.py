@@ -13589,6 +13589,46 @@ async def startup_sequence(ctx: BotContext) -> None:
             }
             option_universe_controller = UniverseController()
             option_universe_controller.update(dynamic_option_symbols)
+            from nifty_scalper_bot.core.vwap_history_prewarm import VwapHistoryPrewarmer
+
+            # VWAP's 50-bar warm-up is independent of the 30-bar execution floor.
+            # These best-effort tasks use the existing canonical MDM history owner.
+            try:
+                _vwap_ema_target = max(
+                    50, int(float(os.getenv("VWAP_EMA_PERIOD", "50") or "50"))
+                )
+            except (TypeError, ValueError, OverflowError):
+                _vwap_ema_target = 50
+            vwap_prewarmer = VwapHistoryPrewarmer(target_bars=_vwap_ema_target)
+
+            def _vwap_cached_bars(sym: str) -> int:
+                mdm = ctx.market_data_manager
+                runner = ctx.strategy_runner
+                if mdm is None or runner is None:
+                    return 0
+                try:
+                    mdm_count = len(mdm.get_ohlc_bars(sym) or [])
+                    runner_count = runner.runner_history_count(sym)
+                    indicator_count = runner.indicator_history_count(sym)
+                    return min(int(mdm_count), int(runner_count), int(indicator_count))
+                except (AttributeError, TypeError, ValueError):
+                    return 0
+
+            async def _vwap_preload(sym: str, target: int) -> object:
+                selected = sym in {
+                    getattr(ctx, "selected_ce", None),
+                    getattr(ctx, "selected_pe", None),
+                }
+                return await ensure_symbol_runtime_history(
+                    ctx,
+                    sym,
+                    role="selected_option" if selected else "option_context",
+                    phase="dynamic_update",
+                    reason="vwap_adjacent_prewarm",
+                    required_bars=30,
+                    target_bars=target,
+                )
+
             # Symbols waiting for enough MDM bars before being added to runner.
 
             async def _option_universe_sync_loop() -> None:
@@ -13779,6 +13819,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             else "option_context"
                                         )
                                     )
+                                    if role == "option_context":
+                                        # Count failed fetches too: a transient
+                                        # error must not immediately duplicate
+                                        # the broker request in the prewarmer.
+                                        vwap_prewarmer.note_attempt(sym)
                                     runtime = await ensure_symbol_runtime_history(
                                         ctx,
                                         sym,
@@ -13961,6 +14006,28 @@ async def startup_sequence(ctx: BotContext) -> None:
                             )
 
                         dynamic_option_symbols = latest_symbols
+
+                        # Background history top-up for selected CE/PE and their
+                        # nearby same-expiry contracts; no wait in this loop and
+                        # no changes to SMC/ORB execution readiness.
+                        if (
+                            market_open
+                            and ctx.market_data_manager
+                            and ctx.strategy_runner
+                        ):
+                            _prewarm_symbols = vwap_prewarmer.schedule(
+                                incoming_ce or getattr(ctx, "selected_ce", "") or "",
+                                incoming_pe or getattr(ctx, "selected_pe", "") or "",
+                                latest_symbols,
+                                completed_bars=_vwap_cached_bars,
+                                hydrate=_vwap_preload,
+                            )
+                            if _prewarm_symbols:
+                                LOGGER.info(
+                                    "VWAP_PREWARM_SCHEDULED symbols=%s target_bars=%d",
+                                    ",".join(_prewarm_symbols),
+                                    vwap_prewarmer.target_bars,
+                                )
 
                         # Universe summary + per-symbol pipeline status after
                         # a dynamic-universe mutation so operators can see
