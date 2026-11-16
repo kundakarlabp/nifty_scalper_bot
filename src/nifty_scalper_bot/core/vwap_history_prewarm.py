@@ -1,7 +1,11 @@
-"""Non-blocking, bounded VWAP option-history prewarming.
+"""Purpose: Non-blocking, bounded history prewarming for selected NIFTY options.
 
-Uses the canonical runtime history owner supplied by the caller; never fetches
-directly from the broker and never changes execution or strategy admission.
+Responsibilities: Prioritize selected and nearby same-expiry CE/PE contracts,
+deduplicate outstanding tasks, and enforce a per-symbol cooldown.
+Ownership: The caller's canonical market-data history orchestrator performs
+all broker/history work and synchronizes the runner and indicator caches.
+Safety: Best-effort diagnostic optimization; never alter trigger requirements,
+risk thresholds, order routing, or global execution readiness.
 """
 from __future__ import annotations
 
