@@ -6,6 +6,7 @@ SMC confirmation observations from current execution permission.
 Boundaries: Pure computation on already captured runtime and strategy telemetry.
 Safety: Incomplete information yields UNKNOWN, not an invented eligible trade.
 """
+
 from __future__ import annotations
 
 import os
@@ -81,8 +82,10 @@ def build_strategy_readiness(
             "awaiting_orb_retest",
         )
     )
-    orb_status = "RANGE_EVALUATED_RECENTLY" if past_full_range else (
-        "AWAITING_RANGE_OR_EVIDENCE" if orb_window else "UNKNOWN"
+    orb_status = (
+        "RANGE_EVALUATED_RECENTLY"
+        if past_full_range
+        else ("AWAITING_RANGE_OR_EVIDENCE" if orb_window else "UNKNOWN")
     )
     lifecycle = _mapping(signals.get("setup_lifecycle"))
     active = lifecycle.get("active") or []
@@ -90,21 +93,25 @@ def build_strategy_readiness(
         isinstance(row, Mapping)
         and str(row.get("strategy", "")).upper() == "SMC"
         and row.get("stage") == "CONFIRMING"
-        for row in active if isinstance(active, list)
+        for row in active
+        if isinstance(active, list)
     )
     smc_reason = _dominant_reason(signals, "SMC")
     smc_status = (
-        "AWAITING_CONFIRMATION" if smc_confirming
-        else "RECENT_CONFIRMATION_WAIT"
-        if smc_reason
-        in {"smc_awaiting_confirmation", "smc_trend_corroboration_missing"}
-        else "NO_ACTIVE_SETUP_OBSERVED" if smc_reason
-        else "UNKNOWN"
+        "AWAITING_CONFIRMATION"
+        if smc_confirming
+        else (
+            "RECENT_CONFIRMATION_WAIT"
+            if smc_reason
+            in {"smc_awaiting_confirmation", "smc_trend_corroboration_missing"}
+            else "NO_ACTIVE_SETUP_OBSERVED" if smc_reason else "UNKNOWN"
+        )
     )
     return {
         "VWAPPro": {
             "state": vwap_status,
-            "ce": pairs["ce"], "pe": pairs["pe"],
+            "ce": pairs["ce"],
+            "pe": pairs["pe"],
             "required_bars": required,
             "recent_no_vote_reason": _dominant_reason(signals, "VWAPPro"),
             "basis": "minimum_cached_mdm_runner_indicator_bars",
