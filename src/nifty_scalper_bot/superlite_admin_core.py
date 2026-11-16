@@ -466,6 +466,9 @@ def status_snapshot() -> dict[str, Any]:
         "daily_loss_cap_rupees": risk.get("max_day_loss_rupees"),
         "performance_evidence": "canonical_ledger_report_required",
     }
+    strategy_readiness = trading.get("strategy_readiness") or {}
+    if not engine_http_responsive:
+        strategy_readiness = {}
     data = {
         "service_process_known": _service_process_known(),
         "process_up": bool(livez) and engine_http_responsive,
@@ -485,9 +488,7 @@ def status_snapshot() -> dict[str, Any]:
         "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},
         "reconciliation": trading.get("reconciliation") or {},
-        "strategy_readiness": (
-            trading.get("strategy_readiness") or {}
-        ) if engine_http_responsive else {},
+        "strategy_readiness": strategy_readiness,
         "primary_blocker": trading.get("primary_blocker") or (blockers[0] if blockers else None),
         "blockers": blockers,
         "operational_blockers": operational_blockers,
