@@ -309,9 +309,25 @@ def render() -> None:
             "warn" if status.get("stale") else "",
         )
         + '</div><div class="cards">'
-        + card("ORB range", "EVALUATED (RECENT)" if orb.get("state") == "RANGE_EVALUATED_RECENTLY" else "WAITING / UNKNOWN")
-        + card("SMC setup", "AWAITING CONFIRMATION" if smc.get("state") in {"AWAITING_CONFIRMATION", "RECENT_CONFIRMATION_WAIT"} else smc.get("state") or "UNKNOWN")
-        + card("VWAP history", f"CE {vwap_ce.get('usable_bars') if vwap_ce.get('usable_bars') is not None else '?'} / {vwap_target} · PE {vwap_pe.get('usable_bars') if vwap_pe.get('usable_bars') is not None else '?'} / {vwap_target}", "warn" if vwap.get("state") == "WARMING" else "")
+        + card(
+            "ORB range",
+            "EVALUATED (RECENT)"
+            if orb.get("state") == "RANGE_EVALUATED_RECENTLY"
+            else "WAITING / UNKNOWN",
+        )
+        + card(
+            "SMC setup",
+            "AWAITING CONFIRMATION"
+            if smc.get("state")
+            in {"AWAITING_CONFIRMATION", "RECENT_CONFIRMATION_WAIT"}
+            else smc.get("state") or "UNKNOWN",
+        )
+        + card(
+            "VWAP history",
+            f"CE {vwap_ce.get('usable_bars', '?')} / {vwap_target}"
+            f" · PE {vwap_pe.get('usable_bars', '?')} / {vwap_target}",
+            "warn" if vwap.get("state") == "WARMING" else "",
+        )
         + card("Strategy evidence", "RECENT / READ-ONLY")
         + "</div>" + feed_html(rows),
         unsafe_allow_html=True,
