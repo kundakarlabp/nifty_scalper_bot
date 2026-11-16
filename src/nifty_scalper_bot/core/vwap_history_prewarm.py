@@ -7,6 +7,7 @@ all broker/history work and synchronizes the runner and indicator caches.
 Safety: Best-effort diagnostic optimization; never alter trigger requirements,
 risk thresholds, order routing, or global execution readiness.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -89,7 +90,8 @@ class VwapHistoryPrewarmer:
         except Exception as exc:
             LOGGER.warning(
                 "VWAP_PREWARM_FAILED symbol=%s error_type=%s",
-                symbol, type(exc).__name__,
+                symbol,
+                type(exc).__name__,
             )
 
     def schedule(
