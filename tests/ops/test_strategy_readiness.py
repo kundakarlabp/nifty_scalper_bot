@@ -21,9 +21,7 @@ def test_strategy_readiness_distinguishes_arming_from_strategy_readiness(monkeyp
             },
             "SMC": {"smc_awaiting_confirmation": 8},
         },
-        "setup_lifecycle": {
-            "active": [{"strategy": "SMC", "stage": "CONFIRMING"}]
-        },
+        "setup_lifecycle": {"active": [{"strategy": "SMC", "stage": "CONFIRMING"}]},
     }
     result = build_strategy_readiness(runtime, signals)
     assert result["VWAPPro"]["state"] == "WARMING"
