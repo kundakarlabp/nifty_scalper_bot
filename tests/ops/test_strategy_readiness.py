@@ -15,7 +15,10 @@ def test_strategy_readiness_distinguishes_arming_from_strategy_readiness(monkeyp
     }
     signals = {
         "no_vote_reason_counts_by_strategy_window": {
-            "ORBPro": {"no_fresh_underlying_breakout": 1, "orb_bar_already_evaluated": 12},
+            "ORBPro": {
+                "no_fresh_underlying_breakout": 1,
+                "orb_bar_already_evaluated": 12,
+            },
             "SMC": {"smc_awaiting_confirmation": 8},
         },
         "setup_lifecycle": {
