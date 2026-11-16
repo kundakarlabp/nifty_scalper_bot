@@ -1334,6 +1334,9 @@ def health_trading():
         getattr(ctx, "position_reconciliation_completed", False)
     )
     signal_observability = _signal_observability(ctx)
+    from nifty_scalper_bot.ops.strategy_readiness import build_strategy_readiness
+
+    strategy_readiness = build_strategy_readiness(structured_status, signal_observability)
     no_trade_diagnostics = _no_trade_diagnostics(
         signal_observability, structured_status.get("minimum_lot_affordability")
     )
@@ -1383,6 +1386,7 @@ def health_trading():
                 ),
             },
             "signal_observability": signal_observability,
+            "strategy_readiness": strategy_readiness,
             "readiness_rejection_timeline": _readiness_rejection_timeline(
                 structured_status,
                 signal_observability,
