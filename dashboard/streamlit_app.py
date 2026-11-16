@@ -94,18 +94,45 @@ elif (trade or {}).get("live_orders_armed"):st.success("Execution path reports L
 else:st.info("Engine online; live orders are not currently armed")
 
 # Strategy readiness is separate from the global LIVE execution permission.
-sr=(trade or {}).get("strategy_readiness") or {}
+sr = (trade or {}).get("strategy_readiness") or {}
 st.subheader("Per-strategy readiness")
-orb=sr.get("ORBPro") or {};smc=sr.get("SMC") or {};vwap=sr.get("VWAPPro") or {}
-readiness_cols=st.columns(3)
-readiness_cols[0].metric("ORB", "RANGE EVALUATED" if orb.get("state")=="RANGE_EVALUATED_RECENTLY" else "UNKNOWN / WAITING")
-readiness_cols[0].caption("Recent: "+label(orb.get("recent_no_vote_reason")))
-readiness_cols[1].metric("SMC", "AWAITING CONFIRMATION" if smc.get("state") in {"AWAITING_CONFIRMATION","RECENT_CONFIRMATION_WAIT"} else label(smc.get("state")))
-readiness_cols[1].caption("Recent: "+label(smc.get("recent_no_vote_reason")))
-_vwap_ce=vwap.get("ce") or {};_vwap_pe=vwap.get("pe") or {};_target=vwap.get("required_bars")
+orb = sr.get("ORBPro") or {}
+smc = sr.get("SMC") or {}
+vwap = sr.get("VWAPPro") or {}
+readiness_cols = st.columns(3)
+readiness_cols[0].metric(
+    "ORB",
+    "RANGE EVALUATED"
+    if orb.get("state") == "RANGE_EVALUATED_RECENTLY"
+    else "UNKNOWN / WAITING",
+)
+readiness_cols[0].caption("Recent: " + label(orb.get("recent_no_vote_reason")))
+readiness_cols[1].metric(
+    "SMC",
+    "AWAITING CONFIRMATION"
+    if smc.get("state") in {"AWAITING_CONFIRMATION", "RECENT_CONFIRMATION_WAIT"}
+    else label(smc.get("state")),
+)
+readiness_cols[1].caption("Recent: " + label(smc.get("recent_no_vote_reason")))
+_vwap_ce = vwap.get("ce") or {}
+_vwap_pe = vwap.get("pe") or {}
+_target = vwap.get("required_bars")
 readiness_cols[2].metric("VWAP", label(vwap.get("state")))
-readiness_cols[2].caption("CE "+label(_vwap_ce.get("usable_bars"))+"/"+label(_target)+" bars · PE "+label(_vwap_pe.get("usable_bars"))+"/"+label(_target)+" bars")
-st.caption("Recent ORB/SMC evidence is diagnostic, not a current entry signal; VWAP bars are the minimum across MDM, runner and indicators.")
+readiness_cols[2].caption(
+    "CE "
+    + label(_vwap_ce.get("usable_bars"))
+    + "/"
+    + label(_target)
+    + " bars · PE "
+    + label(_vwap_pe.get("usable_bars"))
+    + "/"
+    + label(_target)
+    + " bars"
+)
+st.caption(
+    "Recent ORB/SMC evidence is diagnostic, not a current entry signal; "
+    "VWAP bars are the minimum across MDM, runner and indicators."
+)
 
 command_tab,why_tab,funnel_tab,trades_tab,data_tab,timeline_tab,review_tab,logs_tab=st.tabs(["Command Center","Why no trade?","Signal Funnel","Trades","Market & Data","Timeline","Day Review","Raw Logs"])
 with command_tab:
