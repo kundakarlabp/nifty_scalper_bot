@@ -43,6 +43,7 @@ def prioritized_vwap_symbols(
         return ()
     selected = (selected_ce, selected_pe)
     candidates = {s for s in universe if _series_strike(s) is not None}
+
     def rank(symbol: str) -> tuple[int, int, str, str]:
         parsed = _series_strike(symbol)
         if parsed is None:
