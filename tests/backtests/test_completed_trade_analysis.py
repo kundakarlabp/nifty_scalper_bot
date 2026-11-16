@@ -445,6 +445,56 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
     assert quality.blockers == ("known_stale_quote_exit_trades:1",)
 
 
+def test_execution_quality_requires_paired_finite_slippage_on_same_trade() -> None:
+    """Populated JSON keys and unpaired observations cannot certify coverage."""
+    trades = canonicalize_completed_trades(
+        [
+            _trade(
+                "both",
+                1.0,
+                execution_quality={
+                    "entry_slippage_bps": 0.0,
+                    "exit_slippage_bps": 4.0,
+                },
+            ),
+            _trade(
+                "missing-exit",
+                2.0,
+                execution_quality={
+                    "entry_slippage_bps": 1.5,
+                    "exit_slippage_bps": None,
+                },
+            ),
+            _trade(
+                "boolean-entry",
+                3.0,
+                execution_quality={
+                    "entry_slippage_bps": True,
+                    "exit_slippage_bps": 7.0,
+                },
+            ),
+            _trade(
+                "nan-entry",
+                4.0,
+                execution_quality={
+                    "entry_slippage_bps": float("nan"),
+                    "exit_slippage_bps": 0.0,
+                },
+            ),
+        ]
+    )
+
+    report = execution_data_quality(trades)
+    assert report.total_trades == 4
+    assert report.measured_quality_trades == 1
+    assert report.measured_quality_fraction == 0.25
+    assert report.entry_slippage_samples == 2
+    assert report.exit_slippage_samples == 3
+    assert report.median_entry_slippage_bps == 0.75
+    assert report.median_exit_slippage_bps == 4.0
+    assert report.blockers == ("execution_quality_coverage:1/4",)
+
+
 def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance() -> (
     None
 ):
