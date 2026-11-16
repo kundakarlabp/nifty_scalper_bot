@@ -15,9 +15,12 @@ PE = "NFO:NIFTY26N1725250PE"
 
 def test_prewarm_prioritizes_selected_then_same_expiry_adjacent_strikes():
     basket = {
-        CE, PE,
-        "NFO:NIFTY26N1725200CE", "NFO:NIFTY26N1725200PE",
-        "NFO:NIFTY26N1725300CE", "NFO:NIFTY26N1725300PE",
+        CE,
+        PE,
+        "NFO:NIFTY26N1725200CE",
+        "NFO:NIFTY26N1725200PE",
+        "NFO:NIFTY26N1725300CE",
+        "NFO:NIFTY26N1725300PE",
         "NFO:NIFTY26N1825250CE",  # different expiry; must not warm
     }
     ordered = prioritized_vwap_symbols(CE, PE, basket)
@@ -46,17 +49,31 @@ async def test_prewarm_deduplicates_requests_and_uses_cooldown():
         CE, PE, [CE, PE], completed_bars=lambda symbol: bars[symbol], hydrate=hydrate
     )
     assert first == (CE, PE)
-    assert prewarmer.schedule(
-        CE, PE, [CE, PE], completed_bars=lambda symbol: bars[symbol], hydrate=hydrate
-    ) == ()
+    assert (
+        prewarmer.schedule(
+            CE,
+            PE,
+            [CE, PE],
+            completed_bars=lambda symbol: bars[symbol],
+            hydrate=hydrate,
+        )
+        == ()
+    )
     await asyncio.sleep(0)
     assert seen == [(CE, 50), (PE, 50)]
     pending.set()
     await asyncio.gather(*prewarmer._inflight.values())
     clock[0] += 91
-    assert prewarmer.schedule(
-        CE, PE, [CE, PE], completed_bars=lambda symbol: bars[symbol], hydrate=hydrate
-    ) == ()
+    assert (
+        prewarmer.schedule(
+            CE,
+            PE,
+            [CE, PE],
+            completed_bars=lambda symbol: bars[symbol],
+            hydrate=hydrate,
+        )
+        == ()
+    )
     assert seen == [(CE, 50), (PE, 50)]
 
 
@@ -68,10 +85,13 @@ async def test_recent_dynamic_hydration_prevents_immediate_repeat_fetch():
     async def hydrate(symbol: str, target: int) -> object:
         raise AssertionError("should not fetch within cooldown")
 
-    assert prewarmer.schedule(
-        CE,
-        PE,
-        [CE],
-        completed_bars=lambda symbol: 41 if symbol == CE else 50,
-        hydrate=hydrate,
-    ) == ()
+    assert (
+        prewarmer.schedule(
+            CE,
+            PE,
+            [CE],
+            completed_bars=lambda symbol: 41 if symbol == CE else 50,
+            hydrate=hydrate,
+        )
+        == ()
+    )
