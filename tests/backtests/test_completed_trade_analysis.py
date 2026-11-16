@@ -453,7 +453,7 @@ def test_execution_quality_requires_paired_finite_slippage_on_same_trade() -> No
                 "both",
                 1.0,
                 execution_quality={
-                    "entry_slippage_bps": 0.0,
+                    "entry_slippage_bps": -4.0,
                     "exit_slippage_bps": 4.0,
                 },
             ),
@@ -481,18 +481,28 @@ def test_execution_quality_requires_paired_finite_slippage_on_same_trade() -> No
                     "exit_slippage_bps": 0.0,
                 },
             ),
+            _trade(
+                "better-exit",
+                5.0,
+                execution_quality={
+                    "entry_slippage_bps": 3.0,
+                    "exit_slippage_bps": -2.0,
+                    "exit_slippage_cost": -9.0,
+                },
+            ),
         ]
     )
 
     report = execution_data_quality(trades)
-    assert report.total_trades == 4
-    assert report.measured_quality_trades == 1
-    assert report.measured_quality_fraction == 0.25
-    assert report.entry_slippage_samples == 2
-    assert report.exit_slippage_samples == 3
-    assert report.median_entry_slippage_bps == 0.75
-    assert report.median_exit_slippage_bps == 4.0
-    assert report.blockers == ("execution_quality_coverage:1/4",)
+    assert report.total_trades == 5
+    assert report.measured_quality_trades == 2
+    assert report.measured_quality_fraction == 0.4
+    assert report.entry_slippage_samples == 3
+    assert report.exit_slippage_samples == 4
+    assert report.median_entry_slippage_bps == 1.5
+    assert report.median_exit_slippage_bps == 2.0
+    assert report.total_execution_shortfall_cost == -9.0
+    assert report.blockers == ("execution_quality_coverage:2/5",)
 
 
 def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance() -> (
