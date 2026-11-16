@@ -69,5 +69,5 @@ async def test_recent_dynamic_hydration_prevents_immediate_repeat_fetch():
         raise AssertionError("should not fetch within cooldown")
 
     assert prewarmer.schedule(
-        CE, PE, [CE], completed_bars=lambda _: 41, hydrate=hydrate
+        CE, PE, [CE], completed_bars=lambda symbol: 41 if symbol == CE else 50, hydrate=hydrate
     ) == ()
