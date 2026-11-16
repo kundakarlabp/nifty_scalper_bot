@@ -485,6 +485,9 @@ def status_snapshot() -> dict[str, Any]:
         "mode": str(mode.get("execution_mode") or ("ENGINE HTTP TIMEOUT" if not engine_http_responsive else "UNKNOWN")).upper(),
         "broker": trading.get("broker") or {},
         "reconciliation": trading.get("reconciliation") or {},
+        "strategy_readiness": (
+            trading.get("strategy_readiness") or {}
+        ) if engine_http_responsive else {},
         "primary_blocker": trading.get("primary_blocker") or (blockers[0] if blockers else None),
         "blockers": blockers,
         "operational_blockers": operational_blockers,
