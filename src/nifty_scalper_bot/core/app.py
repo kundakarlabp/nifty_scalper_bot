@@ -13998,7 +13998,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                         # Background history top-up for selected CE/PE and their
                         # nearby same-expiry contracts; no wait in this loop and
                         # no changes to SMC/ORB execution readiness.
-                        if market_open and ctx.market_data_manager and ctx.strategy_runner:
+                        if (
+                            market_open
+                            and ctx.market_data_manager
+                            and ctx.strategy_runner
+                        ):
                             _prewarm_symbols = vwap_prewarmer.schedule(
                                 incoming_ce or getattr(ctx, "selected_ce", "") or "",
                                 incoming_pe or getattr(ctx, "selected_pe", "") or "",
