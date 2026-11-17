@@ -61,7 +61,10 @@ def replay_stop_retention(
         or not 0 < retention <= 1
         or len(path) < min_samples
     ):
-        return {"ready": False, "reason": "insufficient_executable_path_or_bad_geometry"}
+        return {
+            "ready": False,
+            "reason": "insufficient_executable_path_or_bad_geometry",
+        }
     cost_points = round_trip_cost / quantity
     high = entry
     stop = initial_stop
@@ -175,13 +178,18 @@ def evaluate_adverse_flow_shadow(
             streak.clear()
             continue
         prior_ts = ts
-        adverse = ofi is not None and (ofi <= -threshold if contract_side == "CE" else ofi >= threshold)
+        adverse = ofi is not None and (
+            ofi <= -threshold if contract_side == "CE" else ofi >= threshold
+        )
         if not fresh or not adverse:
             streak.clear()
             continue
         streak.append((ts, ofi, bid))
         streak = streak[-required_observations:]
-        if len(streak) >= required_observations and ts - streak[0][0] <= max_window_seconds:
+        if (
+            len(streak) >= required_observations
+            and ts - streak[0][0] <= max_window_seconds
+        ):
             return {
                 "triggered": True, "policy": "shadow_only",
                 "first_confirmed_ts": ts, "ofi_3s_norm": ofi,
