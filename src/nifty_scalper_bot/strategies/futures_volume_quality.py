@@ -1,8 +1,8 @@
-"""Provenance-preserving completed-bar futures-volume diagnostics.
+"""Purpose: Verify futures volume with completed one-minute bar evidence.
 
-Read-only comparison of the latest completed one-minute FUT volume with
-preceding completed bars in the same India-market session. Missing/ambiguous
-data remain unavailable; quote counter deltas are never promoted to bars.
+Responsibilities: Compute a same-session, prior-bar volume baseline and expose
+source, count and readiness separately from cumulative quote-counter deltas.
+Safety: Missing candles remain unknown; never authorizes a new trade.
 """
 
 from __future__ import annotations
