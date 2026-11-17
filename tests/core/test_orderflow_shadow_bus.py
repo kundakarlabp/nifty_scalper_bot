@@ -19,7 +19,10 @@ def test_shadow_bus_window_and_freshness() -> None:
     seen = read_orderflow_research(symbol, since=999, until=1000.5)
     assert len(seen) == 1
     assert seen[0]["fresh"] is True
-    assert read_orderflow_research(symbol, since=1000.5, until=1001.5)[0]["fresh"] is False
+    assert (
+        read_orderflow_research(symbol, since=1000.5, until=1001.5)[0]["fresh"]
+        is False
+    )
 
 
 def test_shadow_bus_rejects_nonfinite_ofi() -> None:
