@@ -1,7 +1,8 @@
-"""Bounded read-only handoff of existing OrderFlow evidence to trade audits.
+"""Purpose: Share bounded OrderFlow observations with closed-trade research.
 
-One process-local observation channel. It does not submit, cancel, modify,
-confirm, or request a broker order and is never consulted by an entry/exit gate.
+Responsibilities: Cache previously computed three-second OFI evidence from
+the existing strategy evaluation without retrieving new market or broker data.
+Safety: This channel has no entry/exit voting, broker order or risk authority.
 """
 
 from __future__ import annotations
