@@ -56,14 +56,23 @@ def test_adverse_flow_requires_sustained_fresh_samples() -> None:
     result = evaluate_adverse_flow_shadow(samples, contract_side="CE")
     assert result["triggered"] is True
     assert result["first_confirmed_ts"] == 3
-    assert evaluate_adverse_flow_shadow(samples[:2], contract_side="CE")["triggered"] is False
+    assert (
+        evaluate_adverse_flow_shadow(samples[:2], contract_side="CE")["triggered"]
+        is False
+    )
     samples[1]["fresh"] = False
-    assert evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"] is False
+    assert (
+        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"]
+        is False
+    )
 
 
 def test_adverse_flow_pe_reverses_sign_and_rejects_stale_context() -> None:
     samples = [
         {"ts": i, "ofi_3s_norm": 2, "fresh": True} for i in (1, 2, 3)
     ]
-    assert evaluate_adverse_flow_shadow(samples, contract_side="PE")["triggered"] is True
+    assert (
+        evaluate_adverse_flow_shadow(samples, contract_side="PE")["triggered"]
+        is True
+    )
     assert evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"] is False
