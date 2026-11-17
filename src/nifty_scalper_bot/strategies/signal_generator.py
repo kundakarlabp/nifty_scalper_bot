@@ -1707,17 +1707,15 @@ class StrategyManager:
         history_getter = getattr(self._indicator_engine, "get_history", None)
         if active_future and callable(history_getter):
             try:
-                completed_bars = history_getter(
-                    active_future, count=25, field="bars"
-                )
+                completed_bars = history_getter(active_future, count=25, field="bars")
                 volume_quality = analyze_completed_futures_volume(completed_bars)
                 indicators["futures_completed_bar_volume_provenance"] = volume_quality
                 indicators["futures_completed_bar_volume_ready"] = bool(
                     volume_quality["ready"]
                 )
-                indicators["futures_completed_bar_volume_ratio"] = (
-                    volume_quality["ratio"]
-                )
+                indicators["futures_completed_bar_volume_ratio"] = volume_quality[
+                    "ratio"
+                ]
                 log_throttled(
                     self._logger,
                     f"futures_bar_volume_quality:{active_future}",
@@ -1734,7 +1732,8 @@ class StrategyManager:
             except (TypeError, ValueError, AttributeError, KeyError) as exc:
                 self._logger.debug(
                     "FUTURES_COMPLETED_BAR_VOLUME_UNAVAILABLE symbol=%s error=%s",
-                    active_future, type(exc).__name__,
+                    active_future,
+                    type(exc).__name__,
                 )
 
         # ═══════════════════════════════════════════════════════════
