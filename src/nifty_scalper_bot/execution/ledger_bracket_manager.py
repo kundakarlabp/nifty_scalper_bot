@@ -26,6 +26,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.orderflow_shadow_bus import read_orderflow_research
 from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
@@ -889,9 +890,37 @@ class LedgerBracketManager(CanonicalBracketManager):
                         research_config.get("_research_executable_path_truncated")
                     ),
                 )
+        # The original temporal OFI series comes from the already-running
+        # strategy evaluation, not a broker poll or a fabricated quote.
+        flow_observations = read_orderflow_research(
+            str(bracket.symbol), since=opened_at, until=closed_at
+        )
+        for observation in flow_observations:
+            timestamp = float(observation["ts"])
+            causal_bid = next(
+                (
+                    candidate.get("bid")
+                    for candidate in reversed(bid_path)
+                    if (
+                        float(candidate.get("ts") or 0) <= timestamp
+                        and timestamp - float(candidate.get("ts") or 0) <= 2.0
+                    )
+                ),
+                None,
+            )
+            observation["exit_bid"] = causal_bid
+        contract_side = str(provenance.get("contract_side") or "").upper()
+        if contract_side not in {"CE", "PE"}:
+            option_symbol = str(bracket.symbol or "").upper()
+            contract_side = (
+                "CE" if option_symbol.endswith("CE")
+                else "PE" if option_symbol.endswith("PE")
+                else ""
+            )
         flow_shadow = evaluate_adverse_flow_shadow(
-            research_config.get("_research_orderflow_path", []),
-            contract_side=str(provenance.get("contract_side") or ""),
+            flow_observations,
+            contract_side=contract_side,
+            max_window_seconds=15.0,
         )
 
         execution_quality = {
@@ -1032,7 +1061,21 @@ class LedgerBracketManager(CanonicalBracketManager):
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
             "trade_quality_shadow": shadow,
-            "adverse_orderflow_shadow": flow_shadow,
+            "adverse_orderflow_shadow": {
+                **flow_shadow,
+                "sample_count": len(flow_observations),
+                "source": "existing_orderflow_3s_causal_research",
+                "not_live_exit_authority": True,
+            },
+            "research_orderflow_path": [
+                {
+                    "ts": item["ts"],
+                    "ofi_3s_norm": item["ofi_3s_norm"],
+                    "fresh": item["fresh"],
+                    "exit_bid": item.get("exit_bid"),
+                }
+                for item in flow_observations
+            ],
             "research_quote_path": {
                 "source": "sampled_cached_option_bid_no_broker_poll",
                 "complete": not bool(
