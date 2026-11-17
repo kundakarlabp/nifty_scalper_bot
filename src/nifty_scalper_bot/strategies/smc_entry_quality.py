@@ -46,9 +46,7 @@ def assess_smc_entry_extension(
     age = age if math.isfinite(age) and age >= 0 else None
 
     distance = (
-        max(0.0, price - vwap)
-        if price is not None and vwap is not None
-        else None
+        max(0.0, price - vwap) if price is not None and vwap is not None else None
     )
     fraction = (distance / vwap) if distance is not None and vwap else None
     atrs = (distance / atr) if distance is not None and atr else None
@@ -71,8 +69,10 @@ def assess_smc_entry_extension(
         "extended_fraction": extended_fraction,
         "extended_atr": extended_atr,
         "aged_sweep": delayed,
-        "combined_extension_flag": bool(extended_fraction and extended_atr and delayed)
-        if enough_data
-        else None,
+        "combined_extension_flag": (
+            bool(extended_fraction and extended_atr and delayed)
+            if enough_data
+            else None
+        ),
         "data_complete": enough_data,
     }
