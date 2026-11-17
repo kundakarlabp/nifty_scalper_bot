@@ -23,7 +23,9 @@ def _bar_time(value: Any) -> datetime | None:
             ts = value
         elif isinstance(value, (int, float)):
             epoch = float(value)
-            ts = datetime.fromtimestamp(epoch / 1000 if epoch > 1e11 else epoch, tz=timezone.utc)
+            ts = datetime.fromtimestamp(
+                epoch / 1000 if epoch > 1e11 else epoch, tz=timezone.utc
+            )
         else:
             ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if ts.tzinfo is None:
@@ -57,7 +59,9 @@ def analyze_completed_futures_volume(
             continue
         if bar.get("volume_delta_untrusted") is True:
             continue
-        stamp = _bar_time(bar.get("timestamp") or bar.get("datetime") or bar.get("time"))
+        stamp = _bar_time(
+            bar.get("timestamp") or bar.get("datetime") or bar.get("time")
+        )
         try:
             volume = float(bar.get("volume"))
         except (TypeError, ValueError, OverflowError):
