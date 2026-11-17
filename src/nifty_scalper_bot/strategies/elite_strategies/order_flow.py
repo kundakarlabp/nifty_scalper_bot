@@ -16,6 +16,7 @@ import time
 import zlib
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.orderflow_shadow_bus import publish_orderflow_research
 from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -650,6 +651,19 @@ class OrderFlowStrategy(EliteStrategy):
                 metadata=metadata,
             )
             _stamp_quote_update_identity(signal.metadata, indicators)
+            # The strategy already computed these values. Publish a bounded,
+            # read-only shadow sample at *every evaluation*, independent of
+            # the source-throttled INFO log. It has no voting/exit authority.
+            try:
+                publish_orderflow_research(
+                    symbol,
+                    ofi_3s_norm=ofi_3s_value,
+                    quote_age_seconds=context_age_seconds,
+                    ofi_updates_3s=ofi_3s_updates,
+                    ofi_span_seconds=ofi_3s_span,
+                )
+            except Exception:
+                LOGGER.debug("ORDERFLOW_SHADOW_PUBLISH_UNAVAILABLE", exc_info=True)
             if self._should_log_context_evidence(symbol, signal.metadata):
                 LOGGER.info(
                     "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "

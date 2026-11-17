@@ -8,6 +8,8 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- _record_trade_quality_shadow captures bounded cached executable bid/ask
+  observations for research only; it never participates in live stop decisions.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
@@ -2212,6 +2214,73 @@ class BracketManager:
         self._sync_exchange_protective_stop(target_bracket)
         return True
 
+    def _record_trade_quality_shadow(self, bracket: BracketState, ltp: float) -> None:
+        """Capture bounded causal quote evidence; do not submit or modify orders.
+
+        Uses the canonical bid/ask cache. Unknown or stale quotes do not become
+        synthetic executable prices. Errors never interrupt hard-stop checks.
+        """
+        try:
+            price, source = self._executable_exit_price(bracket, ltp)
+            now = time.time()
+            config = bracket.trailing_config
+            path = config.setdefault("_research_executable_path", [])
+            if not isinstance(path, list):
+                return
+            previous = path[-1] if path else None
+            must_keep = bool(
+                price <= float(bracket.sl_trigger_price or 0.0)
+                if bracket.side == "BUY"
+                else price >= float(bracket.sl_trigger_price or 0.0)
+            )
+            if (
+                previous is not None
+                and now - float(previous["ts"]) < 0.20
+                and not must_keep
+            ):
+                return
+            if len(path) >= 2048:
+                # A truncated history cannot be promoted as a complete replay.
+                config["_research_executable_path_truncated"] = True
+                del path[:256]
+            quote = self._exit_quotes.get(bracket.symbol)
+            observed_bid = (
+                float(quote[0])
+                if source == "bid" and quote is not None
+                else None
+            )
+            observed_ask = (
+                float(quote[1])
+                if source == "bid" and quote is not None
+                else None
+            )
+            captured_at = (
+                float(quote[2])
+                if source == "bid" and quote is not None
+                else None
+            )
+            observation = {
+                "ts": round(now, 4),
+                "bid": observed_bid,
+                "ask": observed_ask,
+                "source": source,
+                "quote_age_ms": (
+                    round(max(0.0, (now - captured_at) * 1000.0), 2)
+                    if captured_at is not None
+                    else None
+                ),
+                "ltp": round(float(ltp), 4),
+                "virtual_stop": round(float(bracket.sl_trigger_price or 0.0), 4),
+                "exchange_stop": getattr(bracket, "exchange_stop_trigger_price", None),
+            }
+            path.append(observation)
+            config["_research_last_quote"] = observation
+        except Exception:  # noqa: BLE001 - telemetry cannot prevent an exit
+            LOGGER.debug(
+                "TRADE_QUALITY_SHADOW_CAPTURE_UNAVAILABLE symbol=%s",
+                bracket.symbol, exc_info=True,
+            )
+
     # --------------------------------------------------------------------------
     # 3. EXECUTION LOGIC (The "Sniper")
     # --------------------------------------------------------------------------
@@ -2342,6 +2411,9 @@ class BracketManager:
                 )
                 bracket.last_ltp = ltp
                 old_committed_sl = float(bracket.sl_trigger_price or 0.0)
+                # Hot-path shadow capture is O(1), cache-only, and never
+                # feeds back into the broker/stop/target decision.
+                self._record_trade_quality_shadow(bracket, ltp)
 
                 # Update high/low water marks (atomic operations)
                 if bracket.side == "BUY":

@@ -26,6 +26,9 @@ from nifty_scalper_bot.core.strategy_context_builder import (
 )
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.strategies.futures_volume_quality import (
+    analyze_completed_futures_volume,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -1684,6 +1687,10 @@ class StrategyManager:
         indicators.setdefault("futures_volume_ratio", None)
         indicators.setdefault("futures_volume_source", None)
         indicators.setdefault("futures_volume_trusted", False)
+        indicators.setdefault("futures_volume_ratio_source", "quote_counter_delta")
+        indicators.setdefault("futures_completed_bar_volume_ratio", None)
+        indicators.setdefault("futures_completed_bar_volume_ready", False)
+        indicators.setdefault("futures_completed_bar_volume_provenance", None)
         indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
         indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
 
@@ -1693,6 +1700,41 @@ class StrategyManager:
         # Resolve the active contract *before* the first quote fetch, then
         # share one observation between its volume, LTP and VWAP metrics.
         active_future = self._resolve_active_futures_symbol_for_metrics()
+
+        # Distinct, causal completed-bar volume evidence; never overwrite the
+        # legacy quote-counter ratio or silently make a second broker request.
+        # IndicatorEngine.get_history is the canonical in-memory history owner.
+        history_getter = getattr(self._indicator_engine, "get_history", None)
+        if active_future and callable(history_getter):
+            try:
+                completed_bars = history_getter(active_future, count=25, field="bars")
+                volume_quality = analyze_completed_futures_volume(completed_bars)
+                indicators["futures_completed_bar_volume_provenance"] = volume_quality
+                indicators["futures_completed_bar_volume_ready"] = bool(
+                    volume_quality["ready"]
+                )
+                indicators["futures_completed_bar_volume_ratio"] = volume_quality[
+                    "ratio"
+                ]
+                log_throttled(
+                    self._logger,
+                    f"futures_bar_volume_quality:{active_future}",
+                    "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s "
+                    "ready=%s ratio=%s baseline=%s last_bar=%s reason=%s",
+                    active_future,
+                    volume_quality["ready"],
+                    volume_quality["ratio"],
+                    volume_quality["baseline_count"],
+                    volume_quality["bar_timestamp"],
+                    volume_quality["reason"],
+                    interval_sec=300.0,
+                )
+            except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                self._logger.debug(
+                    "FUTURES_COMPLETED_BAR_VOLUME_UNAVAILABLE symbol=%s error=%s",
+                    active_future,
+                    type(exc).__name__,
+                )
 
         # ═══════════════════════════════════════════════════════════
         # 1. FUTURES VOLUME DATA
