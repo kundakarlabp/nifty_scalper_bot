@@ -75,4 +75,7 @@ def test_adverse_flow_pe_reverses_sign_and_rejects_stale_context() -> None:
         evaluate_adverse_flow_shadow(samples, contract_side="PE")["triggered"]
         is True
     )
-    assert evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"] is False
+    assert (
+        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"]
+        is False
+    )
