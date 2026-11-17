@@ -45,7 +45,11 @@ def assess_smc_entry_extension(
         age = math.nan
     age = age if math.isfinite(age) and age >= 0 else None
 
-    distance = max(0.0, price - vwap) if price is not None and vwap is not None else None
+    distance = (
+        max(0.0, price - vwap)
+        if price is not None and vwap is not None
+        else None
+    )
     fraction = (distance / vwap) if distance is not None and vwap else None
     atrs = (distance / atr) if distance is not None and atr else None
     extended_fraction = fraction > reference_fraction if fraction is not None else None
@@ -56,7 +60,9 @@ def assess_smc_entry_extension(
         "policy": "shadow_observation_only",
         "reference_policy": "unvalidated_vwap_analogue",
         "premium_vwap_source": str(vwap_source or "unavailable"),
-        "premium_above_vwap_fraction": round(fraction, 5) if fraction is not None else None,
+        "premium_above_vwap_fraction": (
+            round(fraction, 5) if fraction is not None else None
+        ),
         "premium_distance_atr": round(atrs, 4) if atrs is not None else None,
         "sweep_age_minutes": round(age, 4) if age is not None else None,
         "reference_fraction": reference_fraction,
