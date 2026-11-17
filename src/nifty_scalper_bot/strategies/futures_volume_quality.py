@@ -77,9 +77,7 @@ def analyze_completed_futures_volume(
     chronological = sorted(unique.items())
     latest_ts, latest_vol = chronological[-1]
     session = [pair for pair in chronological if pair[0].date() == latest_ts.date()]
-    baseline = [
-        vol for _, vol in session[:-1][-baseline_bars:] if vol > 0
-    ]
+    baseline = [vol for _, vol in session[:-1][-baseline_bars:] if vol > 0]
     if len(baseline) < min_baseline_bars:
         return {
             **missing,
