@@ -1721,7 +1721,8 @@ class StrategyManager:
                 log_throttled(
                     self._logger,
                     f"futures_bar_volume_quality:{active_future}",
-                    "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s ready=%s ratio=%s baseline=%s last_bar=%s reason=%s",
+                    "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s "
+                    "ready=%s ratio=%s baseline=%s last_bar=%s reason=%s",
                     active_future,
                     volume_quality["ready"],
                     volume_quality["ratio"],
