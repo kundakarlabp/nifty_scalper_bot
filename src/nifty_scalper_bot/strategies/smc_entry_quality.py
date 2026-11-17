@@ -39,6 +39,7 @@ def assess_smc_entry_extension(
     price = _positive(premium)
     vwap = _positive(premium_vwap)
     atr = _positive(option_atr)
+    age: float | None
     try:
         age = float(sweep_age_minutes)
     except (TypeError, ValueError, OverflowError):
