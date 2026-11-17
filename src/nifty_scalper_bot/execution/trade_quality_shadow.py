@@ -1,8 +1,8 @@
-"""Counterfactual trade-quality analytics with no live order authority.
+"""Purpose: Evaluate hypothetical trade exits using causal executable quotes.
 
-All prices must be timestamped executable liquidation bids for long options
-(or asks for short positions). Simulations are observation-only, never broker
-order instructions or validated after-cost profit claims.
+Responsibilities: Replay prespecified stop-retention alternatives and sustained
+adverse order flow, explicitly marking missing observations and unresolved exits.
+Safety: Pure research; no live order authority, lookahead or assumed stop fills.
 """
 
 from __future__ import annotations
