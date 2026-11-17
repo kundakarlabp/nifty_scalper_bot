@@ -9,15 +9,17 @@ from nifty_scalper_bot.execution.trade_quality_shadow import (
 
 def _quotes(*bids: float) -> list[dict]:
     return [
-        {"ts": float(i + 1), "bid": bid, "source": "bid"}
-        for i, bid in enumerate(bids)
+        {"ts": float(i + 1), "bid": bid, "source": "bid"} for i, bid in enumerate(bids)
     ]
 
 
 def test_replay_evaluates_existing_stop_before_any_new_trailing() -> None:
     result = replay_stop_retention(
         _quotes(101, 103, 106, 111, 107, 102, 99),
-        entry=100, initial_stop=95, quantity=65, round_trip_cost=56,
+        entry=100,
+        initial_stop=95,
+        quantity=65,
+        round_trip_cost=56,
         min_samples=5,
     )
     assert result["ready"] is True
@@ -29,7 +31,10 @@ def test_replay_evaluates_existing_stop_before_any_new_trailing() -> None:
 def test_replay_does_not_treat_end_of_data_as_a_profitable_exit() -> None:
     result = replay_stop_retention(
         _quotes(101, 103, 106, 109, 112),
-        entry=100, initial_stop=95, quantity=65, round_trip_cost=56,
+        entry=100,
+        initial_stop=95,
+        quantity=65,
+        round_trip_cost=56,
     )
     assert result["status"] == "unresolved_at_last_sample"
     assert "net_r" not in result
@@ -37,14 +42,27 @@ def test_replay_does_not_treat_end_of_data_as_a_profitable_exit() -> None:
 
 def test_invalid_or_truncated_quote_history_is_not_promotable() -> None:
     samples = [{"ts": float(i), "bid": 110, "source": "ltp"} for i in range(10)]
-    assert replay_stop_retention(
-        samples, entry=100, initial_stop=95, quantity=65, round_trip_cost=56,
-    )["ready"] is False
-    assert compare_profit_retention(
-        _quotes(101, 102, 103, 104, 105),
-        entry=100, initial_stop=95, quantity=65, round_trip_cost=56,
-        samples_truncated=True,
-    )["ready"] is False
+    assert (
+        replay_stop_retention(
+            samples,
+            entry=100,
+            initial_stop=95,
+            quantity=65,
+            round_trip_cost=56,
+        )["ready"]
+        is False
+    )
+    assert (
+        compare_profit_retention(
+            _quotes(101, 102, 103, 104, 105),
+            entry=100,
+            initial_stop=95,
+            quantity=65,
+            round_trip_cost=56,
+            samples_truncated=True,
+        )["ready"]
+        is False
+    )
 
 
 def test_adverse_flow_requires_sustained_fresh_samples() -> None:
@@ -62,20 +80,15 @@ def test_adverse_flow_requires_sustained_fresh_samples() -> None:
     )
     samples[1]["fresh"] = False
     assert (
-        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"]
-        is False
+        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"] is False
     )
 
 
 def test_adverse_flow_pe_reverses_sign_and_rejects_stale_context() -> None:
-    samples = [
-        {"ts": i, "ofi_3s_norm": 2, "fresh": True} for i in (1, 2, 3)
-    ]
+    samples = [{"ts": i, "ofi_3s_norm": 2, "fresh": True} for i in (1, 2, 3)]
     assert (
-        evaluate_adverse_flow_shadow(samples, contract_side="PE")["triggered"]
-        is True
+        evaluate_adverse_flow_shadow(samples, contract_side="PE")["triggered"] is True
     )
     assert (
-        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"]
-        is False
+        evaluate_adverse_flow_shadow(samples, contract_side="CE")["triggered"] is False
     )
