@@ -192,7 +192,10 @@ def evaluate_adverse_flow_shadow(
             streak.clear()
             continue
         prior_ts = ts
-        adverse = ofi is not None and (
+        if ofi is None:
+            streak.clear()
+            continue
+        adverse = (
             ofi <= -threshold if contract_side == "CE" else ofi >= threshold
         )
         if not fresh or not adverse:
