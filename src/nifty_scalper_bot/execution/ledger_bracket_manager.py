@@ -37,6 +37,10 @@ from nifty_scalper_bot.execution.fill_ledger import (
     FillValidationError,
 )
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.execution.trade_quality_shadow import (
+    compare_profit_retention,
+    evaluate_adverse_flow_shadow,
+)
 
 
 class _LedgerReleaseStore:
@@ -838,7 +842,63 @@ class LedgerBracketManager(CanonicalBracketManager):
                 else float(resolved_exit) - broker_stop_trigger
             )
 
+        # Retain causal executable observations, without mistaking a quote at
+        # close for a broker fill/arrival quote. No quote is manufactured when
+        # the cache was stale or the on-tick handler only had LTP.
+        research_config = getattr(bracket, "trailing_config", {}) or {}
+        raw_quality_path = research_config.get("_research_executable_path", [])
+        quality_path = raw_quality_path if isinstance(raw_quality_path, list) else []
+        bid_path = [
+            obs for obs in quality_path
+            if isinstance(obs, Mapping) and obs.get("source") == "bid"
+        ]
+        final_quote = bid_path[-1] if bid_path else None
+        quote_at = _finite(final_quote.get("ts")) if final_quote else None
+        quote_near_exit = bool(
+            quote_at is not None and 0 <= closed_at - quote_at <= 3.0
+        )
+        observed_exit_quote = (
+            {
+                "source": "last_verified_cached_quote_before_close",
+                "bid": final_quote.get("bid"),
+                "ask": final_quote.get("ask"),
+                "quote_at_epoch": quote_at,
+                "age_at_close_ms": round((closed_at - quote_at) * 1000.0, 2),
+                "sampled_quote_age_ms": final_quote.get("quote_age_ms"),
+                "not_a_broker_execution_arrival_quote": True,
+            }
+            if final_quote and quote_near_exit
+            else None
+        )
+        shadow = {"ready": False, "reason": "missing_verified_executable_path"}
+        if (
+            side == "BUY"
+            and initial_risk > 0
+            and entry > 0
+            and quantity > 0
+            and effective_costs is not None
+        ):
+            with suppress(Exception):
+                shadow = compare_profit_retention(
+                    quality_path,
+                    entry=entry,
+                    initial_stop=initial_sl,
+                    quantity=quantity,
+                    round_trip_cost=float(effective_costs.get("total") or 0.0),
+                    samples_truncated=bool(
+                        research_config.get("_research_executable_path_truncated")
+                    ),
+                )
+        flow_shadow = evaluate_adverse_flow_shadow(
+            research_config.get("_research_orderflow_path", []),
+            contract_side=str(provenance.get("contract_side") or ""),
+        )
+
         execution_quality = {
+            "exit_observed_cached_quote": observed_exit_quote,
+            "exit_quote_evidence_source": (
+                "cached_bid_observation" if observed_exit_quote else "unavailable"
+            ),
             "exchange_stop_trigger_price": broker_stop_trigger,
             "stop_trigger_fill_deviation_points": (
                 round(stop_fill_deviation, 4)
@@ -971,6 +1031,36 @@ class LedgerBracketManager(CanonicalBracketManager):
             },
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
+            "trade_quality_shadow": shadow,
+            "adverse_orderflow_shadow": flow_shadow,
+            "research_quote_path": {
+                "source": "sampled_cached_option_bid_no_broker_poll",
+                "complete": not bool(
+                    research_config.get("_research_executable_path_truncated")
+                ),
+                "quote_samples": len(quality_path),
+                "verified_bid_samples": len(bid_path),
+                "first_sample_epoch": (
+                    quality_path[0].get("ts") if quality_path else None
+                ),
+                "last_sample_epoch": (
+                    quality_path[-1].get("ts") if quality_path else None
+                ),
+                # Preserve the compact source path for later chronology checks.
+                # This is a sampled bid path, not tick-complete orderbook data.
+                "samples": [
+                    [
+                        item.get("ts"), item.get("bid"), item.get("ask"),
+                        item.get("source"), item.get("virtual_stop"),
+                        item.get("exchange_stop"),
+                    ]
+                    for item in quality_path
+                    if isinstance(item, Mapping)
+                ],
+            },
+            "entry_market_quality_evidence": provenance.get(
+                "smc_entry_extension_audit"
+            ),
             "execution_quality": execution_quality,
             "exit_reason": str(
                 getattr(bracket, "exit_reason", None) or bracket.close_source or ""
