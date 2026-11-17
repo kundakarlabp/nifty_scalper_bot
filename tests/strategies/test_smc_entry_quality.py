@@ -31,7 +31,10 @@ def test_missing_vwap_does_not_invent_an_extension() -> None:
 
 def test_not_every_aged_smc_sweep_is_extended() -> None:
     result = assess_smc_entry_extension(
-        premium=52, premium_vwap=50, option_atr=3, sweep_age_minutes=4,
+        premium=52,
+        premium_vwap=50,
+        option_atr=3,
+        sweep_age_minutes=4,
         vwap_source="session_vwap",
     )
     assert result["aged_sweep"] is True
