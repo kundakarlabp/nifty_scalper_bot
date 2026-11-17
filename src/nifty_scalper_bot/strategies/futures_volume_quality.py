@@ -63,7 +63,10 @@ def analyze_completed_futures_volume(
             bar.get("timestamp") or bar.get("datetime") or bar.get("time")
         )
         try:
-            volume = float(bar.get("volume"))
+            raw_volume = bar.get("volume")
+            if raw_volume is None:
+                continue
+            volume = float(raw_volume)
         except (TypeError, ValueError, OverflowError):
             continue
         if stamp is None or not math.isfinite(volume) or volume < 0:
