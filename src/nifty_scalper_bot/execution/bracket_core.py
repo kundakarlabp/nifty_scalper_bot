@@ -8,6 +8,8 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- _record_trade_quality_shadow captures bounded cached executable bid/ask
+  observations for research only; it never participates in live stop decisions.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
