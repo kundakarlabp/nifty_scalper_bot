@@ -1,7 +1,8 @@
-"""Read-only SMC premium-extension and sweep-age evidence.
+"""Purpose: Audit SMC sweep age and option-premium extension without a veto.
 
-This module scores diagnostics, never changes entry eligibility or execution.
-An SMC sweep must not inherit VWAP's entry veto without independent validation.
+Responsibilities: Provide numerical VWAP- and ATR-relative stretch flags with
+explicit data completeness for downstream analysis of late liquidity sweeps.
+Safety: Thresholds are research-only, not calibrated live admission gates.
 """
 
 from __future__ import annotations
