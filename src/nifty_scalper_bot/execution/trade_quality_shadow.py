@@ -57,7 +57,10 @@ def replay_stop_retention(
     path = _bid_path(samples)
     risk = entry - initial_stop
     if (
-        risk <= 0 or entry <= 0 or quantity <= 0 or round_trip_cost < 0
+        risk <= 0
+        or entry <= 0
+        or quantity <= 0
+        or round_trip_cost < 0
         or not 0 < retention <= 1
         or len(path) < min_samples
     ):
@@ -111,8 +114,13 @@ def replay_stop_retention(
 
 
 def compare_profit_retention(
-    samples: Any, *, entry: float, initial_stop: float, quantity: int,
-    round_trip_cost: float, samples_truncated: bool = False,
+    samples: Any,
+    *,
+    entry: float,
+    initial_stop: float,
+    quantity: int,
+    round_trip_cost: float,
+    samples_truncated: bool = False,
 ) -> dict[str, Any]:
     """Compare exact same quote path for five prespecified research policies."""
     variants = {
@@ -124,8 +132,10 @@ def compare_profit_retention(
     }
     if samples_truncated:
         return {
-            "ready": False, "reason": "quote_path_truncated",
-            "policies": {}, "policy": "research_only",
+            "ready": False,
+            "reason": "quote_path_truncated",
+            "policies": {},
+            "policy": "research_only",
         }
     return {
         "ready": True,
@@ -138,9 +148,13 @@ def compare_profit_retention(
         ],
         "policies": {
             key: replay_stop_retention(
-                samples, entry=entry, initial_stop=initial_stop,
-                quantity=quantity, round_trip_cost=round_trip_cost,
-                retention=retention, min_lock_after_1p5_r=floor,
+                samples,
+                entry=entry,
+                initial_stop=initial_stop,
+                quantity=quantity,
+                round_trip_cost=round_trip_cost,
+                retention=retention,
+                min_lock_after_1p5_r=floor,
             )
             for key, (retention, floor) in variants.items()
         },
@@ -191,8 +205,11 @@ def evaluate_adverse_flow_shadow(
             and ts - streak[0][0] <= max_window_seconds
         ):
             return {
-                "triggered": True, "policy": "shadow_only",
-                "first_confirmed_ts": ts, "ofi_3s_norm": ofi,
-                "exit_bid": bid, "observations": len(streak),
+                "triggered": True,
+                "policy": "shadow_only",
+                "first_confirmed_ts": ts,
+                "ofi_3s_norm": ofi,
+                "exit_bid": bid,
+                "observations": len(streak),
             }
     return {"triggered": False, "reason": "sustained_fresh_adverse_flow_not_observed"}
