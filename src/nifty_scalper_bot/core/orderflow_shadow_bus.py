@@ -18,8 +18,12 @@ _OBSERVATIONS: dict[str, deque[dict[str, Any]]] = {}
 
 
 def publish_orderflow_research(
-    symbol: str, *, ofi_3s_norm: Any, quote_age_seconds: Any,
-    ofi_updates_3s: Any, ofi_span_seconds: Any,
+    symbol: str,
+    *,
+    ofi_3s_norm: Any,
+    quote_age_seconds: Any,
+    ofi_updates_3s: Any,
+    ofi_span_seconds: Any,
     sample_time: float | None = None,
 ) -> None:
     """Publish a previously computed, causally timestamped signal observation."""
@@ -51,9 +55,9 @@ def publish_orderflow_research(
         if key not in _OBSERVATIONS and len(_OBSERVATIONS) >= 40:
             # Prevent indefinite growth from option rotation; no trade effects.
             oldest = min(
-                _OBSERVATIONS, key=lambda value: (
-                    _OBSERVATIONS[value][-1]["ts"]
-                    if _OBSERVATIONS[value] else 0.0
+                _OBSERVATIONS,
+                key=lambda value: (
+                    _OBSERVATIONS[value][-1]["ts"] if _OBSERVATIONS[value] else 0.0
                 ),
             )
             _OBSERVATIONS.pop(oldest, None)
@@ -67,7 +71,4 @@ def read_orderflow_research(
     key = str(symbol or "").upper().strip()
     with _LOCK:
         values = list(_OBSERVATIONS.get(key, ()))
-    return [
-        dict(value) for value in values
-        if since <= float(value["ts"]) <= until
-    ]
+    return [dict(value) for value in values if since <= float(value["ts"]) <= until]
