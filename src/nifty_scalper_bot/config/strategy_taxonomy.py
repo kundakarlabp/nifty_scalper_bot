@@ -1,12 +1,13 @@
 """Purpose: Own canonical names, context roles and signal-family semantics.
 
-Responsibilities: Normalize strategy identity and prevent the research-only
-RangeVWAPReclaim context model from acquiring live broker-trigger authority.
+Responsibilities: Normalize strategy identity; classify RangeVWAPReclaim as a
+trigger only under the explicit LIVE pilot and otherwise as research context.
 Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -77,8 +78,28 @@ def strategy_taxon(name: str | None) -> StrategyTaxon | None:
     return _TAXONOMY.get(normalize_strategy_name(name))
 
 
+def range_vwap_live_enabled() -> bool:
+    """Explicit real-broker pilot; paper, shadow and ambiguous modes fail closed."""
+
+    def enabled(key: str) -> bool:
+        return str(os.getenv(key, "false")).strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+
+    return (
+        str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
+        and (enabled("ENABLE_LIVE") or enabled("ENABLE_LIVE_TRADING"))
+        and enabled("ENABLE_RANGE_VWAP_LIVE")
+        and not enabled("PAPER__ENABLED")
+        and not enabled("PAPER_MODE")
+        and not enabled("SHADOW_MODE")
+    )
+
+
 def canonical_strategy_role(name: str | None, *, default: str = "trigger") -> str:
     taxon = strategy_taxon(name)
+    if taxon is not None and taxon.key == "range_vwap_reclaim":
+        return "trigger" if range_vwap_live_enabled() else "context"
     return taxon.role if taxon is not None else default
 
 
@@ -99,5 +120,6 @@ __all__ = [
     "canonical_strategy_role",
     "is_context_only_strategy",
     "normalize_strategy_name",
+    "range_vwap_live_enabled",
     "strategy_taxon",
 ]
