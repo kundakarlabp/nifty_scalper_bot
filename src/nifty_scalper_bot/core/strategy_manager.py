@@ -56,6 +56,7 @@ from nifty_scalper_bot.core.research_observability import (
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
+    range_legacy_context_mismatch_only,
     verified_range_vwap_reversal,
 )
 from nifty_scalper_bot.core.smc_flow_confirmation import SustainedSMCFlow
@@ -4562,6 +4563,14 @@ class StrategyManager(_BaseStrategyManager):
             if self._context_vote_is_timestamped(evidence)
             and bool((evidence.metadata or {}).get("context_quality_eligible"))
             and bool((evidence.metadata or {}).get("effective_context_conflict"))
+            and not (
+                range_reversal_verified
+                and range_legacy_context_mismatch_only(
+                    evidence,
+                    expected_symbol=symbol_norm,
+                    expected_quote_version=indicator_map.get("quote_update_version"),
+                )
+            )
         ]
         if conflicting_context:
             # Preserve the SMC trigger lifecycle even when adverse fresh OFI
