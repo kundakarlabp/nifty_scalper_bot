@@ -91,11 +91,7 @@ def _verified_completed_bars(
         }
         if stamp is None or any(value is None for value in numbers.values()):
             return [], "invalid_futures_bar"
-        bar = {
-            key: float(value)
-            for key, value in numbers.items()
-            if value is not None
-        }
+        bar = {key: float(value) for key, value in numbers.items() if value is not None}
         if (
             min(bar["open"], bar["high"], bar["low"], bar["close"]) <= 0
             or bar["volume"] <= 0
