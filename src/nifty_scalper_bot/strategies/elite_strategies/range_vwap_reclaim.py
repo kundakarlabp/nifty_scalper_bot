@@ -557,6 +557,24 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_futures_quote_not_near_confirmed_bar")
             return None
 
+        # The entry band is frozen at pre-confirmation bar close; the actual
+        # trading TARGET is the independent exchange-reported session futures
+        # VWAP from a fresh cached quote, never a rolling pseudo-VWAP.
+        exchange_vwap = _value(indicators.get("futures_vwap"))
+        calculated_vwap = _value(
+            structural.get("session_vwap_before_confirmation")
+        )
+        if (
+            exchange_vwap is None
+            or calculated_vwap is None
+            or indicators.get("futures_vwap_source")
+            != "active_future_quote_vwap"
+            or abs(exchange_vwap - calculated_vwap)
+            > self._cfg.max_exchange_vwap_disagreement_atr * fut_atr
+        ):
+            self._no_vote("range_exchange_session_vwap_unverified_or_divergent")
+            return None
+
         # The option is a long-premium purchase for CE *and* PE. Require
         # positive option-book pressure; CE/PE signed futures directions must
         # not be incorrectly applied to the premium order book.
@@ -617,7 +635,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             "theta": theta,
         }
         entry = _value(structural.get("underlying_entry_close"))
-        target = _value(structural.get("session_vwap_before_confirmation"))
+        target = exchange_vwap
         invalidation = _value(structural.get("invalidation_futures"))
         if entry is None or target is None or invalidation is None:
             self._no_vote("range_structural_prices_unavailable")
@@ -689,6 +707,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "prior_trend_bias": indicators.get("underlying_direction_bias"),
                 "requires_runner_execution_validation": True,
                 "range_structure": structural,
+                "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
                 "setup_reasons": ["closed_session_vwap_band_reentry"],
                 "required_data_present": True,
