@@ -643,7 +643,7 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     assert signal.metadata["research_only"] is False
     assert signal.metadata["range_option_flow_verified"] is True
     assert signal.stop_loss == 94.0
-    assert signal.take_profit == 112.0
+    assert signal.target == 112.0
 
 
 def test_live_range_pilot_rejects_unpriced_or_overbudget_signal(monkeypatch) -> None:
