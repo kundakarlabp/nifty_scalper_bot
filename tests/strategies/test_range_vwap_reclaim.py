@@ -94,6 +94,9 @@ def indicators(**overrides: object) -> dict:
         "lot_size": 65,
         "days_to_expiry": 8,
         "delta": 0.55,
+        # Synthetic known theta; a missing-theta haircut would correctly
+        # reject this narrow 5-point futures-to-VWAP opportunity.
+        "theta": -1.0,
         "ofi_ready": True,
         "ofi_3s_complete": True,
         "ofi_update_count_3s": 4,
@@ -298,7 +301,7 @@ def test_shadow_opposing_trend_bias_still_uses_structural_reversal(monkeypatch) 
     # The *next* chronological finalized candle confirms sustained RANGE.
     engine.history = bars()
     signal = strategy._evaluate_signal(OPTION, indicators(), 100.0)
-    assert signal is not None
+    assert signal is not None, strategy.last_no_vote_reason
     assert signal.metadata["role"] == "context"
     assert signal.metadata["can_trigger"] is False
     assert signal.metadata["research_only"] is True
@@ -389,7 +392,7 @@ def test_bearish_pe_reclaim_mirrors_bullish_futures_without_old_bias(monkeypatch
         ),
         100.0,
     )
-    assert result is not None
+    assert result is not None, strategy.last_no_vote_reason
     assert result.metadata["side"] == "PE"
     assert result.metadata["role"] == "context"
     assert result.metadata["can_trigger"] is False
