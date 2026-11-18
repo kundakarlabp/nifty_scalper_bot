@@ -103,6 +103,8 @@ The manifest-driven `scripts/module_doc_guard.py` runs in the single
 coverage and callable-interface/header changes; human reviewers must verify
 semantic accuracy. Do not auto-generate fabricated descriptions from names.
 
+## Single-task PR rule
+Search open/draft PRs before creating a branch. Reuse the same task PR/head branch and `Task-Key` for all corrections; iterate with focused draft checks, then require full exact-head CI when ready. Close only demonstrably superseded PRs with documented SHA/equivalence evidence. Do not delete divergent safety/research branches or bypass broker-safe deployment. See `docs/CHATGPT_CODE_WORKFLOW.md`.
 ## Validation
 
 Use the single public agent façade rather than hand-building validation commands:
