@@ -91,8 +91,11 @@ def _verified_completed_bars(
         }
         if stamp is None or any(value is None for value in numbers.values()):
             return [], "invalid_futures_bar"
-        assert all(value is not None for value in numbers.values())
-        bar = {key: float(value) for key, value in numbers.items()}
+        bar = {
+            key: float(value)
+            for key, value in numbers.items()
+            if value is not None
+        }
         if (
             min(bar["open"], bar["high"], bar["low"], bar["close"]) <= 0
             or bar["volume"] <= 0
@@ -288,7 +291,7 @@ def assess_option_cost_risk(
     return {**report, "qualified": True, "reason": "modeled_geometry_ok"}
 
 
-class RangeVWAPReclaimStrategy(EliteStrategy):
+class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
     """One elite STRATEGY CATALOG entry; never a live order trigger."""
 
     def __init__(
