@@ -130,16 +130,17 @@ def _verified_completed_bars(
     anchor = decision_at.replace(hour=9, minute=15, second=0, microsecond=0)
     if ordered[0][0] != anchor:
         return [], "session_open_anchor_missing"
-    if not 0 <= (
-        decision_at - ordered[-1][0] - timedelta(minutes=1)
-    ).total_seconds() <= 90.0:
+    if (
+        not 0
+        <= (decision_at - ordered[-1][0] - timedelta(minutes=1)).total_seconds()
+        <= 90.0
+    ):
         return [], "futures_completed_bar_stale"
     for left, right in zip(ordered, ordered[1:]):
         if right[0] - left[0] != timedelta(minutes=1):
             return [], "futures_history_gap"
     return [
-        {"timestamp": stamp.isoformat(), **bar}
-        for stamp, bar in ordered
+        {"timestamp": stamp.isoformat(), **bar} for stamp, bar in ordered
     ], "verified"
 
 
@@ -240,9 +241,7 @@ def assess_range_vwap_reclaim(
     if body_fraction < config.min_reclaim_body_fraction:
         return {**evidence, "reason": "weak_reclaim_body"}
 
-    reentry = max(
-        config.min_band_reentry_atr * atr, 0.05 * band
-    )
+    reentry = max(config.min_band_reentry_atr * atr, 0.05 * band)
     remaining = config.min_remaining_center_gap_atr * atr
     last_close = float(latest["close"])
     bullish = bool(
@@ -266,9 +265,7 @@ def assess_range_vwap_reclaim(
     if bullish == bearish:
         return {**evidence, "reason": "no_completed_band_reentry"}
     side = "CE" if bullish else "PE"
-    invalidation = (
-        float(previous["low"]) if bullish else float(previous["high"])
-    )
+    invalidation = float(previous["low"]) if bullish else float(previous["high"])
     return {
         **evidence,
         "qualified": True,
