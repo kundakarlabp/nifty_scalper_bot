@@ -6,17 +6,21 @@ Responsibilities:
 - independent_same_side_confirmation checks corroborating evidence.
 
 Boundaries: Pure vote policy; no quote fetching, symbol selection or order entry.
-Safety: Context-only votes cannot create a trigger or override direction.
+Safety: Context-only votes cannot create triggers; range reversal requires a
+separately attested structural and option-flow contract in LIVE pilot mode.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     is_context_only_strategy,
+    normalize_strategy_name,
+    range_vwap_live_enabled,
 )
 
 _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
@@ -26,6 +30,48 @@ _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 class SetupGateDecision:
     passed: bool
     reason: str | None = None
+
+
+def verified_range_vwap_reversal(
+    metadata: Mapping[str, Any], *, strategy: str | None, side: str
+) -> bool:
+    """Authorize only the internally generated LIVE range reversal contract.
+
+    This is not a broker-risk override: the runner validates execution price,
+    affordability, stop, exposure and protective-order readiness independently.
+    """
+    if not range_vwap_live_enabled():
+        return False
+    if normalize_strategy_name(strategy) != "range_vwap_reclaim":
+        return False
+    if metadata.get("role") != "trigger" or metadata.get("setup_pass") is not True:
+        return False
+    if metadata.get("range_option_flow_verified") is not True:
+        return False
+    structure = metadata.get("range_structure")
+    economics = metadata.get("option_cost_risk")
+    if not isinstance(structure, Mapping) or not isinstance(economics, Mapping):
+        return False
+    if (
+        structure.get("qualified") is not True
+        or structure.get("side") != side
+        or structure.get("reversal_direction_source")
+        != "two_completed_futures_candles"
+        or economics.get("qualified") is not True
+        or economics.get("model_only") is not True
+    ):
+        return False
+    try:
+        risk = float(economics["worst_stop_loss_including_costs"])
+        rr = float(economics["net_reward_risk"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        isfinite(risk)
+        and isfinite(rr)
+        and 0 < risk <= 773.0
+        and rr >= 1.5
+    )
 
 
 def is_permanent_context_only(evidence: Any) -> bool:
@@ -139,4 +185,5 @@ __all__ = [
     "partition_votes",
     "setup_gate_decision",
     "vote_role",
+    "verified_range_vwap_reversal",
 ]
