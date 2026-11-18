@@ -100,6 +100,7 @@ from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.config.strategy_taxonomy import normalize_strategy_name
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
     active_contract_selection_from_basket,
@@ -19876,8 +19877,8 @@ class StrategyRunner:
                 if not verified_range_vwap_final_order_risk(
                     dict(signal.metadata or {}),
                     strategy=strategy_name,
-                    symbol=signal.symbol,
-                    final_symbol=str(trade_symbol or base_symbol),
+                    symbol=normalize_symbol(signal.symbol),
+                    final_symbol=normalize_symbol(trade_symbol or base_symbol),
                     broker_quantity=int(qty),
                     broker_lot_size=int(lot_size),
                     entry_price=float(price or 0.0),
