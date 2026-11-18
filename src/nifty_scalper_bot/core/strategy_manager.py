@@ -3233,6 +3233,9 @@ class StrategyManager(_BaseStrategyManager):
             active_fut = self._resolve_active_futures_symbol_for_metrics()
             fut_ctx_symbol = canonical_nifty_future_symbol((fut_ctx or {}).get("symbol") if isinstance(fut_ctx, dict) else None)
             active_fut_canonical = canonical_nifty_future_symbol(active_fut)
+            # Canonical cached contract identity for read-only range research.
+            # Derived from the existing resolver, not from an option strike.
+            indicators["active_futures_symbol"] = active_fut_canonical
             if fut_ctx_symbol and active_fut_canonical and fut_ctx_symbol != active_fut_canonical:
                 fut_ctx = {}
                 indicators.setdefault("context_discard_reasons", []).append("stale_futures_context_discarded")
