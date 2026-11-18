@@ -251,8 +251,18 @@ def assess_option_cost_risk(
         return {"qualified": False, "reason": "option_stop_geometry_invalid"}
     slippage = config.slippage_stress_bps / 10_000
     paid = ask * (1 + slippage)
-    stop = (ask - stop_points) * (1 - slippage)
-    target = (ask + config.gross_target_r * stop_points) * (1 - slippage)
+    # A long option is bought at the ask, but must be liquidated at the bid.
+    # Include the *observed full entry spread* again at the exit as a
+    # conservative stress proxy, on top of adverse slippage and exchange fees.
+    # This is not a prediction of future spread or guaranteed stop liquidity.
+    spread_points = ask - bid
+    stop = (ask - stop_points) * (1 - slippage) - spread_points
+    target = (
+        (ask + config.gross_target_r * stop_points) * (1 - slippage)
+        - spread_points
+    )
+    if stop <= 0 or target <= paid:
+        return {"qualified": False, "reason": "liquidation_price_invalid"}
     stop_cost = estimate_round_trip_cost(
         entry_price=paid, exit_price=stop, quantity=quantity
     ).total
@@ -267,6 +277,7 @@ def assess_option_cost_risk(
         "model_only": True,
         "observed_contract_lot_size": quantity,
         "slippage_each_side_bps": config.slippage_stress_bps,
+        "modeled_extra_exit_spread_points": round(spread_points, 4),
         "premium_stop_points": round(stop_points, 4),
         "stop_price_model": round(stop, 4),
         "target_price_model": round(target, 4),
