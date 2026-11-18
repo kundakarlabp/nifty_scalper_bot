@@ -1,12 +1,12 @@
 """Purpose: Research-only NIFTY futures SESSION-VWAP reclaim elite strategy.
 
-Responsibilities: Verify all completed minute bars from 09:15, compute a
-pre-confirmation session-VWAP outer band and a secondary 20-minute equilibrium,
-then confirm a fully completed band reentry without look-ahead. The public
-assess_option_cost_risk interface now consumes actual futures target/stop
-distances and verified option delta to project conservative premium reward.
-RangeVWAPReclaimStrategy owns distinct-bar regime confirmation and one
-candidate per excursion, not any broker execution authority.
+Responsibilities: Verify or strictly recover authenticated completed futures
+minutes from 09:15; compare frozen ATR/sigma and session-anchored bands without
+look-ahead; observe structural reclaim independently of later quote admission.
+assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
+basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
+RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
+OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
 Safety: LIVE always produces no vote; no reversal may override the shared
 underlying-direction, broker-stop or capital authorization contracts.
 """
@@ -144,6 +144,48 @@ def _verified_completed_bars(
     ], "verified"
 
 
+def _restore_authenticated_session_bars(
+    live_bars: Any,
+    recovered: Any,
+    *,
+    future: str,
+    decision_at: datetime,
+) -> tuple[Any, str]:
+    """Merge only source-attested, completed 1m local history.
+
+    Recovered bars must carry their original contract, canonical bar start
+    and publication time; a provider that omits provenance cannot restore
+    the 09:15 anchor. The normal structural checker enforces continuity.
+    """
+    if not isinstance(recovered, Sequence) or isinstance(recovered, (str, bytes)):
+        return live_bars, "local_history_recovery_unavailable"
+    live = list(live_bars) if isinstance(live_bars, Sequence) else []
+    verified: list[Mapping[str, Any]] = []
+    for bar in recovered:
+        if not isinstance(bar, Mapping):
+            return live_bars, "unverified_recovered_bar"
+        start = _time(bar.get("timestamp"))
+        available = _time(bar.get("available_at"))
+        if (
+            bar.get("source") != "local_persisted_1m_futures"
+            or canonical_nifty_future_symbol(bar.get("symbol")) != future
+            or bar.get("is_complete") is not True
+            or bar.get("is_provisional") is True
+            or start is None
+            or available is None
+            or start.date() != decision_at.date()
+            or start.second != 0
+            or start.microsecond != 0
+            or not timedelta(minutes=1) <= available - start <= timedelta(minutes=3)
+            or available > decision_at
+        ):
+            return live_bars, "unverified_recovered_bar"
+        verified.append(bar)
+    # Merge by bar identity, preserving independent collision checks: if
+    # cached and in-memory candles disagree, downstream rejects conflict.
+    return [*verified, *live], "authenticated_local_session_recovery"
+
+
 def assess_range_vwap_reclaim(
     bars: Any,
     *,
@@ -206,8 +248,19 @@ def assess_range_vwap_reclaim(
     bar_range = float(latest["high"]) - float(latest["low"])
     candle_body = abs(float(latest["close"]) - float(latest["open"]))
     body_fraction = candle_body / bar_range if bar_range > 0 else 0.0
+    # Shadow comparator only: full-session dispersion, not a replacement
+    # for the frozen 20-bar ATR/sigma entry band.
+    session_sigma = statistics.pstdev(float(r["close"]) for r in history)
+    anchored_band = max(
+        config.band_atr_multiple * atr,
+        config.band_sigma_multiple * session_sigma,
+    )
     evidence: dict[str, Any] = {
         "qualified": False,
+        "candidate_session_anchored_band_points": round(anchored_band, 4),
+        "candidate_session_anchored_vs_primary_ratio": (
+            round(anchored_band / band, 4) if band > 0 else None
+        ),
         "source": "contiguous_session_futures_1m",
         "bar_timestamp": latest["timestamp"],
         "primary_vwap_source": "session_0915_completed_volume_weighted_typical",
@@ -242,7 +295,8 @@ def assess_range_vwap_reclaim(
         return {**evidence, "reason": "weak_reclaim_body"}
 
     reentry = max(config.min_band_reentry_atr * atr, 0.05 * band)
-    remaining = config.min_remaining_center_gap_atr * atr
+    # Reclaim geometry and remaining payoff are independent. Net option RR
+    # below determines whether a genuine structural reclaim is tradable.
     last_close = float(latest["close"])
     bullish = bool(
         float(previous["low"]) < lower
@@ -251,7 +305,7 @@ def assess_range_vwap_reclaim(
         and float(latest["low"]) >= float(previous["low"])
         and last_close > float(latest["open"])
         and last_close > float(previous["close"])
-        and last_close + remaining < min(session_vwap, rolling_center)
+        and last_close < min(session_vwap, rolling_center)
     )
     bearish = bool(
         float(previous["high"]) > upper
@@ -260,7 +314,7 @@ def assess_range_vwap_reclaim(
         and float(latest["high"]) <= float(previous["high"])
         and last_close < float(latest["open"])
         and last_close < float(previous["close"])
-        and last_close - remaining > max(session_vwap, rolling_center)
+        and last_close > max(session_vwap, rolling_center)
     )
     if bullish == bearish:
         return {**evidence, "reason": "no_completed_band_reentry"}
@@ -276,6 +330,8 @@ def assess_range_vwap_reclaim(
         "reachable_futures_distance": round(abs(session_vwap - last_close), 4),
         "invalidation_futures": invalidation,
         "previous_excursion_timestamp": previous["timestamp"],
+        "remaining_vwap_distance_atr": round(abs(session_vwap - last_close) / atr, 4),
+        "reclaim_confirmation_without_minimum_distance_gate": True,
     }
 
 
@@ -287,19 +343,17 @@ def assess_option_cost_risk(
     futures_target_distance: float | None = None,
     futures_stop_distance: float | None = None,
 ) -> dict[str, Any]:
-    """Model reachable session-VWAP premium reward, not arbitrary option TP.
+    """Research-only ask-entry/bid-exit repricing with explicit spot basis.
 
-    Expected premium appreciation uses OBSERVED delta × remaining futures
-    movement with an adverse haircut and theta decay. No gamma windfall is
-    assumed. Actual future fill prices and option Greeks can change.
+    Greeks must be attributed to the NIFTY spot underlying. A contemporaneous
+    spot/futures pair is mandatory; no futures-points=spot-points identity is
+    silently assumed. Fixed-basis and adverse-basis/IV scenarios are disclosed.
     """
-    bid, ask, atr, lot = (
-        _value(option_quote.get("bid")),
-        _value(option_quote.get("ask")),
-        _value(option_quote.get("atr")),
-        _value(option_quote.get("lot_size")),
-    )
-    if lot is None or lot < 1 or lot > 1000 or not lot.is_integer():
+    bid = _value(option_quote.get("bid"))
+    ask = _value(option_quote.get("ask"))
+    atr = _value(option_quote.get("atr"))
+    lot = _value(option_quote.get("lot_size"))
+    if lot is None or not 1 <= lot <= 1000 or not lot.is_integer():
         return {"qualified": False, "reason": "historical_lot_size_unverified"}
     quantity = int(lot)
     if bid is None or ask is None or atr is None or bid <= 0 or ask <= bid or atr <= 0:
@@ -322,24 +376,58 @@ def assess_option_cost_risk(
         or invalidation_gap <= 0
     ):
         return {"qualified": False, "reason": "structural_futures_distance_missing"}
-    spread_pct = (ask - bid) / ask * 100.0
-    if spread_pct > config.max_option_spread_pct:
+    if (ask - bid) / ask * 100 > config.max_option_spread_pct:
         return {"qualified": False, "reason": "option_spread_too_wide"}
 
-    theta = _value(option_quote.get("theta"))
-    if theta is None:
-        # No free assumption of zero theta: adverse haircut when unobserved.
-        theta_loss = ask * config.unknown_theta_haircut_pct / 100
-        theta_source = "unknown_theta_premium_haircut"
-    else:
-        # NSE cash-market session is 375 minutes, not the US 390 minutes.
-        # This is deliberately a conservative intraday theta stress proxy.
-        theta_loss = max(0.0, -theta) * config.assumed_hold_minutes / 375.0
-        theta_source = "observed_theta_daily_375minute_stress"
-    reachable_premium_points = max(
+    spot = _value(option_quote.get("spot_ltp"))
+    future = _value(option_quote.get("futures_ltp"))
+    if spot is None or future is None or spot <= 0 or future <= 0:
+        return {"qualified": False, "reason": "spot_futures_basis_unverified"}
+    if option_quote.get("delta_underlying") != "NIFTY_SPOT":
+        return {"qualified": False, "reason": "option_delta_underlying_unverified"}
+    fut_atr = _value(option_quote.get("futures_atr"))
+    if fut_atr is None or fut_atr <= 0:
+        return {"qualified": False, "reason": "futures_volatility_unverified"}
+    basis = future - spot
+    direction = 1.0 if side == "CE" else -1.0
+    # Constant-basis spot target is explicitly an assumption, stress it.
+    fixed_basis_target = future + direction * distance - basis
+    adverse_spot_distance = max(
         0.0,
-        abs(delta) * distance * config.target_delta_haircut - theta_loss,
+        direction * (fixed_basis_target - spot)
+        - config.adverse_basis_change_atr * fut_atr,
     )
+    theta = _value(option_quote.get("theta"))
+    theta_period = str(option_quote.get("theta_period") or "")
+    if theta is not None and theta_period in {"calendar_day", "trading_day"}:
+        minutes_per_day = 1440.0 if theta_period == "calendar_day" else 375.0
+        theta_loss = max(0.0, -theta) * config.assumed_hold_minutes / minutes_per_day
+        theta_source = "observed_theta_" + theta_period + "_linear_stress"
+    else:
+        theta_loss = ask * config.unknown_theta_haircut_pct / 100.0
+        theta_source = "unverified_theta_convention_premium_haircut"
+
+    gamma = _value(option_quote.get("gamma"))
+    gamma_valid = bool(
+        gamma is not None
+        and gamma >= 0.0
+        and option_quote.get("gamma_underlying") == "NIFTY_SPOT"
+    )
+    vega = _value(option_quote.get("vega_per_iv_point"))
+    vega_valid = bool(
+        vega is not None
+        and vega >= 0.0
+        and option_quote.get("vega_convention") == "per_iv_percentage_point"
+    )
+    iv_penalty = (
+        vega * config.adverse_iv_change_points
+        if vega_valid and vega is not None
+        else ask * config.unknown_iv_haircut_pct / 100.0
+    )
+    # Do not use positive gamma to subsidize conservative entry admission.
+    nominal_gain = abs(delta) * distance - theta_loss
+    adverse_gain = abs(delta) * adverse_spot_distance - theta_loss - iv_penalty
+    reachable_gain = max(0.0, adverse_gain)
     premium_stop_points = max(
         0.75 * atr,
         0.035 * ask,
@@ -347,51 +435,93 @@ def assess_option_cost_risk(
     )
     if premium_stop_points >= ask:
         return {"qualified": False, "reason": "option_stop_geometry_invalid"}
-    if reachable_premium_points <= 0:
+    if reachable_gain <= 0.0:
         return {"qualified": False, "reason": "vwap_target_not_reachable_after_decay"}
-    # Gross reward is capped by both the actual futures session-VWAP
-    # distance and the existing conservative research target multiple.
-    target_gain = min(
-        reachable_premium_points,
-        config.gross_target_r * premium_stop_points,
-    )
-    slippage = config.slippage_stress_bps / 10_000.0
-    paid = ask * (1 + slippage)
-    spread_points = ask - bid
-    stop = (ask - premium_stop_points) * (1 - slippage) - spread_points
-    target = (ask + target_gain) * (1 - slippage) - spread_points
-    if stop <= 0 or target <= paid:
+
+    slippage = config.slippage_stress_bps / 10000.0
+    paid = ask * (1.0 + slippage)
+    spread = ask - bid
+    stop = (ask - premium_stop_points) * (1.0 - slippage) - spread
+    if stop <= 0.0:
         return {"qualified": False, "reason": "liquidation_price_invalid"}
     stop_cost = estimate_round_trip_cost(
         entry_price=paid, exit_price=stop, quantity=quantity
     ).total
-    target_cost = estimate_round_trip_cost(
-        entry_price=paid, exit_price=target, quantity=quantity
-    ).total
     loss = (paid - stop) * quantity + stop_cost
-    reward = (target - paid) * quantity - target_cost
-    net_rr = reward / loss if loss > 0 else 0.0
+
+    def modeled_exit(gain: float) -> dict[str, float]:
+        capped = min(max(0.0, gain), config.gross_target_r * premium_stop_points)
+        exit_bid = (ask + capped) * (1.0 - slippage) - spread
+        fees = estimate_round_trip_cost(
+            entry_price=paid,
+            exit_price=max(exit_bid, 0.01),
+            quantity=quantity,
+        ).total
+        net_reward = (exit_bid - paid) * quantity - fees
+        return {
+            "exit_bid": round(exit_bid, 4),
+            "net_reward": round(net_reward, 2),
+            "net_rr": round(net_reward / loss, 4) if loss > 0 else 0.0,
+        }
+
+    scenarios = {
+        "pre_vwap_80pct": modeled_exit(
+            abs(delta) * min(distance * 0.8, adverse_spot_distance)
+            - theta_loss
+            - iv_penalty
+        ),
+        "at_vwap_fixed_basis": modeled_exit(nominal_gain),
+        "at_vwap_adverse_basis_iv": modeled_exit(reachable_gain),
+        "stalled_time_stop": modeled_exit(-theta_loss - iv_penalty),
+    }
+    # Use the achievable 80%-of-VWAP exit *under stress*, not an optimistic
+    # full-VWAP target, to admit research opportunities.
+    selected = scenarios["pre_vwap_80pct"]
+    net_rr = selected["net_rr"]
     report = {
         "qualified": False,
         "model_only": True,
         "observed_contract_lot_size": quantity,
         "observed_delta": round(delta, 5),
+        "delta_underlying_source": "NIFTY_SPOT",
+        "observed_spot": round(spot, 4),
+        "observed_future": round(future, 4),
+        "observed_basis_points": round(basis, 4),
+        "assumed_spot_target_fixed_basis": round(fixed_basis_target, 4),
+        "adverse_spot_move_points": round(adverse_spot_distance, 4),
         "futures_session_target_points": round(distance, 4),
         "futures_structural_stop_points": round(invalidation_gap, 4),
         "assumed_hold_minutes": config.assumed_hold_minutes,
         "theta_cost_source": theta_source,
         "estimated_theta_cost_points": round(theta_loss, 4),
-        "projected_premium_gain_points": round(reachable_premium_points, 4),
+        "gamma_usable": gamma_valid,
+        "gamma_upside_at_vwap_points": (
+            round(0.5 * float(gamma or 0.0) * distance * distance, 4)
+            if gamma_valid
+            else None
+        ),
+        "vega_usable": vega_valid,
+        "adverse_iv_cost_points": round(iv_penalty, 4),
+        "projected_premium_gain_points": round(reachable_gain, 4),
         "slippage_each_side_bps": config.slippage_stress_bps,
-        "modeled_extra_exit_spread_points": round(spread_points, 4),
+        "modeled_extra_exit_spread_points": round(spread, 4),
         "premium_stop_points": round(premium_stop_points, 4),
         "stop_price_model": round(stop, 4),
-        "vwap_limited_target_price_model": round(target, 4),
+        "vwap_limited_target_price_model": selected["exit_bid"],
         "worst_stop_loss_including_costs": round(loss, 2),
-        "target_net_reward_after_costs": round(reward, 2),
-        "net_reward_risk": round(net_rr, 4),
+        "target_net_reward_after_costs": selected["net_reward"],
+        "net_reward_risk": net_rr,
+        "pricing_scenarios": scenarios,
+        "unmodeled_risks": [
+            "basis_jump",
+            "iv_skew",
+            "quote_depth",
+            "stop_gap",
+            "partial_fills",
+            "latency",
+        ],
     }
-    if loss > config.max_trade_cash_risk:
+    if loss > min(config.max_trade_cash_risk, 773.0):
         return {**report, "reason": "cash_risk_over_cap"}
     if net_rr < config.min_net_reward_risk:
         return {**report, "reason": "after_cost_reward_risk_low"}
@@ -409,6 +539,40 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         self._seen: set[str] = set()
         self._regime_bars: dict[str, tuple[str, int]] = {}
         self._consumed_excursions: set[tuple[str, str, str]] = set()
+        self._opportunities: dict[str, dict[str, Any]] = {}
+        self._active_opportunity: str | None = None
+
+    def _no_vote(self, reason: str) -> None:
+        super()._no_vote(reason)
+        key = self._active_opportunity
+        if key and key in self._opportunities:
+            row = self._opportunities[key]
+            if row.get("status") != "cost_eligible":
+                row["status"] = "rejected"
+                row["dominant_rejection"] = reason
+
+    def get_research_snapshot(self) -> dict[str, Any]:
+        """Compact opportunity counts, explicitly not realized option P&L."""
+        from collections import Counter
+
+        records = list(self._opportunities.values())
+        rejected = Counter(
+            r.get("dominant_rejection")
+            for r in records
+            if r.get("status") == "rejected"
+        )
+        return {
+            "validated_range_evaluations": len(records),
+            "completed_band_reclaims": len(records),
+            "cost_eligible_candidates": sum(
+                r.get("status") == "cost_eligible" for r in records
+            ),
+            "dominant_rejection": rejected.most_common(5),
+            "shadow_net_expectancy": None,
+            "shadow_mfe_mae": None,
+            "option_fills_verified": False,
+            "opportunities": records[-100:],
+        }
 
     def get_required_indicators(self) -> list[str]:
         return []
@@ -450,6 +614,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         current_price: float,
         position: Any | None = None,
     ) -> EliteSignal | None:
+        self._active_opportunity = None
         if canonical_nifty_option_symbol(symbol) is None:
             self._no_vote("not_nifty_option")
             return None
@@ -483,6 +648,85 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._regime_bars.pop(future, None)
             self._no_vote("range_regime_transition_pending")
             return None
+        getter = getattr(self._indicator_engine, "get_history", None)
+        if not callable(getter):
+            self._no_vote("range_futures_history_unavailable")
+            return None
+        try:
+            # Up to 375 1m bars, with a small cushion for late provisional ticks.
+            bars = getter(future, count=400, field="bars")
+        except (TypeError, ValueError, AttributeError, KeyError):
+            self._no_vote("range_futures_history_unavailable")
+            return None
+        structural = assess_range_vwap_reclaim(
+            bars, decision_at=decision_at, config=self._cfg
+        )
+        if structural.get("reason") in {
+            "session_open_anchor_missing",
+            "insufficient_verified_futures_history",
+            "futures_history_gap",
+        }:
+            restored, recovery_reason = _restore_authenticated_session_bars(
+                bars,
+                indicators.get("range_local_history_recovery"),
+                future=future,
+                decision_at=decision_at,
+            )
+            if recovery_reason == "authenticated_local_session_recovery":
+                recovery = assess_range_vwap_reclaim(
+                    restored, decision_at=decision_at, config=self._cfg
+                )
+                if recovery.get("reason") != "conflicting_futures_bar":
+                    structural = recovery
+                    structural["history_recovery"] = recovery_reason
+            else:
+                structural["history_recovery"] = recovery_reason
+        self._maybe_reset_excursions(future, structural)
+        timestamp = str(structural.get("bar_timestamp") or "")
+        if not timestamp or not self._regime_bar_confirmed(future, timestamp):
+            self._no_vote("range_two_completed_regime_bars_required")
+            return None
+        if not structural.get("qualified"):
+            self._no_vote(str(structural["reason"]))
+            return None
+        if structural.get("side") != side:
+            self._no_vote("range_reversal_side_conflict")
+            return None
+        opportunity_key = f"{future}:{structural['bar_timestamp']}:{side}"
+        self._active_opportunity = opportunity_key
+        if opportunity_key not in self._opportunities:
+            minute_of_session = decision_at.hour * 60 + decision_at.minute
+            self._opportunities[opportunity_key] = {
+                "identity": opportunity_key,
+                "underlying_bar": structural["bar_timestamp"],
+                "side": side,
+                "status": "structure_only",
+                "dominant_rejection": None,
+                "target_distance_atr": structural["remaining_vwap_distance_atr"],
+                "session_anchored_band_ratio": structural[
+                    "candidate_session_anchored_vs_primary_ratio"
+                ],
+                "time_bucket": (
+                    "morning"
+                    if minute_of_session < 11 * 60
+                    else "midday" if minute_of_session < 13 * 60 else "afternoon"
+                ),
+                "event_day": indicators.get("verified_event_day"),
+                "expiry_days": indicators.get("days_to_expiry"),
+                "shadow_net_pnl": None,
+                "mfe": None,
+                "mae": None,
+            }
+            if len(self._opportunities) > 512:
+                self._opportunities.pop(next(iter(self._opportunities)))
+            LOGGER.info(
+                "RANGE_VWAP_STRUCTURAL_OPPORTUNITY id=%s side=%s "
+                "target_distance_atr=%s",
+                opportunity_key,
+                side,
+                structural["remaining_vwap_distance_atr"],
+            )
+
         if indicators.get("underlying_direction_state") == "TRANSITION":
             self._no_vote("range_underlying_transition")
             return None
@@ -514,31 +758,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         expiry_days = _value(indicators.get("days_to_expiry"))
         if expiry_days is None or expiry_days < self._cfg.minimum_days_to_expiry:
             self._no_vote("range_expiry_or_expiry_unverified")
-            return None
-
-        getter = getattr(self._indicator_engine, "get_history", None)
-        if not callable(getter):
-            self._no_vote("range_futures_history_unavailable")
-            return None
-        try:
-            # Up to 375 1m bars, with a small cushion for late provisional ticks.
-            bars = getter(future, count=400, field="bars")
-        except (TypeError, ValueError, AttributeError, KeyError):
-            self._no_vote("range_futures_history_unavailable")
-            return None
-        structural = assess_range_vwap_reclaim(
-            bars, decision_at=decision_at, config=self._cfg
-        )
-        self._maybe_reset_excursions(future, structural)
-        timestamp = str(structural.get("bar_timestamp") or "")
-        if not timestamp or not self._regime_bar_confirmed(future, timestamp):
-            self._no_vote("range_two_completed_regime_bars_required")
-            return None
-        if not structural.get("qualified"):
-            self._no_vote(str(structural["reason"]))
-            return None
-        if structural.get("side") != side:
-            self._no_vote("range_reversal_side_conflict")
             return None
 
         # A range reversal is independently defined by two completed futures
@@ -575,20 +794,41 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         # The option is a long-premium purchase for CE *and* PE. Require
         # positive option-book pressure; CE/PE signed futures directions must
         # not be incorrectly applied to the premium order book.
-        ofi = _value(indicators.get("ofi_3s_normalized"))
-        ofi_1s = _value(indicators.get("ofi_1s_normalized"))
-        ofi_span = _value(indicators.get("ofi_3s_span_seconds"))
+        proof = indicators.get("range_orderflow_confirmation")
+        if not isinstance(proof, Mapping):
+            self._no_vote("range_orderflow_handoff_missing")
+            return None
+        vote_stamp = _value(proof.get("vote_timestamp"))
+        source_version = str(proof.get("quote_update_version") or "")
+        expected_version = str(indicators.get("quote_update_version") or "")
+        if (
+            proof.get("candidate_symbol") != symbol
+            or not source_version
+            or not expected_version
+            or source_version != expected_version
+            or proof.get("quote_update_version_source") == "microstructure_fingerprint"
+            or vote_stamp is None
+            or not 0 <= decision_at.timestamp() - vote_stamp <= 2.0
+            or proof.get("quote_readiness_allowed") is not True
+            or proof.get("ofi_reversal_holdoff_evaluated") is not True
+            or proof.get("range_research_holdoff_active") is not False
+        ):
+            self._no_vote("range_orderflow_quote_or_holdoff_unverified")
+            return None
+        ofi = _value(proof.get("ofi_3s_normalized"))
+        ofi_1s = _value(proof.get("ofi_1s_normalized"))
+        ofi_span = _value(proof.get("ofi_3s_span_seconds"))
         try:
-            ofi_updates = int(indicators.get("ofi_update_count_3s") or 0)
+            ofi_updates = int(proof.get("ofi_update_count_3s") or 0)
         except (TypeError, ValueError, OverflowError):
             ofi_updates = 0
-        depth_imbalance = _value(indicators.get("depth_imbalance"))
+        depth_imbalance = _value(proof.get("depth_imbalance"))
         if depth_imbalance is not None and depth_imbalance <= -0.15:
             self._no_vote("range_adverse_option_book_depth")
             return None
         if not (
-            indicators.get("ofi_ready") is True
-            and indicators.get("ofi_3s_complete") is True
+            proof.get("ofi_ready") is True
+            and proof.get("ofi_3s_complete") is True
             and ofi_span is not None
             and ofi_span >= 1.5
             and ofi_updates >= 3
@@ -596,7 +836,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             and ofi >= 0.10
             and ofi_1s is not None
             and ofi_1s >= 0.0
-            and indicators.get("ofi_reversal_holdoff_active") is not True
         ):
             self._no_vote("range_independent_option_flow_unconfirmed")
             return None
@@ -630,6 +869,20 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             "lot_size": indicators.get("lot_size"),
             "delta": delta,
             "theta": theta,
+            "theta_period": indicators.get("theta_period")
+            or greek_map.get("theta_period"),
+            "delta_underlying": indicators.get("delta_underlying")
+            or greek_map.get("delta_underlying"),
+            "gamma": indicators.get("gamma") or greek_map.get("gamma"),
+            "gamma_underlying": indicators.get("gamma_underlying")
+            or greek_map.get("gamma_underlying"),
+            "vega_per_iv_point": indicators.get("vega_per_iv_point")
+            or greek_map.get("vega_per_iv_point"),
+            "vega_convention": indicators.get("vega_convention")
+            or greek_map.get("vega_convention"),
+            "spot_ltp": indicators.get("range_spot_ltp"),
+            "futures_ltp": indicators.get("futures_ltp"),
+            "futures_atr": structural.get("futures_atr"),
         }
         entry = _value(structural.get("underlying_entry_close"))
         target = exchange_vwap
@@ -652,6 +905,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
             return None
+        if self._active_opportunity in self._opportunities:
+            self._opportunities[self._active_opportunity]["status"] = "cost_eligible"
+            self._opportunities[self._active_opportunity]["option_cost_risk"] = budget
 
         setup_id = (
             f"range_session_vwap:{future}:{side}:"
@@ -706,6 +962,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "range_structure": structural,
                 "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
+                "research_opportunity_id": opportunity_key,
                 "setup_reasons": ["closed_session_vwap_band_reentry"],
                 "required_data_present": True,
                 "stale_data_used": False,

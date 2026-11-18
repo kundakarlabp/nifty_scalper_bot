@@ -2350,6 +2350,12 @@ class StrategyManager(_BaseStrategyManager):
             "context_snapshot_version": snapshot_version,
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
             "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
+            "vwap_source": (
+                "active_future_quote_vwap"
+                if role == "futures_context"
+                and _num("exchange_vwap") is not None
+                else "unverified_derived"
+            ),
             "ema_fast": ema_fast,
             "ema_slow": ema_slow, "ema_50": ema_50,
             "ema_fast_source": ema_fast_source,
@@ -3277,6 +3283,15 @@ class StrategyManager(_BaseStrategyManager):
                 indicators.setdefault("spot_context", spot_ctx)
             if fut_fresh:
                 indicators["futures_context"] = fut_ctx
+                indicators["futures_ltp"] = fut_ctx.get("ltp")
+                if fut_ctx.get("vwap_source") == "active_future_quote_vwap":
+                    indicators["futures_vwap"] = fut_ctx.get("vwap")
+                    indicators["futures_vwap_source"] = (
+                        "active_future_quote_vwap"
+                    )
+            if spot_fresh:
+                indicators["range_spot_ltp"] = spot_ctx.get("ltp")
+                indicators["range_spot_context_time"] = spot_ctx.get("timestamp")
             # Underlying direction is an independent market-context authority.
             # Option-premium indicators may trigger a setup but must never authorize
             # the NIFTY direction used to choose CE versus PE.
@@ -3672,6 +3687,52 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             try:
+                if strategy_name == "RangeVWAPReclaim" and symbol_is_option:
+                    fut_id = indicators.get("active_futures_symbol")
+                    local_getter = getattr(
+                        self._data_hub, "get_ohlc_bars", None
+                    )
+                    in_memory_getter = getattr(
+                        self._indicator_engine, "get_history", None
+                    )
+                    if (
+                        fut_id
+                        and callable(local_getter)
+                        and callable(in_memory_getter)
+                    ):
+                        observed = in_memory_getter(
+                            fut_id, count=400, field="bars"
+                        ) or []
+                        first = observed[0] if observed else {}
+                        first_at = (
+                            first.get("timestamp")
+                            if isinstance(first, t.Mapping) else None
+                        )
+                        # No assumption about UTC vs IST serialisation.
+                        start_is_0915 = bool(
+                            first_at is not None
+                            and "T09:15:00" in str(first_at)
+                        )
+                        if not start_is_0915:
+                            # Existing local pipeline only; any missing source,
+                            # symbol or availability timestamp fails in strategy.
+                            key = (
+                                str(fut_id),
+                                int(time.time() // 60),
+                            )
+                            last_key = getattr(
+                                self, "_range_history_recovery_key", None
+                            )
+                            if key != last_key:
+                                self._range_history_recovery_key = key
+                                self._range_history_recovery_rows = (
+                                    local_getter(fut_id, limit=400) or []
+                                )
+                            indicators["range_local_history_recovery"] = (
+                                getattr(
+                                    self, "_range_history_recovery_rows", []
+                                )
+                            )
                 if strategy_name == "SMC":
                     now = time.monotonic()
                     last_diag_map = getattr(self, "_smc_history_diag_last_emitted", {})
@@ -3724,6 +3785,16 @@ class StrategyManager(_BaseStrategyManager):
                 base_signal = strategy.generate_signal(
                     symbol, indicators, current_price, position
                 )
+                # Transfer producer-owned same-evaluation quote evidence only.
+                # Range research must not read an arbitrary indicator holdoff
+                # boolean or reuse the previous option quote's confirmation.
+                if strategy_name == "OrderFlow" and symbol_is_option:
+                    indicators.pop("range_orderflow_confirmation", None)
+                    flow_metadata = getattr(base_signal, "metadata", None)
+                    if isinstance(flow_metadata, t.Mapping):
+                        indicators["range_orderflow_confirmation"] = dict(
+                            flow_metadata
+                        )
             except Exception as exc:  # noqa: BLE001
                 errors.append(strategy.name)
                 error_strategies.append(strategy.name)

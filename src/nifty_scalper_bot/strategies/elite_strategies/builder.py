@@ -48,11 +48,6 @@ LOGGER = get_logger(__name__)
 STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     "smc": ("smc_liquidity", SMCStrategy, "SMC Liquidity"),
     "vwap": ("vwap_pro", VWAPProStrategy, "VWAP Pro Pullback"),
-    "range_vwap": (
-        "range_vwap_reclaim",
-        RangeVWAPReclaimStrategy,
-        "Range VWAP Reclaim Research",
-    ),
     "oi_max_pain": ("oi_max_pain", OIMaxPainStrategy, "OI Mean Reversion"),
     "gamma_scalping": ("gamma_scalping", GammaScalpingStrategy, "Gamma Acceleration"),
     "tuesday_gamma_buyer": (
@@ -62,6 +57,13 @@ STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     ),
     "cpr": ("cpr_breakout", CPRBreakoutStrategy, "CPR Trend Breakout"),
     "order_flow": ("order_flow", OrderFlowStrategy, "Order Flow Imbalance"),
+    # Must follow OrderFlow: it consumes same-evaluation, same-quote proof,
+    # never the preceding evaluation or an absent=False holdoff default.
+    "range_vwap": (
+        "range_vwap_reclaim",
+        RangeVWAPReclaimStrategy,
+        "Range VWAP Reclaim Research",
+    ),
     "bb_squeeze": ("bb_squeeze", BBSqueezeStrategy, "BB Volatility Squeeze"),
     "rsi_div": ("rsi_divergence", RSIDivergenceStrategy, "RSI Divergence"),
     "orb": ("orb_pro", ORBProStrategy, "Opening Range Breakout"),
