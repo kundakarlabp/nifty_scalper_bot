@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Reject new mypy errors in changed production files with existing type debt."""
+"""Purpose: Reject new mypy errors in modified production modules.
+
+Responsibilities: Compare per-file type diagnostics against the main-branch
+baseline and handle intentionally deleted files without invoking mypy on
+nonexistent paths. Keep existing unrelated type debt grandfathered.
+Safety: This CI guard is validation-only and never alters trading code.
+"""
 
 from __future__ import annotations
 
