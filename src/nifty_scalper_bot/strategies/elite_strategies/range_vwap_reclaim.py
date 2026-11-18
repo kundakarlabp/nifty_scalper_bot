@@ -76,6 +76,11 @@ def _weighted_center(rows: Sequence[Mapping[str, Any]]) -> float | None:
 def _verified_completed_bars(
     observed: Any, *, decision_at: datetime, min_history: int
 ) -> tuple[list[dict[str, Any]], str]:
+    """Verify *every* minute from 09:15 to the last completed bar.
+
+    A partial 40-bar tail must never masquerade as an anchored session VWAP.
+    Timestamps are canonical start-of-bar, with availability at the bar end.
+    """
     if not isinstance(observed, Sequence) or isinstance(observed, (str, bytes)):
         return [], "missing_completed_futures_bars"
     decoded: dict[datetime, dict[str, Any]] = {}
@@ -85,13 +90,24 @@ def _verified_completed_bars(
         if raw.get("is_provisional") is True or raw.get("is_complete") is not True:
             continue
         stamp = _time(raw.get("timestamp") or raw.get("datetime") or raw.get("time"))
-        numbers = {
+        if stamp is None:
+            return [], "invalid_futures_timestamp"
+        if stamp.date() != decision_at.date():
+            continue
+        minute = stamp.hour * 60 + stamp.minute
+        if not 9 * 60 + 15 <= minute < 15 * 60 + 30:
+            continue
+        if stamp.second != 0 or stamp.microsecond != 0:
+            return [], "noncanonical_minute_timestamp"
+        if stamp + timedelta(minutes=1) > decision_at:
+            continue
+        values = {
             key: _value(raw.get(key))
             for key in ("open", "high", "low", "close", "volume")
         }
-        if stamp is None or any(value is None for value in numbers.values()):
+        if any(number is None for number in values.values()):
             return [], "invalid_futures_bar"
-        bar = {key: float(value) for key, value in numbers.items() if value is not None}
+        bar = {key: float(value) for key, value in values.items() if value is not None}
         if (
             min(bar["open"], bar["high"], bar["low"], bar["close"]) <= 0
             or bar["volume"] <= 0
@@ -101,27 +117,25 @@ def _verified_completed_bars(
             )
         ):
             return [], "invalid_futures_bar"
-        if stamp.date() != decision_at.date():
-            continue
-        if not (9 * 60 + 15 <= stamp.hour * 60 + stamp.minute < 15 * 60 + 30):
-            continue
-        if stamp + timedelta(minutes=1) > decision_at:
-            continue
-        existing = decoded.get(stamp)
-        if existing is not None and existing != bar:
+        if stamp in decoded and decoded[stamp] != bar:
             return [], "conflicting_futures_bar"
         decoded[stamp] = bar
-    selected = sorted(decoded.items())[-min_history:]
-    if len(selected) < min_history:
+    ordered = sorted(decoded.items())
+    if len(ordered) < min_history:
         return [], "insufficient_verified_futures_history"
-    most_recent = selected[-1][0] + timedelta(minutes=1)
-    if not 0 <= (decision_at - most_recent).total_seconds() <= 90.0:
+    anchor = decision_at.replace(hour=9, minute=15, second=0, microsecond=0)
+    if ordered[0][0] != anchor:
+        return [], "session_open_anchor_missing"
+    if not 0 <= (
+        decision_at - ordered[-1][0] - timedelta(minutes=1)
+    ).total_seconds() <= 90.0:
         return [], "futures_completed_bar_stale"
-    for left, right in zip(selected, selected[1:]):
+    for left, right in zip(ordered, ordered[1:]):
         if right[0] - left[0] != timedelta(minutes=1):
             return [], "futures_history_gap"
     return [
-        {"timestamp": stamp.isoformat(), **bar} for stamp, bar in selected
+        {"timestamp": stamp.isoformat(), **bar}
+        for stamp, bar in ordered
     ], "verified"
 
 
@@ -131,94 +145,135 @@ def assess_range_vwap_reclaim(
     decision_at: datetime,
     config: RangeVWAPReclaimStrategyConfig,
 ) -> dict[str, Any]:
-    """Causal completed-bar structural proof, separate from option execution."""
+    """Qualify a *completed* band re-entry using only prior-bar band inputs.
+
+    Session VWAP is the primary target, never the rolling 20-bar center.
+    The rolling center independently corroborates a plausible local equilibrium.
+    """
     rows, reason = _verified_completed_bars(
         bars, decision_at=decision_at, min_history=config.min_history_bars
     )
     if reason != "verified":
         return {"qualified": False, "reason": reason}
-    previous, latest = rows[-2], rows[-1]
-    prices = [float(r["close"]) for r in rows]
-    ranges = [
-        max(
-            float(row["high"]) - float(row["low"]),
-            abs(float(row["high"]) - float(rows[i - 1]["close"])),
-            abs(float(row["low"]) - float(rows[i - 1]["close"])),
+    history, previous, latest = rows[:-1], rows[-2], rows[-1]
+    if len(history) < 30:
+        return {"qualified": False, "reason": "insufficient_prior_band_history"}
+
+    # The last completed candle confirms the reclaim; its OHLCV must never
+    # influence the already-existing session VWAP or entry band threshold.
+    session_vwap = _weighted_center(history)
+    session_vwap_5m_ago = _weighted_center(history[:-5])
+    rolling_center = _weighted_center(history[-20:])
+    if None in {session_vwap, session_vwap_5m_ago, rolling_center}:
+        return {"qualified": False, "reason": "session_vwap_unavailable"}
+    assert session_vwap is not None
+    assert session_vwap_5m_ago is not None
+    assert rolling_center is not None
+
+    true_ranges = []
+    for i in range(1, len(history)):
+        candle = history[i]
+        previous_close = float(history[i - 1]["close"])
+        true_ranges.append(
+            max(
+                float(candle["high"]) - float(candle["low"]),
+                abs(float(candle["high"]) - previous_close),
+                abs(float(candle["low"]) - previous_close),
+            )
         )
-        for i, row in enumerate(rows)
-        if i > 0
-    ]
-    atr = statistics.mean(ranges[-14:])
+    atr = statistics.mean(true_ranges[-14:])
     if atr <= 0:
         return {"qualified": False, "reason": "futures_atr_unavailable"}
-    center = _weighted_center(rows[-20:])
-    prior_center = _weighted_center(rows[-21:-1])
-    older_center = _weighted_center(rows[-25:-5])
-    if center is None or prior_center is None or older_center is None:
-        return {"qualified": False, "reason": "futures_vwap_unavailable"}
-    closes = prices[-21:-1]
-    sigma = statistics.pstdev(closes)
+    sigma = statistics.pstdev(float(r["close"]) for r in history[-20:])
     band = max(config.band_atr_multiple * atr, config.band_sigma_multiple * sigma)
-    slope_bps = abs(center - older_center) / center * 10_000 / 5
-    path = prices[-26:]
-    travel = sum(abs(b - a) for a, b in zip(path, path[1:]))
-    efficiency = abs(path[-1] - path[0]) / travel if travel > 0 else 1.0
-    width_atr = (
-        max(float(r["high"]) for r in rows[-30:])
-        - min(float(r["low"]) for r in rows[-30:])
+    slope_bps = abs(session_vwap - session_vwap_5m_ago) / session_vwap * 10000 / 5
+    closes = [float(row["close"]) for row in history[-25:]]
+    travel = sum(abs(b - a) for a, b in zip(closes, closes[1:]))
+    efficiency = abs(closes[-1] - closes[0]) / travel if travel > 0 else 1.0
+    width = (
+        max(float(r["high"]) for r in history[-30:])
+        - min(float(r["low"]) for r in history[-30:])
     ) / atr
-    volume_baseline = statistics.mean(float(r["volume"]) for r in rows[-21:-1])
-    rvol = float(latest["volume"]) / volume_baseline
-    evidence = {
+    baseline = statistics.mean(float(r["volume"]) for r in history[-20:])
+    rvol = float(latest["volume"]) / baseline if baseline > 0 else 0.0
+    midpoint_gap_atr = abs(session_vwap - rolling_center) / atr
+    lower, upper = session_vwap - band, session_vwap + band
+    bar_range = float(latest["high"]) - float(latest["low"])
+    candle_body = abs(float(latest["close"]) - float(latest["open"]))
+    body_fraction = candle_body / bar_range if bar_range > 0 else 0.0
+    evidence: dict[str, Any] = {
         "qualified": False,
-        "source": "verified_completed_futures_1m",
+        "source": "contiguous_session_futures_1m",
         "bar_timestamp": latest["timestamp"],
-        "futures_vwap": round(center, 4),
+        "primary_vwap_source": "session_0915_completed_volume_weighted_typical",
+        "session_vwap_before_confirmation": round(session_vwap, 4),
+        "rolling_20m_secondary_center": round(rolling_center, 4),
+        "secondary_divergence_atr": round(midpoint_gap_atr, 4),
+        "futures_vwap": round(session_vwap, 4),
         "futures_atr": round(atr, 4),
         "futures_sigma": round(sigma, 4),
         "band_points": round(band, 4),
-        "vwap_slope_bps_per_min": round(slope_bps, 4),
+        "lower_band_before_confirmation": round(lower, 4),
+        "upper_band_before_confirmation": round(upper, 4),
+        "session_vwap_slope_bps_per_min": round(slope_bps, 4),
         "directional_efficiency": round(efficiency, 4),
-        "range_width_atr": round(width_atr, 4),
+        "range_width_atr": round(width, 4),
         "volume_ratio": round(rvol, 4),
     }
     if slope_bps > config.max_vwap_slope_bps_per_min:
-        return {**evidence, "reason": "futures_vwap_sloping"}
+        return {**evidence, "reason": "session_vwap_sloping"}
     if efficiency > config.max_directional_efficiency:
         return {**evidence, "reason": "directional_trend_not_range"}
-    if not 1.5 <= width_atr <= config.max_range_width_atr:
+    if not 1.5 <= width <= config.max_range_width_atr:
         return {**evidence, "reason": "range_width_unproven"}
+    if midpoint_gap_atr > config.max_secondary_center_deviation_atr:
+        return {**evidence, "reason": "session_rolling_center_disagree"}
     if rvol < config.min_reclaim_volume_ratio:
         return {**evidence, "reason": "reclaim_volume_weak"}
-    if float(latest["high"]) - float(latest["low"]) > 2.0 * atr:
-        return {**evidence, "reason": "impulsive_bar_not_range"}
-    lower = prior_center - band
-    upper = prior_center + band
-    gap = config.min_remaining_center_gap_atr * atr
+    if bar_range <= 0 or bar_range > 2.0 * atr:
+        return {**evidence, "reason": "impulsive_or_invalid_reclaim_bar"}
+    if body_fraction < config.min_reclaim_body_fraction:
+        return {**evidence, "reason": "weak_reclaim_body"}
+
+    reentry = max(
+        config.min_band_reentry_atr * atr, 0.05 * band
+    )
+    remaining = config.min_remaining_center_gap_atr * atr
+    last_close = float(latest["close"])
     bullish = bool(
-        float(previous["low"]) <= lower
-        and float(latest["close"]) > float(previous["close"])
-        and float(latest["close"]) > float(latest["open"])
+        float(previous["low"]) < lower
+        and float(previous["close"]) < lower
+        and last_close >= lower + reentry
         and float(latest["low"]) >= float(previous["low"])
-        and float(latest["close"]) < center - gap
+        and last_close > float(latest["open"])
+        and last_close > float(previous["close"])
+        and last_close + remaining < min(session_vwap, rolling_center)
     )
     bearish = bool(
-        float(previous["high"]) >= upper
-        and float(latest["close"]) < float(previous["close"])
-        and float(latest["close"]) < float(latest["open"])
+        float(previous["high"]) > upper
+        and float(previous["close"]) > upper
+        and last_close <= upper - reentry
         and float(latest["high"]) <= float(previous["high"])
-        and float(latest["close"]) > center + gap
+        and last_close < float(latest["open"])
+        and last_close < float(previous["close"])
+        and last_close - remaining > max(session_vwap, rolling_center)
     )
     if bullish == bearish:
-        return {**evidence, "reason": "no_completed_bar_reclaim"}
+        return {**evidence, "reason": "no_completed_band_reentry"}
+    side = "CE" if bullish else "PE"
+    invalidation = (
+        float(previous["low"]) if bullish else float(previous["high"])
+    )
     return {
         **evidence,
         "qualified": True,
-        "side": "CE" if bullish else "PE",
-        "reason": "completed_bar_range_reclaim",
-        "invalidation_futures": (
-            float(previous["low"]) if bullish else float(previous["high"])
-        ),
+        "side": side,
+        "reason": "precomputed_band_closed_reentry",
+        "reversal_direction_source": "two_completed_futures_candles",
+        "underlying_entry_close": last_close,
+        "reachable_futures_distance": round(abs(session_vwap - last_close), 4),
+        "invalidation_futures": invalidation,
+        "previous_excursion_timestamp": previous["timestamp"],
     }
 
 
