@@ -13,8 +13,19 @@ from scripts.reporting.range_vwap_reclaim_backtest import (
 
 
 def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
-    from tests.strategies.test_range_vwap_reclaim import bars
+    from datetime import datetime, timedelta
+    from math import sin, pi
+    from zoneinfo import ZoneInfo
 
+    start_at = datetime(2026, 11, 18, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    history = []
+    for i in range(40):
+        close = 25250 + 7 * sin(i * pi * 2 / 13)
+        history.append({
+            "timestamp": (start_at + timedelta(minutes=i)).isoformat(),
+            "open": close - .5, "high": close + 2, "low": close - 2,
+            "close": close, "volume": 1000.0,
+        })
     file = tmp_path / "minute.csv"
     with file.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -25,9 +36,7 @@ def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
             ],
         )
         writer.writeheader()
-        for row in bars():
-            from datetime import datetime, timedelta
-
+        for row in history:
             start = datetime.fromisoformat(row["timestamp"])
             writer.writerow(
                 {
