@@ -68,7 +68,7 @@ class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
     max_directional_efficiency: float = 0.35
     max_range_width_atr: float = 6.0
     min_reclaim_volume_ratio: float = 0.85
-    min_remaining_center_gap_atr: float = 0.20
+    min_remaining_center_gap_atr: float = 0.75
     max_option_spread_pct: float = 0.40
     slippage_stress_bps: float = 25.0
     gross_target_r: float = 2.5
