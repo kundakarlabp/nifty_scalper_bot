@@ -224,12 +224,14 @@ def test_only_old_trend_bias_conflict_is_exempt_for_verified_range() -> None:
         "ofi_3s_normalized": 0.17,
         "ofi_1s_normalized": 0.06,
     }
+
     def allowed(**overrides):
         return range_legacy_context_mismatch_only(
             _evidence(strategy="OrderFlow", **{**flow, **overrides}),
             expected_symbol="NFO:NIFTY26NOV25250CE",
             expected_quote_version=123,
         )
+
     assert allowed()
     assert not allowed(microstructure_conflicts_side=True)
     assert not allowed(ofi_conflicts_side=True)
