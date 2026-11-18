@@ -55,6 +55,25 @@ class VWAPProStrategyConfig(EliteStrategyConfig):
 
 
 @dataclass(slots=True)
+class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
+    """Prespecified uncalibrated research thresholds; never live authority."""
+
+    min_history_bars: int = 40
+    band_atr_multiple: float = 0.80
+    band_sigma_multiple: float = 1.10
+    max_vwap_slope_bps_per_min: float = 1.20
+    max_directional_efficiency: float = 0.35
+    max_range_width_atr: float = 6.0
+    min_reclaim_volume_ratio: float = 0.85
+    min_remaining_center_gap_atr: float = 0.20
+    max_option_spread_pct: float = 0.40
+    slippage_stress_bps: float = 25.0
+    gross_target_r: float = 2.5
+    min_net_reward_risk: float = 1.5
+    max_trade_cash_risk: float = 773.0
+
+
+@dataclass(slots=True)
 class OIMaxPainStrategyConfig(EliteStrategyConfig):
     """OI Max Pain: Mean reversion thresholds."""
 
@@ -134,6 +153,9 @@ class EliteStrategiesSettings:
 
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
+    range_vwap: RangeVWAPReclaimStrategyConfig = field(
+        default_factory=RangeVWAPReclaimStrategyConfig
+    )
     oi_max_pain: OIMaxPainStrategyConfig = field(
         default_factory=OIMaxPainStrategyConfig
     )
@@ -167,6 +189,7 @@ __all__ = [
     "EliteStrategyConfig",
     "SMCStrategyConfig",
     "VWAPProStrategyConfig",
+    "RangeVWAPReclaimStrategyConfig",
     "OIMaxPainStrategyConfig",
     "GammaScalpingStrategyConfig",
     "TuesdayGammaBuyerStrategyConfig",
