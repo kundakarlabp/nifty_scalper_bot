@@ -127,7 +127,10 @@ from nifty_scalper_bot.data.pipeline import (
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
-from nifty_scalper_bot.core.strategy_vote_policy import verified_range_vwap_reversal
+from nifty_scalper_bot.core.strategy_vote_policy import (
+    verified_range_vwap_final_order_risk,
+    verified_range_vwap_reversal,
+)
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
@@ -19869,6 +19872,22 @@ class StrategyRunner:
                 or signal.metadata.get("strategy")
                 or "runner"
             )
+            if normalize_strategy_name(strategy_name) == "range_vwap_reclaim":
+                if not verified_range_vwap_final_order_risk(
+                    dict(signal.metadata or {}),
+                    strategy=strategy_name,
+                    symbol=signal.symbol,
+                    final_symbol=str(trade_symbol or base_symbol),
+                    broker_quantity=int(qty),
+                    broker_lot_size=int(lot_size),
+                    entry_price=float(price or 0.0),
+                    ask_price=float(selected_snapshot.get("ask") or 0.0),
+                    stop_price=float(stop_loss or 0.0),
+                    target_price=float(take_profit or 0.0),
+                ):
+                    return _reject_after_dedup(
+                        reason="range_vwap_final_order_cash_risk_or_contract_mismatch",
+                    )
             failure_cd_prefix = f"{base_symbol}|{signal.action}|{strategy_name}|"
             failure_cd_until = max(
                 (
