@@ -6,8 +6,8 @@ from nifty_scalper_bot.core.strategy_vote_policy import (
     is_permanent_context_only,
     partition_votes,
     setup_gate_decision,
-    vote_role,
     verified_range_vwap_reversal,
+    vote_role,
 )
 
 
