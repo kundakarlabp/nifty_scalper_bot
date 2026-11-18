@@ -1700,6 +1700,7 @@ class StrategyManager:
         # Resolve the active contract *before* the first quote fetch, then
         # share one observation between its volume, LTP and VWAP metrics.
         active_future = self._resolve_active_futures_symbol_for_metrics()
+        indicators["active_futures_symbol"] = active_future
 
         # Distinct, causal completed-bar volume evidence; never overwrite the
         # legacy quote-counter ratio or silently make a second broker request.
