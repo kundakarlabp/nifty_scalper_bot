@@ -69,11 +69,24 @@ class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
     max_range_width_atr: float = 6.0
     min_reclaim_volume_ratio: float = 0.85
     min_remaining_center_gap_atr: float = 0.75
+    max_secondary_center_deviation_atr: float = 1.00
+    min_band_reentry_atr: float = 0.10
+    min_reclaim_body_fraction: float = 0.30
+    min_regime_completed_bars: int = 2
     max_option_spread_pct: float = 0.40
     slippage_stress_bps: float = 25.0
+    # Preserve legacy target setting as a *maximum* research ceiling, not
+    # an assumed reachable option target (now futures/delta derived).
     gross_target_r: float = 2.5
     min_net_reward_risk: float = 1.5
     max_trade_cash_risk: float = 773.0
+    min_abs_option_delta: float = 0.25
+    max_abs_option_delta: float = 0.85
+    target_delta_haircut: float = 0.80
+    assumed_hold_minutes: float = 15.0
+    unknown_theta_haircut_pct: float = 1.0
+    minimum_days_to_expiry: int = 1
+    max_near_atm_distance_points: float = 50.0
 
 
 @dataclass(slots=True)
