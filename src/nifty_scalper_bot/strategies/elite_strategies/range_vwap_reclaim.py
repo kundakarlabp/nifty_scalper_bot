@@ -1,9 +1,13 @@
-"""Purpose: Research-only NIFTY futures range / VWAP reclaim elite strategy.
+"""Purpose: Research-only NIFTY futures SESSION-VWAP reclaim elite strategy.
 
-Responsibilities: Read canonical completed 1m futures bars, require a genuinely
-two-sided range and an observed turning candle, then estimate option-side
-transaction costs and adverse risk without submitting a broker order.
-Safety: LIVE always produces no vote; no reversal may override the existing
+Responsibilities: Verify all completed minute bars from 09:15, compute a
+pre-confirmation session-VWAP outer band and a secondary 20-minute equilibrium,
+then confirm a fully completed band reentry without look-ahead. The public
+assess_option_cost_risk interface now consumes actual futures target/stop
+distances and verified option delta to project conservative premium reward.
+RangeVWAPReclaimStrategy owns distinct-bar regime confirmation and one
+candidate per excursion, not any broker execution authority.
+Safety: LIVE always produces no vote; no reversal may override the shared
 underlying-direction, broker-stop or capital authorization contracts.
 """
 
