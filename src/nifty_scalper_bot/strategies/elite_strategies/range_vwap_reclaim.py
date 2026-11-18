@@ -1,12 +1,12 @@
 """Purpose: Research-only NIFTY futures SESSION-VWAP reclaim elite strategy.
 
-Responsibilities: Verify all completed minute bars from 09:15, compute a
-pre-confirmation session-VWAP outer band and a secondary 20-minute equilibrium,
-then confirm a fully completed band reentry without look-ahead. The public
-assess_option_cost_risk interface now consumes actual futures target/stop
-distances and verified option delta to project conservative premium reward.
-RangeVWAPReclaimStrategy owns distinct-bar regime confirmation and one
-candidate per excursion, not any broker execution authority.
+Responsibilities: Verify or strictly recover authenticated completed futures
+minutes from 09:15; compare frozen ATR/sigma and session-anchored bands without
+look-ahead; observe structural reclaim independently of later quote admission.
+assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
+basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
+RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
+OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
 Safety: LIVE always produces no vote; no reversal may override the shared
 underlying-direction, broker-stop or capital authorization contracts.
 """
@@ -142,6 +142,48 @@ def _verified_completed_bars(
     return [
         {"timestamp": stamp.isoformat(), **bar} for stamp, bar in ordered
     ], "verified"
+
+
+def _restore_authenticated_session_bars(
+    live_bars: Any,
+    recovered: Any,
+    *,
+    future: str,
+    decision_at: datetime,
+) -> tuple[Any, str]:
+    """Merge only source-attested, completed 1m local history.
+
+    Recovered bars must carry their original contract, canonical bar start
+    and publication time; a provider that omits provenance cannot restore
+    the 09:15 anchor. The normal structural checker enforces continuity.
+    """
+    if not isinstance(recovered, Sequence) or isinstance(recovered, (str, bytes)):
+        return live_bars, "local_history_recovery_unavailable"
+    live = list(live_bars) if isinstance(live_bars, Sequence) else []
+    verified: list[Mapping[str, Any]] = []
+    for bar in recovered:
+        if not isinstance(bar, Mapping):
+            return live_bars, "unverified_recovered_bar"
+        start = _time(bar.get("timestamp"))
+        available = _time(bar.get("available_at"))
+        if (
+            bar.get("source") != "local_persisted_1m_futures"
+            or canonical_nifty_future_symbol(bar.get("symbol")) != future
+            or bar.get("is_complete") is not True
+            or bar.get("is_provisional") is True
+            or start is None
+            or available is None
+            or start.date() != decision_at.date()
+            or start.second != 0
+            or start.microsecond != 0
+            or not timedelta(minutes=1) <= available - start <= timedelta(minutes=3)
+            or available > decision_at
+        ):
+            return live_bars, "unverified_recovered_bar"
+        verified.append(bar)
+    # Merge by bar identity, preserving independent collision checks: if
+    # cached and in-memory candles disagree, downstream rejects conflict.
+    return [*verified, *live], "authenticated_local_session_recovery"
 
 
 def assess_range_vwap_reclaim(
@@ -603,6 +645,26 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         structural = assess_range_vwap_reclaim(
             bars, decision_at=decision_at, config=self._cfg
         )
+        if structural.get("reason") in {
+            "session_open_anchor_missing",
+            "insufficient_verified_futures_history",
+            "futures_history_gap",
+        }:
+            restored, recovery_reason = _restore_authenticated_session_bars(
+                bars,
+                indicators.get("range_local_history_recovery"),
+                future=future,
+                decision_at=decision_at,
+            )
+            if recovery_reason == "authenticated_local_session_recovery":
+                recovery = assess_range_vwap_reclaim(
+                    restored, decision_at=decision_at, config=self._cfg
+                )
+                if recovery.get("reason") != "conflicting_futures_bar":
+                    structural = recovery
+                    structural["history_recovery"] = recovery_reason
+            else:
+                structural["history_recovery"] = recovery_reason
         self._maybe_reset_excursions(future, structural)
         timestamp = str(structural.get("bar_timestamp") or "")
         if not timestamp or not self._regime_bar_confirmed(future, timestamp):

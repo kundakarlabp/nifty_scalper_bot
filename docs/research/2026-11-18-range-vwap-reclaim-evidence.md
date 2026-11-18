@@ -208,9 +208,12 @@ after broker-state and deployment safety validation.
   observational only. Missing event proof remains unknown. MFE, MAE,
   executable win rate and net expectancy remain *unmeasured* until verified
   point-in-time option books and exits are available.
-- A restart is not allowed to replace missing 09:15 history with a rolling
-  VWAP. Contiguous, authenticated same-session recovery remains a production
-  integration requirement; the model abstains if history is unavailable.
+- A restart cannot replace missing 09:15 history with rolling VWAP.
+  The optional local DataHub recovery reads only existing 1-minute bars,
+  requiring original contract, persisted-source identity, verified completion,
+  and publication timestamps. Incompatible cache rows fail closed. Whether
+  the currently deployed cache actually persists all those attestations must
+  still be checked with runtime provenance; no successful recovery is claimed.
 - This change is a research-only implementation. Source merge does not
   activate the opt-in flag or authorize orders. The modeled stop cap is not
   an upper bound on realized stop-gap losses.

@@ -3687,6 +3687,52 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             try:
+                if strategy_name == "RangeVWAPReclaim" and symbol_is_option:
+                    fut_id = indicators.get("active_futures_symbol")
+                    local_getter = getattr(
+                        self._data_hub, "get_ohlc_bars", None
+                    )
+                    in_memory_getter = getattr(
+                        self._indicator_engine, "get_history", None
+                    )
+                    if (
+                        fut_id
+                        and callable(local_getter)
+                        and callable(in_memory_getter)
+                    ):
+                        observed = in_memory_getter(
+                            fut_id, count=400, field="bars"
+                        ) or []
+                        first = observed[0] if observed else {}
+                        first_at = (
+                            first.get("timestamp")
+                            if isinstance(first, t.Mapping) else None
+                        )
+                        # No assumption about UTC vs IST serialisation.
+                        start_is_0915 = bool(
+                            first_at is not None
+                            and "T09:15:00" in str(first_at)
+                        )
+                        if not start_is_0915:
+                            # Existing local pipeline only; any missing source,
+                            # symbol or availability timestamp fails in strategy.
+                            key = (
+                                str(fut_id),
+                                int(time.time() // 60),
+                            )
+                            last_key = getattr(
+                                self, "_range_history_recovery_key", None
+                            )
+                            if key != last_key:
+                                self._range_history_recovery_key = key
+                                self._range_history_recovery_rows = (
+                                    local_getter(fut_id, limit=400) or []
+                                )
+                            indicators["range_local_history_recovery"] = (
+                                getattr(
+                                    self, "_range_history_recovery_rows", []
+                                )
+                            )
                 if strategy_name == "SMC":
                     now = time.monotonic()
                     last_diag_map = getattr(self, "_smc_history_diag_last_emitted", {})

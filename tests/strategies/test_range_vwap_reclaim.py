@@ -17,6 +17,7 @@ from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
     RangeVWAPReclaimStrategy,
     assess_option_cost_risk,
     assess_range_vwap_reclaim,
+    _restore_authenticated_session_bars,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -101,6 +102,8 @@ def indicators(**overrides: object) -> dict:
         "theta": -1.0,
         "theta_period": "trading_day",
         "delta_underlying": "NIFTY_SPOT",
+        "vega_per_iv_point": 0.01,
+        "vega_convention": "per_iv_percentage_point",
         "range_spot_ltp": 25230.0,
         "futures_ltp": 25245.3,
         "quote_update_version": 123,
@@ -545,3 +548,29 @@ def test_spot_basis_and_delta_provenance_required() -> None:
     assert result["model_only"] is True
     assert result["observed_basis_points"] == 15
     assert result["pricing_scenarios"]["stalled_time_stop"]["net_reward"] < 0
+
+def test_authenticated_history_recovery_preserves_open_anchor() -> None:
+    live = bars()[5:]
+    recovered = []
+    for row in bars()[:5]:
+        bar = dict(row)
+        start = datetime.fromisoformat(bar["timestamp"])
+        bar.update(
+            symbol=FUTURE,
+            source="local_persisted_1m_futures",
+            available_at=(start + timedelta(minutes=1)).isoformat(),
+        )
+        recovered.append(bar)
+    merged, status = _restore_authenticated_session_bars(
+        live, recovered, future=FUTURE, decision_at=decision_at()
+    )
+    assert status == "authenticated_local_session_recovery"
+    assert assess_range_vwap_reclaim(
+        merged, decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig()
+    )["qualified"]
+    recovered[0]["source"] = "unverified_broker_snapshot"
+    _, status = _restore_authenticated_session_bars(
+        live, recovered, future=FUTURE, decision_at=decision_at()
+    )
+    assert status == "unverified_recovered_bar"
