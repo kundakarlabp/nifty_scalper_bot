@@ -127,9 +127,13 @@ def indicators(**overrides: object) -> dict:
             **{
                 key: result.get(key)
                 for key in (
-                    "ofi_ready", "ofi_3s_complete", "ofi_update_count_3s",
-                    "ofi_3s_span_seconds", "ofi_3s_normalized",
-                    "ofi_1s_normalized", "depth_imbalance",
+                    "ofi_ready",
+                    "ofi_3s_complete",
+                    "ofi_update_count_3s",
+                    "ofi_3s_span_seconds",
+                    "ofi_3s_normalized",
+                    "ofi_1s_normalized",
+                    "depth_imbalance",
                 )
             },
         },
@@ -281,8 +285,7 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
     assert a["projected_premium_gain_points"] < 0.55 * 35
     assert a["theta_cost_source"] == "observed_theta_trading_day_linear_stress"
     assert (
-        a["pricing_scenarios"]["at_vwap_fixed_basis"]["net_rr"]
-        >= a["net_reward_risk"]
+        a["pricing_scenarios"]["at_vwap_fixed_basis"]["net_rr"] >= a["net_reward_risk"]
     )
     b = assess_option_cost_risk(
         quote,
@@ -297,9 +300,15 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
 def test_missing_delta_expiry_side_wide_spread_and_high_cash_risk_reject() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     quote = {
-        "bid": 99.8, "ask": 100, "atr": 6, "lot_size": 65,
-        "delta": 0.55, "delta_underlying": "NIFTY_SPOT",
-        "spot_ltp": 25230, "futures_ltp": 25245, "futures_atr": 7,
+        "bid": 99.8,
+        "ask": 100,
+        "atr": 6,
+        "lot_size": 65,
+        "delta": 0.55,
+        "delta_underlying": "NIFTY_SPOT",
+        "spot_ltp": 25230,
+        "futures_ltp": 25245,
+        "futures_atr": 7,
     }
 
     def assess(updated: dict, side: str = "CE", gap: float = 3) -> str:
@@ -485,11 +494,10 @@ def test_same_excursion_requires_real_vwap_reset():
     )
     assert key not in strategy._consumed_excursions
 
+
 def test_reclaim_does_not_require_redundant_remaining_gap() -> None:
     cfg = RangeVWAPReclaimStrategyConfig(min_remaining_center_gap_atr=999.0)
-    proof = assess_range_vwap_reclaim(
-        bars(), decision_at=decision_at(), config=cfg
-    )
+    proof = assess_range_vwap_reclaim(bars(), decision_at=decision_at(), config=cfg)
     assert proof["qualified"] is True, proof
     assert proof["remaining_vwap_distance_atr"] > 0
     assert proof["candidate_session_anchored_band_points"] > 0
@@ -501,9 +509,12 @@ def test_orderflow_absence_is_not_false_holdoff(monkeypatch) -> None:
         RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0), History(bars())
     )
     strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
-    assert strategy._evaluate_signal(
-        OPTION, indicators(range_orderflow_confirmation=None), 100.0
-    ) is None
+    assert (
+        strategy._evaluate_signal(
+            OPTION, indicators(range_orderflow_confirmation=None), 100.0
+        )
+        is None
+    )
     assert strategy.last_no_vote_reason == "range_orderflow_handoff_missing"
     report = strategy.get_research_snapshot()
     assert report["completed_band_reclaims"] == 1
@@ -520,9 +531,12 @@ def test_orderflow_mismatched_quote_fails_closed(monkeypatch) -> None:
         **indicators()["range_orderflow_confirmation"],
         "quote_update_version": 999,
     }
-    assert strategy._evaluate_signal(
-        OPTION, indicators(range_orderflow_confirmation=proof), 100.0
-    ) is None
+    assert (
+        strategy._evaluate_signal(
+            OPTION, indicators(range_orderflow_confirmation=proof), 100.0
+        )
+        is None
+    )
     assert strategy.last_no_vote_reason == (
         "range_orderflow_quote_or_holdoff_unverified"
     )
@@ -531,12 +545,18 @@ def test_orderflow_mismatched_quote_fails_closed(monkeypatch) -> None:
 def test_spot_basis_and_delta_provenance_required() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     quote = {
-        "bid": 99.8, "ask": 100, "atr": 6, "lot_size": 65,
-        "delta": 0.55, "futures_atr": 7,
+        "bid": 99.8,
+        "ask": 100,
+        "atr": 6,
+        "lot_size": 65,
+        "delta": 0.55,
+        "futures_atr": 7,
     }
     inputs = {
-        "config": cfg, "side": "CE",
-        "futures_target_distance": 35, "futures_stop_distance": 3,
+        "config": cfg,
+        "side": "CE",
+        "futures_target_distance": 35,
+        "futures_stop_distance": 3,
     }
     assert assess_option_cost_risk(quote, **inputs)["reason"] == (
         "spot_futures_basis_unverified"
@@ -550,6 +570,7 @@ def test_spot_basis_and_delta_provenance_required() -> None:
     assert result["model_only"] is True
     assert result["observed_basis_points"] == 15
     assert result["pricing_scenarios"]["stalled_time_stop"]["net_reward"] < 0
+
 
 def test_authenticated_history_recovery_preserves_open_anchor() -> None:
     live = bars()[5:]
@@ -568,8 +589,7 @@ def test_authenticated_history_recovery_preserves_open_anchor() -> None:
     )
     assert status == "authenticated_local_session_recovery"
     assert assess_range_vwap_reclaim(
-        merged, decision_at=decision_at(),
-        config=RangeVWAPReclaimStrategyConfig()
+        merged, decision_at=decision_at(), config=RangeVWAPReclaimStrategyConfig()
     )["qualified"]
     recovered[0]["source"] = "unverified_broker_snapshot"
     _, status = _restore_authenticated_session_bars(

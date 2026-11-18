@@ -258,9 +258,9 @@ def assess_range_vwap_reclaim(
     evidence: dict[str, Any] = {
         "qualified": False,
         "candidate_session_anchored_band_points": round(anchored_band, 4),
-        "candidate_session_anchored_vs_primary_ratio": round(
-            anchored_band / band, 4
-        ) if band > 0 else None,
+        "candidate_session_anchored_vs_primary_ratio": (
+            round(anchored_band / band, 4) if band > 0 else None
+        ),
         "source": "contiguous_session_futures_1m",
         "bar_timestamp": latest["timestamp"],
         "primary_vwap_source": "session_0915_completed_volume_weighted_typical",
@@ -393,7 +393,8 @@ def assess_option_cost_risk(
     # Constant-basis spot target is explicitly an assumption, stress it.
     fixed_basis_target = future + direction * distance - basis
     adverse_spot_distance = max(
-        0.0, direction * (fixed_basis_target - spot)
+        0.0,
+        direction * (fixed_basis_target - spot)
         - config.adverse_basis_change_atr * fut_atr,
     )
     theta = _value(option_quote.get("theta"))
@@ -414,7 +415,8 @@ def assess_option_cost_risk(
     )
     vega = _value(option_quote.get("vega_per_iv_point"))
     vega_valid = bool(
-        vega is not None and vega >= 0.0
+        vega is not None
+        and vega >= 0.0
         and option_quote.get("vega_convention") == "per_iv_percentage_point"
     )
     iv_penalty = (
@@ -427,7 +429,9 @@ def assess_option_cost_risk(
     adverse_gain = abs(delta) * adverse_spot_distance - theta_loss - iv_penalty
     reachable_gain = max(0.0, adverse_gain)
     premium_stop_points = max(
-        0.75 * atr, 0.035 * ask, abs(delta) * invalidation_gap * 1.10,
+        0.75 * atr,
+        0.035 * ask,
+        abs(delta) * invalidation_gap * 1.10,
     )
     if premium_stop_points >= ask:
         return {"qualified": False, "reason": "option_stop_geometry_invalid"}
@@ -449,7 +453,8 @@ def assess_option_cost_risk(
         capped = min(max(0.0, gain), config.gross_target_r * premium_stop_points)
         exit_bid = (ask + capped) * (1.0 - slippage) - spread
         fees = estimate_round_trip_cost(
-            entry_price=paid, exit_price=max(exit_bid, 0.01),
+            entry_price=paid,
+            exit_price=max(exit_bid, 0.01),
             quantity=quantity,
         ).total
         net_reward = (exit_bid - paid) * quantity - fees
@@ -462,7 +467,8 @@ def assess_option_cost_risk(
     scenarios = {
         "pre_vwap_80pct": modeled_exit(
             abs(delta) * min(distance * 0.8, adverse_spot_distance)
-            - theta_loss - iv_penalty
+            - theta_loss
+            - iv_penalty
         ),
         "at_vwap_fixed_basis": modeled_exit(nominal_gain),
         "at_vwap_adverse_basis_iv": modeled_exit(reachable_gain),
@@ -489,9 +495,11 @@ def assess_option_cost_risk(
         "theta_cost_source": theta_source,
         "estimated_theta_cost_points": round(theta_loss, 4),
         "gamma_usable": gamma_valid,
-        "gamma_upside_at_vwap_points": round(
-            0.5 * float(gamma or 0.0) * distance * distance, 4
-        ) if gamma_valid else None,
+        "gamma_upside_at_vwap_points": (
+            round(0.5 * float(gamma or 0.0) * distance * distance, 4)
+            if gamma_valid
+            else None
+        ),
         "vega_usable": vega_valid,
         "adverse_iv_cost_points": round(iv_penalty, 4),
         "projected_premium_gain_points": round(reachable_gain, 4),
@@ -505,8 +513,12 @@ def assess_option_cost_risk(
         "net_reward_risk": net_rr,
         "pricing_scenarios": scenarios,
         "unmodeled_risks": [
-            "basis_jump", "iv_skew", "quote_depth", "stop_gap",
-            "partial_fills", "latency",
+            "basis_jump",
+            "iv_skew",
+            "quote_depth",
+            "stop_gap",
+            "partial_fills",
+            "latency",
         ],
     }
     if loss > min(config.max_trade_cash_risk, 773.0):
@@ -546,7 +558,8 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         records = list(self._opportunities.values())
         rejected = Counter(
             r.get("dominant_rejection")
-            for r in records if r.get("status") == "rejected"
+            for r in records
+            if r.get("status") == "rejected"
         )
         return {
             "validated_range_evaluations": len(records),
@@ -694,9 +707,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     "candidate_session_anchored_vs_primary_ratio"
                 ],
                 "time_bucket": (
-                    "morning" if stamp < 11 * 60
-                    else "midday" if stamp < 13 * 60
-                    else "afternoon"
+                    "morning"
+                    if stamp < 11 * 60
+                    else "midday" if stamp < 13 * 60 else "afternoon"
                 ),
                 "event_day": indicators.get("verified_event_day"),
                 "expiry_days": indicators.get("days_to_expiry"),
@@ -709,7 +722,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             LOGGER.info(
                 "RANGE_VWAP_STRUCTURAL_OPPORTUNITY id=%s side=%s "
                 "target_distance_atr=%s",
-                opportunity_key, side, structural["remaining_vwap_distance_atr"],
+                opportunity_key,
+                side,
+                structural["remaining_vwap_distance_atr"],
             )
 
         if indicators.get("underlying_direction_state") == "TRANSITION":
@@ -744,7 +759,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if expiry_days is None or expiry_days < self._cfg.minimum_days_to_expiry:
             self._no_vote("range_expiry_or_expiry_unverified")
             return None
-
 
         # A range reversal is independently defined by two completed futures
         # candles. The *older* directional classifier may oppose this side.
