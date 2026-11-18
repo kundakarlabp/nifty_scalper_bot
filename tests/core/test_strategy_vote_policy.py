@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 
+from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     is_permanent_context_only,
     partition_votes,
     setup_gate_decision,
     vote_role,
+    verified_range_vwap_reversal,
 )
 
 
@@ -112,3 +114,95 @@ def test_same_family_or_opposite_side_does_not_confirm() -> None:
     opposite_ok, _ = independent_same_side_confirmation([smc, pe])
     assert same_family_ok is False
     assert opposite_ok is False
+
+
+def test_live_range_role_requires_explicit_real_broker_pilot(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "true")
+    assert canonical_strategy_role("range_vwap") == "context"
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    assert canonical_strategy_role("RangeVWAPReclaim") == "trigger"
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "false")
+    assert canonical_strategy_role("range_vwap") == "context"
+
+
+def test_live_range_reversal_requires_proven_structure_flow_and_risk(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    metadata = {
+        "role": "trigger",
+        "setup_pass": True,
+        "range_option_flow_verified": True,
+        "range_structure": {
+            "qualified": True,
+            "side": "CE",
+            "reversal_direction_source": "two_completed_futures_candles",
+        },
+        "option_cost_risk": {
+            "qualified": True,
+            "model_only": True,
+            "worst_stop_loss_including_costs": 700.0,
+            "net_reward_risk": 1.6,
+        },
+    }
+    assert verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="CE"
+    )
+    assert not verified_range_vwap_reversal(
+        metadata, strategy="SMC", side="CE"
+    )
+    assert not verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="PE"
+    )
+    assert not verified_range_vwap_reversal(
+        {**metadata, "range_option_flow_verified": False},
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    assert not verified_range_vwap_reversal(
+        {
+            **metadata,
+            "option_cost_risk": {
+                **metadata["option_cost_risk"],
+                "worst_stop_loss_including_costs": 774.0,
+            },
+        },
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    assert not verified_range_vwap_reversal(
+        {
+            **metadata,
+            "option_cost_risk": {
+                **metadata["option_cost_risk"],
+                "net_reward_risk": 1.49,
+            },
+        },
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    triggers, contexts, rejected = partition_votes(
+        [
+            (
+                _signal(),
+                _evidence(
+                    strategy="RangeVWAPReclaim",
+                    side="CE",
+                    **metadata,
+                ),
+            )
+        ]
+    )
+    assert len(triggers) == 1
+    assert not contexts
+    assert not rejected
