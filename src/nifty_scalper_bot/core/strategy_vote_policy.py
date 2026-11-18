@@ -22,6 +22,7 @@ from nifty_scalper_bot.config.strategy_taxonomy import (
     normalize_strategy_name,
     range_vwap_live_enabled,
 )
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 
@@ -108,6 +109,59 @@ def range_legacy_context_mismatch_only(
         and updates >= 3
         and ofi_3s >= 0.10
         and ofi_1s >= 0
+    )
+
+
+def verified_range_vwap_final_order_risk(
+    metadata: Mapping[str, Any],
+    *,
+    strategy: str,
+    symbol: str,
+    final_symbol: str,
+    broker_quantity: int,
+    broker_lot_size: int,
+    entry_price: float,
+    ask_price: float,
+    stop_price: float,
+    target_price: float,
+) -> bool:
+    """Recheck final repriced broker plan, not merely the strategy estimate."""
+    if not verified_range_vwap_reversal(
+        metadata,
+        strategy=strategy,
+        side="CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else "",
+    ):
+        return False
+    model = metadata.get("option_cost_risk")
+    if not isinstance(model, Mapping):
+        return False
+    try:
+        modeled_lot_size = int(model["observed_contract_lot_size"])
+        slippage = float(model["slippage_each_side_bps"]) / 10000.0
+        values = (entry_price, ask_price, stop_price, target_price)
+        prices_valid = all(isfinite(float(value)) for value in values)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if (
+        not prices_valid
+        or symbol != final_symbol
+        or broker_lot_size != modeled_lot_size
+        or broker_quantity != modeled_lot_size
+        or modeled_lot_size <= 0
+        or not 0 <= slippage <= 0.01
+        or not 0 < stop_price < max(entry_price, ask_price) < target_price
+    ):
+        return False
+    stressed_entry = max(entry_price, ask_price) * (1.0 + slippage)
+    stressed_stop = stop_price * (1.0 - slippage)
+    fees = estimate_round_trip_cost(
+        entry_price=stressed_entry,
+        exit_price=stressed_stop,
+        quantity=broker_quantity,
+    ).total
+    final_cash_risk = (stressed_entry - stressed_stop) * broker_quantity + fees
+    return bool(
+        isfinite(final_cash_risk) and 0 < final_cash_risk <= 773.0
     )
 
 
@@ -224,4 +278,5 @@ __all__ = [
     "setup_gate_decision",
     "vote_role",
     "verified_range_vwap_reversal",
+    "verified_range_vwap_final_order_risk",
 ]
