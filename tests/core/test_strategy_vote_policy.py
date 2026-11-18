@@ -5,6 +5,7 @@ from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     is_permanent_context_only,
     partition_votes,
+    range_legacy_context_mismatch_only,
     setup_gate_decision,
     verified_range_vwap_reversal,
     vote_role,
@@ -158,9 +159,7 @@ def test_live_range_reversal_requires_proven_structure_flow_and_risk(
     assert verified_range_vwap_reversal(
         metadata, strategy="RangeVWAPReclaim", side="CE"
     )
-    assert not verified_range_vwap_reversal(
-        metadata, strategy="SMC", side="CE"
-    )
+    assert not verified_range_vwap_reversal(metadata, strategy="SMC", side="CE")
     assert not verified_range_vwap_reversal(
         metadata, strategy="RangeVWAPReclaim", side="PE"
     )
@@ -206,3 +205,36 @@ def test_live_range_reversal_requires_proven_structure_flow_and_risk(
     assert len(triggers) == 1
     assert not contexts
     assert not rejected
+
+
+def test_only_old_trend_bias_conflict_is_exempt_for_verified_range() -> None:
+    flow = {
+        "context_alignment_block_reason": "underlying_direction_mismatch",
+        "candidate_symbol": "NFO:NIFTY26NOV25250CE",
+        "quote_update_version": 123,
+        "quote_readiness_allowed": True,
+        "ofi_ready": True,
+        "ofi_3s_complete": True,
+        "range_research_holdoff_active": False,
+        "microstructure_conflicts_side": False,
+        "strong_depth_conflicts_side": False,
+        "ofi_conflicts_side": False,
+        "ofi_3s_span_seconds": 2.0,
+        "ofi_update_count_3s": 4,
+        "ofi_3s_normalized": 0.17,
+        "ofi_1s_normalized": 0.06,
+    }
+    def allowed(**overrides):
+        return range_legacy_context_mismatch_only(
+            _evidence(strategy="OrderFlow", **{**flow, **overrides}),
+            expected_symbol="NFO:NIFTY26NOV25250CE",
+            expected_quote_version=123,
+        )
+    assert allowed()
+    assert not allowed(microstructure_conflicts_side=True)
+    assert not allowed(ofi_conflicts_side=True)
+    assert not allowed(quote_update_version=122)
+    assert not allowed(ofi_3s_normalized=-0.2)
+    assert not allowed(ofi_3s_complete=False)
+    assert not allowed(context_alignment_block_reason="adverse_microstructure")
+    assert not allowed(range_research_holdoff_active=True)
