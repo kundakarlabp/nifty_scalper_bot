@@ -811,7 +811,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             or not 0 <= decision_at.timestamp() - vote_stamp <= 2.0
             or proof.get("quote_readiness_allowed") is not True
             or proof.get("ofi_reversal_holdoff_evaluated") is not True
-            or proof.get("ofi_reversal_holdoff_active") is not False
+            or proof.get("range_research_holdoff_active") is not False
         ):
             self._no_vote("range_orderflow_quote_or_holdoff_unverified")
             return None

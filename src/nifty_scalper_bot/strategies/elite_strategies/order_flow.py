@@ -2,7 +2,8 @@
 
 Responsibility: derive same-contract microstructure confirmation and conflict
 metadata from prepared quotes, while the canonical underlying direction and
-broker-safe entry/risk checks retain authority.
+broker-safe entry/risk checks retain authority. Preserve legacy SHADOW holdoff
+contract and publish separate temporal reversal evidence for range research.
 Observability: _should_log_context_evidence emits one per-symbol evidence
 snapshot every five minutes, or a material state change at most once per
 minute. Numeric tick, OFI and depth churn do not cause additional INFO logs.
@@ -424,6 +425,7 @@ class OrderFlowStrategy(EliteStrategy):
             # reversal. Keep the existing context authority, but avoid approving
             # a live entry on the first brief positive window after opposition.
             ofi_reversal_holdoff_active = False
+            research_holdoff_active = False
             # Experimental adaptive window, OFF by default. Never discount a
             # recent reversal without completed sustained OFI AND strong depth.
             # The original 15s policy remains authoritative unless opted in.
@@ -456,9 +458,14 @@ class OrderFlowStrategy(EliteStrategy):
                     self._last_live_adverse_ofi[symbol] = now
                 else:
                     last_adverse = self._last_live_adverse_ofi.get(symbol)
-                    ofi_reversal_holdoff_active = bool(
+                    research_holdoff_active = bool(
                         last_adverse is not None
                         and 0.0 <= now - last_adverse < ofi_reversal_holdoff_seconds
+                    )
+                    # Preserve published non-live OrderFlow alignment.
+                    # Research independently observes recent opposing flow.
+                    ofi_reversal_holdoff_active = bool(
+                        is_live and research_holdoff_active
                     )
                     if (
                         ofi_reversal_holdoff_active
@@ -627,6 +634,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "effective_context_alignment": effective_context_alignment,
                 "context_alignment_block_reason": context_alignment_block_reason,
                 "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
+                "range_research_holdoff_active": research_holdoff_active,
                 "ofi_reversal_holdoff_evaluated": holdoff_evaluated,
                 "ofi_reversal_holdoff_seconds": ofi_reversal_holdoff_seconds,
                 "effective_context_conflict": effective_context_conflict,

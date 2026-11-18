@@ -124,6 +124,7 @@ def indicators(**overrides: object) -> dict:
             "quote_readiness_allowed": True,
             "ofi_reversal_holdoff_evaluated": True,
             "ofi_reversal_holdoff_active": False,
+            "range_research_holdoff_active": False,
             **{
                 key: result.get(key)
                 for key in (
