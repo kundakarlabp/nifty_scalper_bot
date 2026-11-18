@@ -1,4 +1,9 @@
-"""Factory and canonical catalog for elite strategy construction."""
+"""Purpose: Construct the canonical elite strategy runtime catalog.
+
+Responsibilities: Bind enabled configurations to authoritative trigger/context
+roles and opt-in research extensions without proliferating parallel builders.
+Safety: RangeVWAPReclaim is context-only and not a live order trigger.
+"""
 
 from __future__ import annotations
 
