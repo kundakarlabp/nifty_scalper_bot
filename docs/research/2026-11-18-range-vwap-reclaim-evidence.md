@@ -70,11 +70,20 @@ VWAP target. The rolling center is retained only as independent corroboration.
   1-minute OHLCV **continuously from 09:15** (minimum 40 bars). Never silently
   substitute a 40-minute rolling center when a session starts late. Incomplete
   or gapped history => no research candidate.
-- Compute session VWAP using volume-weighted typical price of **all completed
-  bars before the proposed confirmation candle**. Compute the 20m rolling
-  center independently on the prior 20 candles. Require their divergence
-  <=1.0 ATR and both remaining on the profitable side of the confirmation
-  close. Session VWAP is the price target, not the rolling center.
+- Compute a causal **bar-derived session VWAP estimate** using
+  volume-weighted typical price of all completed bars **before the proposed
+  confirmation candle**. That estimate freezes the outer band without
+  future-bar leakage. Compute the 20m rolling center independently on the
+  prior 20 candles. Require their divergence <=1.0 ATR and both remaining
+  on the profitable side of the confirmation close.
+- **Actual option target** is the fresh exchange-reported NIFTY futures
+  session VWAP (`futures_vwap_source=active_future_quote_vwap`) from the
+  existing cached futures quote. Require agreement with the earlier
+  bar-derived estimate within 0.50 futures ATR; reject missing, divergent,
+  unproven-source or stale values. Never use a synthetic spot index VWAP,
+  a rolling 20m pseudo-VWAP, or a newly pulled broker quote to authorize
+  a target. Because the exchange quote is read after the confirmation bar,
+  it is used for *target projection only*, never to recalculate its band.
 - Outer band is fixed **before** the confirmation bar: max(0.8 ATR14,
   1.1 population standard deviations of the prior 20 closes). Require the
   prior candle's close and extreme beyond that band, then an adjacent fully
