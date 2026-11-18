@@ -160,9 +160,7 @@ def verified_range_vwap_final_order_risk(
         quantity=broker_quantity,
     ).total
     final_cash_risk = (stressed_entry - stressed_stop) * broker_quantity + fees
-    return bool(
-        isfinite(final_cash_risk) and 0 < final_cash_risk <= 773.0
-    )
+    return bool(isfinite(final_cash_risk) and 0 < final_cash_risk <= 773.0)
 
 
 def is_permanent_context_only(evidence: Any) -> bool:
