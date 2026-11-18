@@ -106,7 +106,8 @@ def indicators(**overrides: object) -> dict:
 
 def test_true_session_anchor_and_rolling_secondary_agree() -> None:
     report = assess_range_vwap_reclaim(
-        bars(), decision_at=decision_at(),
+        bars(),
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )
     assert report["qualified"] is True, report
@@ -121,7 +122,8 @@ def test_true_session_anchor_and_rolling_secondary_agree() -> None:
 def test_partial_intraday_history_cannot_impersonate_session_vwap() -> None:
     data = bars()[5:]
     proof = assess_range_vwap_reclaim(
-        data, decision_at=decision_at(),
+        data,
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(min_history_bars=40),
     )
     assert proof["reason"] == "session_open_anchor_missing"
@@ -132,7 +134,8 @@ def test_reclaim_must_close_inside_band_precomputed_before_confirmation() -> Non
     weak = data[-1]
     weak.update(open=25238.0, close=25243.0, high=25244.0, low=25237.5)
     proof = assess_range_vwap_reclaim(
-        data, decision_at=decision_at(),
+        data,
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )
     assert proof["qualified"] is False
@@ -142,14 +145,16 @@ def test_reclaim_must_close_inside_band_precomputed_before_confirmation() -> Non
 
 def test_confirmation_candle_cannot_move_its_own_outer_band() -> None:
     original = assess_range_vwap_reclaim(
-        bars(), decision_at=decision_at(),
+        bars(),
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )
     modified = bars()
     modified[-1]["volume"] = 100000.0
     modified[-1]["high"] += 1.0
     other = assess_range_vwap_reclaim(
-        modified, decision_at=decision_at(),
+        modified,
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )
     for key in (
@@ -170,23 +175,28 @@ def test_missing_provisional_gaps_conflicts_and_stale_fail_closed() -> None:
     )["qualified"]
     gap = bars()
     gap.pop(-10)
-    assert assess_range_vwap_reclaim(
-        gap, decision_at=decision_at(), config=cfg
-    )["reason"] == "futures_history_gap"
+    assert (
+        assess_range_vwap_reclaim(gap, decision_at=decision_at(), config=cfg)["reason"]
+        == "futures_history_gap"
+    )
     noncanonical = bars()
     noncanonical[15]["timestamp"] = (
         datetime(2026, 11, 18, 9, 30, 30, tzinfo=IST)
     ).isoformat()
-    assert assess_range_vwap_reclaim(
-        noncanonical, decision_at=decision_at(), config=cfg
-    )["reason"] == "noncanonical_minute_timestamp"
+    assert (
+        assess_range_vwap_reclaim(noncanonical, decision_at=decision_at(), config=cfg)[
+            "reason"
+        ]
+        == "noncanonical_minute_timestamp"
+    )
     dup = bars()
     fake = dict(dup[-1])
     fake["close"] += 0.25
     dup.append(fake)
-    assert assess_range_vwap_reclaim(
-        dup, decision_at=decision_at(), config=cfg
-    )["reason"] == "conflicting_futures_bar"
+    assert (
+        assess_range_vwap_reclaim(dup, decision_at=decision_at(), config=cfg)["reason"]
+        == "conflicting_futures_bar"
+    )
     stale = assess_range_vwap_reclaim(
         bars(), decision_at=decision_at() + timedelta(minutes=4), config=cfg
     )
@@ -197,30 +207,35 @@ def test_drift_and_center_disagreement_exclude_trends() -> None:
     trend = bars()
     for i, row in enumerate(trend):
         close = 25200.0 + i * 15
-        row.update(
-            open=close - 2, high=close + 3, low=close - 3, close=close
-        )
+        row.update(open=close - 2, high=close + 3, low=close - 3, close=close)
     assert not assess_range_vwap_reclaim(
-        trend, decision_at=decision_at(),
+        trend,
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )["qualified"]
     assert not assess_range_vwap_reclaim(
-        bars(), decision_at=decision_at(),
-        config=RangeVWAPReclaimStrategyConfig(
-            max_secondary_center_deviation_atr=0.001
-        ),
+        bars(),
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.001),
     )["qualified"]
 
 
 def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     quote = {
-        "bid": 99.8, "ask": 100.0, "atr": 6.0, "lot_size": 65,
-        "delta": 0.55, "theta": -15.0,
+        "bid": 99.8,
+        "ask": 100.0,
+        "atr": 6.0,
+        "lot_size": 65,
+        "delta": 0.55,
+        "theta": -15.0,
     }
     a = assess_option_cost_risk(
-        quote, config=cfg, side="CE",
-        futures_target_distance=35, futures_stop_distance=3,
+        quote,
+        config=cfg,
+        side="CE",
+        futures_target_distance=35,
+        futures_stop_distance=3,
     )
     assert a["qualified"] is True, a
     assert a["worst_stop_loss_including_costs"] <= 773
@@ -230,7 +245,9 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
     b = assess_option_cost_risk(
         quote,
         config=RangeVWAPReclaimStrategyConfig(slippage_stress_bps=200),
-        side="CE", futures_target_distance=35, futures_stop_distance=3,
+        side="CE",
+        futures_target_distance=35,
+        futures_stop_distance=3,
     )
     assert b.get("net_reward_risk", 0) < a["net_reward_risk"]
 
@@ -238,11 +255,17 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
 def test_missing_delta_expiry_side_wide_spread_and_high_cash_risk_reject() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     quote = {"bid": 99.8, "ask": 100, "atr": 6, "lot_size": 65, "delta": 0.55}
+
     def assess(updated: dict, side: str = "CE", gap: float = 3) -> str:
-        return str(assess_option_cost_risk(
-            updated, config=cfg, side=side,
-            futures_target_distance=35, futures_stop_distance=gap,
-        )["reason"])
+        return str(
+            assess_option_cost_risk(
+                updated,
+                config=cfg,
+                side=side,
+                futures_target_distance=35,
+                futures_stop_distance=gap,
+            )["reason"]
+        )
 
     assert assess({**quote, "delta": None}) == "option_delta_unverified"
     assert assess({**quote, "delta": -0.55}) == "option_delta_side_conflict"
@@ -265,9 +288,12 @@ def test_shadow_opposing_trend_bias_still_uses_structural_reversal(monkeypatch) 
         RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), engine
     )
     earlier = decision_at() - timedelta(minutes=1)
-    assert strategy._evaluate_signal(
-        OPTION, indicators(decision_at=earlier.isoformat()), 100.0
-    ) is None
+    assert (
+        strategy._evaluate_signal(
+            OPTION, indicators(decision_at=earlier.isoformat()), 100.0
+        )
+        is None
+    )
     assert strategy._regime_bars[FUTURE][1] == 1
     # The *next* chronological finalized candle confirms sustained RANGE.
     engine.history = bars()
@@ -317,9 +343,5 @@ def test_stale_regime_transition_expiry_flow_and_option_selection_reject(monkeyp
             RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0),
             History(bars()),
         )
-        strategy._regime_bar_confirmed(
-            FUTURE, bars()[-2]["timestamp"]
-        )
-        assert strategy._evaluate_signal(
-            OPTION, indicators(**override), 100.0
-        ) is None
+        strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+        assert strategy._evaluate_signal(OPTION, indicators(**override), 100.0) is None
