@@ -21,26 +21,41 @@ Relevant background:
   Segment*, August 2026: https://www.sebi.gov.in/ (regulatory research). Large
   losses among retail F&O participants warrant a higher after-cost bar.
 
-## Empirical available dataset
+## Accessible two-session broad replay — deliberately NOT an options backtest
 
-- Owner's Google Drive holds 25 CMS-encrypted original Breeze windows from
-  6 November 2024 to 5 November 2026; prior archive audit reported 1,454,867
-  one-minute index/futures/selected-option OHLCV observations. Original private
-  key not available in this connected environment, and archives have not been
-  newly decrypted/verified and replayed here. No raw option bid/ask/depth.
-- Distinct validated EOD catalog contains ~494 F&O sessions but no synchronized
-  1m execution tape or option quotes. It cannot estimate one-minute reversal
-  entry/exit or point-in-time instrument selection.
-- 18 November 2026 live journals contain sparse NIFTY futures 5-minute price/
-  exchange-VWAP observations (31-32 snapshots). In the 23 overlapping samples
-  with futures at least 20 points below their exchange VWAP, the following
-  15-minute price move was positive in 14 and negative in 9. Median +4.5 future
-  points, min -50.3 and max +75.6. These overlap and omit full opening hours;
-  they are NOT 23 trades, NOT validated reversal triggers and NOT options P&L.
-- At 12:17 and 13:55 two distinct SMC CE sweeps suffered adverse premium
-  movement before possible rebound; 25bps stress on sampled option bid/ask
-  marks show why a countertrend strategy must first prove completed-bar
-  invalidation, cash risk, source authenticity and protective execution.
+**Breeze research excluded by operator request.** We used only the existing
+read-only production log archive (`nifty_daily_market_logs`) from 17–18
+November 2026, no new data acquisition or paid feed. The archived
+`FUTURES_VWAP_PROVENANCE` records contained 120 five-minute futures
+LTP/session-exchange-VWAP observations: 75 on 17 Nov, 45 on 18 Nov.
+
+For each observation with `abs(futures_ltp - futures_vwap) >= 20` points,
+measure the signed *next-observed 15-minute* futures markout, long futures
+when under VWAP and short futures when above VWAP. Match a same-day observation
+between 14m55s and 16m after entry. No observed candle lows/highs or valid
+option fills exist in this snapshot-only stream.
+
+| Date | Overlapping eligible snapshots | Toward-VWAP marks | Mean signed futures move | Worst signed move | Nonoverlapping subsample |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 17 Nov | 55 | 26 | +3.41 points | -54.3 points | 18, of which 7 positive |
+| 18 Nov | 26 | 17 | +3.75 points | -50.3 points | 8, of which 5 positive |
+
+These are 5-minute snapshots and **a naïve VWAP-distance negative control**,
+not qualifying RangeVWAPReclaim completed-bar setups, 81 independent entries,
+or P&L from trading options. Positive gross means near 3–4 futures points are
+small and unstable compared with adverse moves; this sample provides **no
+credible after-cost NIFTY option expectancy**. Five-minute data cannot
+demonstrate a consecutive 40 x 1-minute futures history, completed-bar low/
+high rejection, entry-after-confirmation or quote-side stop execution. Thus
+strategy backtest eligible setups = NOT OBSERVABLE, realized option net P&L =
+NOT ESTIMABLE, live promotion = FALSE. The original two SMC rejections
+around 12:17 and 13:55 on 18 Nov likewise showed adverse quote excursions,
+not proofs of range alpha.
+
+**No parameter optimization or threshold curve fitting** was undertaken on
+these two sessions. Treat the thresholds below as conservative hypotheses
+for future prospective recording; choose them on separate development
+data and evaluate on unseen later sessions before broker admission.
 
 ## Proposed range-only elite strategy
 
@@ -61,9 +76,10 @@ admission, manager arbitration, live exposure, stops, routing or risk switches.
   VWAP slope <=1.2 bps/min over 5 min; realized net-direction/total movement
   efficiency <=0.35; 30-bar width 1.5–6 ATR; confirmation volume relative
   to prior 20 candles >=0.85; no final impulsive bar >2 ATR.
+* Decision window: 10:00–14:30 IST, excluding the opening and closing volatility zones.
 * **Not knife-catching:** prior closed futures candle touches the excursion,
   then current fully closed candle reverses without setting a worse low/high,
-  while leaving at least 0.2 futures ATR to the rolling center.
+  while leaving at least 0.75 futures ATR to the rolling center.
 * Uses underlying canonical CE/PE agreement without a countertrend override,
   freshness <=2s and existing selected-option eligibility, executable bid/ask,
   quote age <=1.5s, observed dated contract lot size and option ATR.
@@ -86,30 +102,29 @@ futures-derived, historically causal option pricing. A futures-only backtest
 with no historical option bid/ask/stop-fill telemetry MUST report net P&L and
 profit factor as null and `live_promotion_eligible=false`.
 
-## Reproducible owner-only research
+## Reproducible feasible research — without Breeze
 
-1. On trusted owner machine, locate matching existing CMS private key without
-   sharing it; use `scripts.finish_breeze_private_replay` as described in
-   `docs/research/breeze_sqlite_offline_research_handoff_20261113.md`.
-   Do not download/re-encrypt the original 25 windows again.
-2. Export a **real contiguous one-minute dated NIFTY futures** series from the
-   verified private minute SQLite; preserve `start_ist`,
-   `available_at_ist`, OHLCV. Never assume timestamp semantics.
-3. For one exported file run:
-   `python -m scripts.reporting.range_vwap_reclaim_backtest
-   --futures-csv /private/futures_1m.csv --output /private/range_results.json`.
-   The report records setup coverage but explicitly returns no trade P&L.
-4. Upgrade to genuine options replay only with matching dated contract
-   master, exact lot, synchronized point-in-time option bid/ask (with spread/
-   depth) and timestamped protective-order latency. Use canonical
-   `backtesting/runtime_research.py` for recorded production sessions,
-   then walk-forward development/validation/untouched later holdout,
-   overlapping signal de-duplication, 10/25/50bps fill stresses and fees.
-5. Promotion requires adequate independently resolved trade count, positive
-   after-cost expectancy with confidence intervals, stable PF/drawdown,
-   99th-percentile stop slippage and broker reconciliation evidence, and
-   prospective SHADOW logs. Never promote from a single profitable day or
-   optimistic OHLC midpoint fills.
+1. Review the existing read-only `nifty_daily_market_logs` futures provenance
+   records. Deduplicate each date/timestamp and match same-session 15-minute
+   forward futures observations; report sign-adjusted excursions, overlap,
+   worst adverse movement and absence of options execution evidence.
+   **This limited replay was completed above.**
+2. `scripts/reporting/range_vwap_reclaim_backtest.py` can evaluate genuine
+   **other-source** completed 1-minute NIFTY futures CSV files with
+   `start_ist,available_at_ist,open,high,low,close,volume` fields.
+   It reports verified futures setups and **no option trade P&L**.
+   No such 1-minute external dataset was supplied or independently verified
+   for the present two-day check. Do not interpolate 5-minute snapshots into
+   1-minute OHLC.
+3. Keep the new elite strategy disabled for LIVE triggering. For future
+   recorded-feed evaluation, require causal matched futures/spot and option
+   bid/ask, verified contract lot, broker-protective stop path, fee/slippage
+   stress at 10/25/50bps and later untouched test days. Do not depend on
+   inaccessible encrypted data as a precondition for research.
+4. An independently verified cost-adjusted positive expectancy on sufficient
+   future trades, with zero unresolved broker-stop states and strictly
+   observed executable prices, is required before changing the manager's
+   continuation-only admission authority.
 
 ## Legacy cleanup
 
