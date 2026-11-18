@@ -312,6 +312,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("not_nifty_option")
             return None
         side = symbol[-2:].upper()
+        decision_at = _time(indicators.get("decision_at")) or datetime.now(_IST)
+        # Avoid the opening auction/impulse and the last-hour liquidity decay.
+        # This filter is prespecified research hygiene, not a backtested edge.
+        minute = decision_at.hour * 60 + decision_at.minute
+        if not 10 * 60 <= minute <= 14 * 60 + 30:
+            self._no_vote("range_research_time_window")
+            return None
         if str(indicators.get("regime") or "").lower() != "range":
             self._no_vote("not_verified_range_regime")
             return None
@@ -348,7 +355,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         except (TypeError, ValueError, AttributeError, KeyError):
             self._no_vote("range_futures_history_unavailable")
             return None
-        decision_at = _time(indicators.get("decision_at")) or datetime.now(_IST)
         structural = assess_range_vwap_reclaim(
             bars, decision_at=decision_at, config=self._cfg
         )
