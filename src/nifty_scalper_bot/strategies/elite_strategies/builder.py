@@ -24,6 +24,9 @@ from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import (
 from nifty_scalper_bot.strategies.elite_strategies.oi_max_pain import OIMaxPainStrategy
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
+from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
+    RangeVWAPReclaimStrategy,
+)
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )
@@ -40,6 +43,9 @@ LOGGER = get_logger(__name__)
 STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     "smc": ("smc_liquidity", SMCStrategy, "SMC Liquidity"),
     "vwap": ("vwap_pro", VWAPProStrategy, "VWAP Pro Pullback"),
+    "range_vwap": (
+        "range_vwap_reclaim", RangeVWAPReclaimStrategy, "Range VWAP Reclaim Research"
+    ),
     "oi_max_pain": ("oi_max_pain", OIMaxPainStrategy, "OI Mean Reversion"),
     "gamma_scalping": ("gamma_scalping", GammaScalpingStrategy, "Gamma Acceleration"),
     "tuesday_gamma_buyer": (
@@ -55,6 +61,7 @@ STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
 }
 
 _EXPERIMENTAL_CONTEXT_FLAGS = {
+    "range_vwap": "ENABLE_RANGE_VWAP_RESEARCH",
     "bb_squeeze": "ENABLE_BB_SQUEEZE_CONTEXT",
     "cpr": "ENABLE_CPR_EXPERIMENTAL",
     "rsi_div": "ENABLE_RSI_DIVERGENCE_EXPERIMENTAL",
@@ -67,6 +74,8 @@ _POLICY_ENV_PREFIXES = (
     "VWAP_",
     "SMC_",
     "ORDERFLOW_",
+    "RANGE_VWAP_",
+    "ENABLE_RANGE_VWAP_",
     "ENABLE_OI_",
     "ENABLE_BB_",
     "ENABLE_CPR_",
