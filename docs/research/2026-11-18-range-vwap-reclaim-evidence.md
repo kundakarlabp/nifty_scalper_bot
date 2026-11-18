@@ -188,3 +188,29 @@ This is a prospective research implementation, not a proven profitable
 strategy. The two-session futures-only proxy cannot validate these new rules. The ₹773 cap in the research model does not change the production
 per-trade 5% risk setting; any discrepancy must be corrected independently
 after broker-state and deployment safety validation.
+
+## 18 Nov P0–P2 follow-up: fail-closed research corrections
+
+- Completed-band geometry no longer has an independent 0.75 ATR
+  remaining-VWAP hurdle. A close must remain on the correct side of both
+  centers; executable after-cost option reward is assessed separately.
+- OrderFlow is evaluated first. Its same-evaluation metadata, option-contract
+  identity, non-fingerprint quote version, holdoff computation and timestamp
+  must reach Range VWAP intact. Missing producer evidence cannot be interpreted
+  as a negative holdoff.
+- The modeled option requires observed spot and futures, observed spot-referenced
+  delta and explicit theta conventions. Adverse basis/IV, early-exit and
+  stalled scenarios are **stress assumptions**, not calibrated premiums or
+  verified fills. No broker authority was added.
+- A bounded per-opportunity shadow ledger records completed futures structures
+  even when subsequent quote and economic checks reject them. The session-
+  anchored dispersion comparison, expiry bucket, and observed event tag are
+  observational only. Missing event proof remains unknown. MFE, MAE,
+  executable win rate and net expectancy remain *unmeasured* until verified
+  point-in-time option books and exits are available.
+- A restart is not allowed to replace missing 09:15 history with a rolling
+  VWAP. Contiguous, authenticated same-session recovery remains a production
+  integration requirement; the model abstains if history is unavailable.
+- This change is a research-only implementation. Source merge does not
+  activate the opt-in flag or authorize orders. The modeled stop cap is not
+  an upper bound on realized stop-gap losses.

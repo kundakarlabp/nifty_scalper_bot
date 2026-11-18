@@ -447,7 +447,10 @@ class OrderFlowStrategy(EliteStrategy):
                 # makes enabling the experiment never shorten reversal safety
                 # beyond its documented floor.
                 ofi_reversal_holdoff_seconds = 10.0
-            if is_live and context_quality_eligible and side_aligns:
+            holdoff_evaluated = bool(
+                quote_readiness.allowed and context_fresh and depth_available
+            )
+            if holdoff_evaluated:
                 now = time.monotonic()
                 if ofi_directional and ofi_conflicts_side:
                     self._last_live_adverse_ofi[symbol] = now
@@ -457,7 +460,12 @@ class OrderFlowStrategy(EliteStrategy):
                         last_adverse is not None
                         and 0.0 <= now - last_adverse < ofi_reversal_holdoff_seconds
                     )
-                    if ofi_reversal_holdoff_active:
+                    if (
+                        ofi_reversal_holdoff_active
+                        and is_live
+                        and context_quality_eligible
+                        and side_aligns
+                    ):
                         context_alignment_source = None
             alignment_candidate_source = context_alignment_source
             # A single order-book imbalance plus the last tick can flip on
@@ -619,6 +627,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "effective_context_alignment": effective_context_alignment,
                 "context_alignment_block_reason": context_alignment_block_reason,
                 "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
+                "ofi_reversal_holdoff_evaluated": holdoff_evaluated,
                 "ofi_reversal_holdoff_seconds": ofi_reversal_holdoff_seconds,
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",

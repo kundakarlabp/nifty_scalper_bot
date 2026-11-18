@@ -83,9 +83,12 @@ class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
     max_trade_cash_risk: float = 773.0
     min_abs_option_delta: float = 0.25
     max_abs_option_delta: float = 0.85
-    target_delta_haircut: float = 0.80
+    target_delta_haircut: float = 0.80  # Retained for old config serialization.
     assumed_hold_minutes: float = 15.0
     unknown_theta_haircut_pct: float = 1.0
+    unknown_iv_haircut_pct: float = 1.0
+    adverse_iv_change_points: float = 1.0
+    adverse_basis_change_atr: float = 0.10
     minimum_days_to_expiry: int = 1
     max_near_atm_distance_points: float = 50.0
 
