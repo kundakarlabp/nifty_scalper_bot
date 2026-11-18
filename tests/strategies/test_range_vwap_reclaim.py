@@ -241,7 +241,7 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
     assert a["worst_stop_loss_including_costs"] <= 773
     assert a["net_reward_risk"] >= 1.5
     assert a["projected_premium_gain_points"] < 0.55 * 35
-    assert a["theta_cost_source"] == "observed_theta_daily_390minute_stress"
+    assert a["theta_cost_source"] == "observed_theta_daily_375minute_stress"
     b = assess_option_cost_risk(
         quote,
         config=RangeVWAPReclaimStrategyConfig(slippage_stress_bps=200),
@@ -336,6 +336,7 @@ def test_stale_regime_transition_expiry_flow_and_option_selection_reject(monkeyp
         {"days_to_expiry": None},
         {"ofi_ready": False},
         {"ofi_3s_normalized": -0.3},
+        {"depth_imbalance": -0.30},
         {"active_futures_symbol": None},
         {"futures_ltp": 25285},
     ):
@@ -345,3 +346,88 @@ def test_stale_regime_transition_expiry_flow_and_option_selection_reject(monkeyp
         )
         strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
         assert strategy._evaluate_signal(OPTION, indicators(**override), 100.0) is None
+
+
+def test_bearish_pe_reclaim_mirrors_bullish_futures_without_old_bias(monkeypatch):
+    """Both CE and PE require positive *option premium* OFI."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    midpoint = 25250.0
+    bearish: list[dict] = []
+    for item in bars():
+        mirrored = dict(item)
+        mirrored.update(
+            open=2 * midpoint - item["open"],
+            high=2 * midpoint - item["low"],
+            low=2 * midpoint - item["high"],
+            close=2 * midpoint - item["close"],
+        )
+        bearish.append(mirrored)
+    proof = assess_range_vwap_reclaim(
+        bearish,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(),
+    )
+    assert proof["qualified"] is True, proof
+    assert proof["side"] == "PE"
+    engine = History(bearish[:-1])
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), engine
+    )
+    early = decision_at() - timedelta(minutes=1)
+    strategy._evaluate_signal(
+        "NFO:NIFTY26NOV25250PE",
+        indicators(decision_at=early.isoformat()),
+        100.0,
+    )
+    engine.history = bearish
+    result = strategy._evaluate_signal(
+        "NFO:NIFTY26NOV25250PE",
+        indicators(
+            underlying_direction_bias="CE",
+            futures_ltp=25254.7,
+            delta=-0.55,
+        ),
+        100.0,
+    )
+    assert result is not None
+    assert result.metadata["side"] == "PE"
+    assert result.metadata["role"] == "context"
+    assert result.metadata["can_trigger"] is False
+
+
+def test_regime_confirmation_never_counts_duplicate_or_backward_bar():
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    t = bars()[-2]["timestamp"]
+    newer = bars()[-1]["timestamp"]
+    assert strategy._regime_bar_confirmed(FUTURE, t) is False
+    assert strategy._regime_bar_confirmed(FUTURE, t) is False
+    assert strategy._regime_bar_confirmed(FUTURE, newer) is True
+    assert strategy._regime_bar_confirmed(FUTURE, t) is False
+
+
+def test_same_excursion_requires_real_vwap_reset():
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    key = (FUTURE, "CE", "2026-11-18")
+    strategy._consumed_excursions.add(key)
+    strategy._maybe_reset_excursions(
+        FUTURE,
+        {
+            "underlying_latest_close": 25230.0,
+            "session_vwap_before_confirmation": 25250.0,
+            "futures_atr": 6.0,
+        },
+    )
+    assert key in strategy._consumed_excursions
+    strategy._maybe_reset_excursions(
+        FUTURE,
+        {
+            "underlying_latest_close": 25249.0,
+            "session_vwap_before_confirmation": 25250.0,
+            "futures_atr": 6.0,
+        },
+    )
+    assert key not in strategy._consumed_excursions
