@@ -10,9 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from scripts.reporting.range_vwap_reclaim_backtest import (
-    run_futures_signal_audit,
-)
+from scripts.reporting.range_vwap_reclaim_backtest import run_futures_signal_audit
 
 
 def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
