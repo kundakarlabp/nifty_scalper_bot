@@ -54,11 +54,12 @@ GitHub connector available
 → obtain compact context report for non-trivial work
 → reproduce the exact symptom
 → establish root cause and ownership
-→ create a branch from current main
+→ search open/draft PRs by outcome and Task-Key; reuse an existing task PR/head branch if found
+→ otherwise create one branch from current main
 → make the smallest architecture-consistent change
 → add regression coverage
 → complete the coherent branch patch before opening the PR when practical
-→ open one focused PR as **draft**
+→ open one focused PR as **draft** only if no task PR exists; otherwise update the same PR
 → iterate only against the focused draft CI gate
 → inspect the final diff
 → mark ready for review once
