@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Reject new mypy errors in changed production files with existing type debt."""
+"""Purpose: Reject new mypy errors in modified production modules.
+
+Responsibilities: Compare per-file type diagnostics against the main-branch
+baseline and handle intentionally deleted files without invoking mypy on
+nonexistent paths. Keep existing unrelated type debt grandfathered.
+Safety: This CI guard is validation-only and never alters trading code.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +50,11 @@ def main() -> int:
         if not name.startswith("src/nifty_scalper_bot/") or not name.endswith(".py"):
             continue
         path = Path(name)
+        # Removed modules are checked by the deletion diff; mypy cannot open
+        # a removed source file, and it must not abort unrelated validation.
+        if not path.is_file():
+            print(f"SKIP {name}: removed source file")
+            continue
         current = _mypy(path)
         base = subprocess.run(
             ["git", "show", f"{args.base}:{name}"],

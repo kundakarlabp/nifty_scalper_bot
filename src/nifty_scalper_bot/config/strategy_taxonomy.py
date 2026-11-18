@@ -1,8 +1,8 @@
-"""Canonical strategy identity, role and signal-family taxonomy.
+"""Purpose: Own canonical names, context roles and signal-family semantics.
 
-Strategy modules may emit richer metadata, but structural identity belongs here so
-builder, manager and runner cannot disagree about whether evidence may trigger a
-trade.
+Responsibilities: Normalize strategy identity and prevent the research-only
+RangeVWAPReclaim context model from acquiring live broker-trigger authority.
+Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ _ALIASES: dict[str, str] = {
     "vwappro": "vwap_pro",
     "vwap_pro": "vwap_pro",
     "vwap": "vwap_pro",
+    "range_vwap": "range_vwap_reclaim",
+    "range_vwap_reclaim": "range_vwap_reclaim",
+    "rangevwapreclaim": "range_vwap_reclaim",
     "orbpro": "orb_pro",
     "orb_pro": "orb_pro",
     "orb": "orb_pro",
@@ -49,6 +52,9 @@ _ALIASES: dict[str, str] = {
 _TAXONOMY: dict[str, StrategyTaxon] = {
     "smc_lite": StrategyTaxon("smc_lite", "trigger", "reclaim_structure"),
     "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "reclaim_structure"),
+    "range_vwap_reclaim": StrategyTaxon(
+        "range_vwap_reclaim", "context", "range_reversion_research"
+    ),
     "orb_pro": StrategyTaxon("orb_pro", "trigger", "opening_breakout"),
     "gamma_scalping": StrategyTaxon("gamma_scalping", "trigger", "expiry_trigger"),
     "tuesday_gamma_buyer": StrategyTaxon(

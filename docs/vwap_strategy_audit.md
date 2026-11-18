@@ -1,5 +1,15 @@
 # VWAP Strategy Audit (In-Depth)
 
+> **18 November 2026 current status:** The standalone legacy
+> `src/nifty_scalper_bot/strategies/vwap_mean_reversion.py` was retired
+> and replaced by the registered, research-only
+> `strategies/elite_strategies/range_vwap_reclaim.py`.
+> Historical references below remain as dated audit evidence.
+> The separate legacy strategy class within `strategies/signal_generator.py`
+> was not modified because it is a distinct compatibility implementation.
+> No live range-reversion trade admission has been approved.
+
+
 ## VWAP historical-recovery correction — 2026-09-11 (Asia/Kolkata)
 
 Source baseline: `f1ef2af78e4d85c487595d2111b5d6f8294352a5`.
