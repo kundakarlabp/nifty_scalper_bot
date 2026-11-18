@@ -1,8 +1,8 @@
-"""Canonical strategy identity, role and signal-family taxonomy.
+"""Purpose: Own canonical names, context roles and signal-family semantics.
 
-Strategy modules may emit richer metadata, but structural identity belongs here so
-builder, manager and runner cannot disagree about whether evidence may trigger a
-trade.
+Responsibilities: Normalize strategy identity and prevent the research-only
+RangeVWAPReclaim context model from acquiring live broker-trigger authority.
+Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
 from __future__ import annotations
