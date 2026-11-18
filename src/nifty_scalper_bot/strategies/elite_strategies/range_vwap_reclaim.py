@@ -695,7 +695,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         opportunity_key = f"{future}:{structural['bar_timestamp']}:{side}"
         self._active_opportunity = opportunity_key
         if opportunity_key not in self._opportunities:
-            stamp = decision_at.hour * 60 + decision_at.minute
+            minute_of_session = decision_at.hour * 60 + decision_at.minute
             self._opportunities[opportunity_key] = {
                 "identity": opportunity_key,
                 "underlying_bar": structural["bar_timestamp"],
@@ -708,8 +708,8 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 ],
                 "time_bucket": (
                     "morning"
-                    if stamp < 11 * 60
-                    else "midday" if stamp < 13 * 60 else "afternoon"
+                    if minute_of_session < 11 * 60
+                    else "midday" if minute_of_session < 13 * 60 else "afternoon"
                 ),
                 "event_day": indicators.get("verified_event_day"),
                 "expiry_days": indicators.get("days_to_expiry"),
