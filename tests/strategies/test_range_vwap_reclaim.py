@@ -88,6 +88,8 @@ def indicators(**overrides: object) -> dict:
         "active_futures_symbol": FUTURE,
         "decision_at": decision_at().isoformat(),
         "futures_ltp": 25245.3,
+        "futures_vwap": 25250.23,
+        "futures_vwap_source": "active_future_quote_vwap",
         "bid": 99.80,
         "ask": 100.0,
         "atr": 6.0,
@@ -342,6 +344,9 @@ def test_stale_regime_transition_expiry_flow_and_option_selection_reject(monkeyp
         {"depth_imbalance": -0.30},
         {"active_futures_symbol": None},
         {"futures_ltp": 25285},
+        {"futures_vwap": None},
+        {"futures_vwap": 25300},
+        {"futures_vwap_source": "derived_index_vwap"},
     ):
         strategy = RangeVWAPReclaimStrategy(
             RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0),
