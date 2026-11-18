@@ -978,6 +978,8 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "source_domain": "futures_completed_bars",
                 "research_only": not live_pilot,
                 "range_option_flow_verified": True,
+                # These are absolute option-premium price levels, not offsets.
+                "bracket_anchor_mode": "absolute_level",
                 "reversal_direction_source": "two_completed_futures_candles",
                 "prior_trend_bias": indicators.get("underlying_direction_bias"),
                 "requires_runner_execution_validation": True,
