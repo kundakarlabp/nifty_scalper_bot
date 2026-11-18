@@ -625,14 +625,10 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
         },
     )
     engine = History(bars()[:-1])
-    strategy = RangeVWAPReclaimStrategy(
-        RangeVWAPReclaimStrategyConfig(), engine
-    )
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), engine)
     strategy._evaluate_signal(
         OPTION,
-        indicators(
-            decision_at=(decision_at() - timedelta(minutes=1)).isoformat()
-        ),
+        indicators(decision_at=(decision_at() - timedelta(minutes=1)).isoformat()),
         100.0,
     )
     engine.history = bars()
