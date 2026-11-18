@@ -49,7 +49,9 @@ STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     "smc": ("smc_liquidity", SMCStrategy, "SMC Liquidity"),
     "vwap": ("vwap_pro", VWAPProStrategy, "VWAP Pro Pullback"),
     "range_vwap": (
-        "range_vwap_reclaim", RangeVWAPReclaimStrategy, "Range VWAP Reclaim Research"
+        "range_vwap_reclaim",
+        RangeVWAPReclaimStrategy,
+        "Range VWAP Reclaim Research",
     ),
     "oi_max_pain": ("oi_max_pain", OIMaxPainStrategy, "OI Mean Reversion"),
     "gamma_scalping": ("gamma_scalping", GammaScalpingStrategy, "Gamma Acceleration"),
