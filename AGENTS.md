@@ -103,6 +103,14 @@ The manifest-driven `scripts/module_doc_guard.py` runs in the single
 coverage and callable-interface/header changes; human reviewers must verify
 semantic accuracy. Do not auto-generate fabricated descriptions from names.
 
+## One task, one branch, one active pull request
+
+Before creating a task branch or PR, search existing **open and draft PRs** and open issues for the same observable outcome. Prefer the existing PR and push follow-up commits to its **existing head branch**, including after CI/test failures; never create `-final-2`, `-fix-3` or other replacement branches for the same work. If the existing PR has a different owner, coordinate in its discussion rather than silently duplicating it. Use a concise **Task-Key** (issue number or stable slug) in every new PR description and preserve it through revisions.
+
+For new work: one issue/task -> one working branch -> one **draft** PR. During iteration, run the existing focused draft gate; when the final diff is coherent, mark **the same PR** ready, require the full exact-head CI matrix, and squash-merge only after it passes. If a ready PR needs another commit, convert it back to draft before editing, then re-run the final suite once. No extra CI workflows, branches, or release jobs are needed for these steps.
+
+For stale PR cleanup, establish objective evidence (head SHA is an ancestor of `main`, or equivalent complete code/test coverage proved by explicit comparison). Comment with the evidence and preserved ref before closing. **Diverged, safety-sensitive, or unfinished research work is not automatically superseded by its age or title.** Leave such PRs open for manual review. Do not automatically delete source branches, releases, tags, or evidence. Closing a PR does not activate trading or justify bypassing broker-flat deployment controls.
+
 ## Validation
 
 Use the single public agent façade rather than hand-building validation commands:
