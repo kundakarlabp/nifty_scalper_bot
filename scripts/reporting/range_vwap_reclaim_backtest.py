@@ -37,17 +37,20 @@ def run_futures_signal_audit(csv_path: Path) -> dict[str, Any]:
     with csv_path.open(newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
         expected = {
-            "start_ist", "available_at_ist", "open", "high",
-            "low", "close", "volume",
+            "start_ist",
+            "available_at_ist",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
         }
         if not expected.issubset(reader.fieldnames or []):
             raise ValueError("missing_causal_1m_futures_csv_fields")
         for raw in reader:
             start = _parse_time(str(raw["start_ist"]))
             available = _parse_time(str(raw["available_at_ist"]))
-            if not timedelta(minutes=1) <= available - start <= timedelta(
-                minutes=3
-            ):
+            if not timedelta(minutes=1) <= available - start <= timedelta(minutes=3):
                 raise ValueError("bar_unavailable_or_start_clock_unproven")
             candle = {
                 "timestamp": start.isoformat(),
