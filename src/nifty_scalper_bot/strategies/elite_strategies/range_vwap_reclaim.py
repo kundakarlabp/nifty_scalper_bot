@@ -219,6 +219,7 @@ def assess_range_vwap_reclaim(
         "directional_efficiency": round(efficiency, 4),
         "range_width_atr": round(width, 4),
         "volume_ratio": round(rvol, 4),
+        "underlying_latest_close": float(latest["close"]),
     }
     if slope_bps > config.max_vwap_slope_bps_per_min:
         return {**evidence, "reason": "session_vwap_sloping"}
@@ -410,11 +411,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         return []
 
     def _regime_bar_confirmed(self, future: str, timestamp: str) -> bool:
-        """Count distinct finalized bar timestamps, never quote-tick repeats."""
+        """Require contiguous, forward-moving completed candle observations."""
+        current = _time(timestamp)
+        if current is None:
+            return False
         previous, n = self._regime_bars.get(future, ("", 0))
-        if previous != timestamp:
+        earlier = _time(previous)
+        if current == earlier:
+            return n >= self._cfg.min_regime_completed_bars
+        if earlier is None or current - earlier != timedelta(minutes=1):
+            n = 1
+        else:
             n = min(self._cfg.min_regime_completed_bars, n + 1)
-            self._regime_bars[future] = timestamp, n
+        self._regime_bars[future] = timestamp, n
         return n >= self._cfg.min_regime_completed_bars
 
     def _maybe_reset_excursions(self, future: str, evidence: Mapping[str, Any]) -> None:
