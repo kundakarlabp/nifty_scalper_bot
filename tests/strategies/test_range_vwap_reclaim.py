@@ -40,12 +40,16 @@ def bars(*, base: float = 25250.0) -> list[dict]:
             }
         )
     result[-2].update(
-        open=base - 11.8, high=base - 10.2,
-        low=base - 14.5, close=base - 11.5,
+        open=base - 11.8,
+        high=base - 10.2,
+        low=base - 14.5,
+        close=base - 11.5,
     )
     result[-1].update(
-        open=base - 11.2, high=base - 6.1,
-        low=base - 12.5, close=base - 7.0,
+        open=base - 11.2,
+        high=base - 6.1,
+        low=base - 12.5,
+        close=base - 7.0,
     )
     return result
 
@@ -89,7 +93,8 @@ def indicators(**overrides: object) -> dict:
 
 def test_range_proof_passes_two_sided_futures_bounce() -> None:
     result = assess_range_vwap_reclaim(
-        bars(), decision_at=decision_at(),
+        bars(),
+        decision_at=decision_at(),
         config=RangeVWAPReclaimStrategyConfig(),
     )
     assert result["qualified"] is True, result
@@ -106,21 +111,25 @@ def test_missing_and_provisional_bars_fail_closed() -> None:
     )["qualified"]
     gap = bars()
     gap.pop(-10)
-    assert assess_range_vwap_reclaim(
-        gap, decision_at=decision_at(), config=cfg
-    )["reason"] == "insufficient_verified_futures_history"
+    assert (
+        assess_range_vwap_reclaim(gap, decision_at=decision_at(), config=cfg)["reason"]
+        == "insufficient_verified_futures_history"
+    )
 
 
 def test_gap_in_oversupplied_completed_bars_fails() -> None:
     history = bars()
     history[15]["timestamp"] = (
-        datetime(2026, 11, 18, 10, 15, tzinfo=IST)
-        + timedelta(seconds=30)
+        datetime(2026, 11, 18, 10, 15, tzinfo=IST) + timedelta(seconds=30)
     ).isoformat()
-    assert assess_range_vwap_reclaim(
-        history, decision_at=decision_at(),
-        config=RangeVWAPReclaimStrategyConfig(),
-    )["reason"] == "futures_history_gap"
+    assert (
+        assess_range_vwap_reclaim(
+            history,
+            decision_at=decision_at(),
+            config=RangeVWAPReclaimStrategyConfig(),
+        )["reason"]
+        == "futures_history_gap"
+    )
 
 
 def test_repeated_conflicting_candle_not_used() -> None:
@@ -128,10 +137,14 @@ def test_repeated_conflicting_candle_not_used() -> None:
     fake = dict(history[-1])
     fake["close"] += 0.25
     history.append(fake)
-    assert assess_range_vwap_reclaim(
-        history, decision_at=decision_at(),
-        config=RangeVWAPReclaimStrategyConfig(),
-    )["reason"] == "conflicting_futures_bar"
+    assert (
+        assess_range_vwap_reclaim(
+            history,
+            decision_at=decision_at(),
+            config=RangeVWAPReclaimStrategyConfig(),
+        )["reason"]
+        == "conflicting_futures_bar"
+    )
 
 
 def test_stale_futures_and_directional_trends_do_not_qualify() -> None:
@@ -146,12 +159,17 @@ def test_stale_futures_and_directional_trends_do_not_qualify() -> None:
     for i, row in enumerate(trend):
         close = 25200.0 + i * 15
         row.update(
-            open=close - 2, high=close + 3,
-            low=close - 3, close=close,
+            open=close - 2,
+            high=close + 3,
+            low=close - 3,
+            close=close,
         )
-    assert assess_range_vwap_reclaim(
-        trend, decision_at=decision_at(), config=cfg
-    )["qualified"] is False
+    assert (
+        assess_range_vwap_reclaim(trend, decision_at=decision_at(), config=cfg)[
+            "qualified"
+        ]
+        is False
+    )
 
 
 def test_option_cost_includes_actual_fees_and_stressed_slippage() -> None:
@@ -174,12 +192,18 @@ def test_option_cost_includes_actual_fees_and_stressed_slippage() -> None:
 
 def test_overspread_and_high_cash_risk_abstain() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
-    assert assess_option_cost_risk(
-        {"bid": 95, "ask": 100, "atr": 6, "lot_size": 65}, config=cfg
-    )["reason"] == "option_spread_too_wide"
-    assert assess_option_cost_risk(
-        {"bid": 200, "ask": 200.2, "atr": 25, "lot_size": 65}, config=cfg
-    )["reason"] == "cash_risk_over_cap"
+    assert (
+        assess_option_cost_risk(
+            {"bid": 95, "ask": 100, "atr": 6, "lot_size": 65}, config=cfg
+        )["reason"]
+        == "option_spread_too_wide"
+    )
+    assert (
+        assess_option_cost_risk(
+            {"bid": 200, "ask": 200.2, "atr": 25, "lot_size": 65}, config=cfg
+        )["reason"]
+        == "cash_risk_over_cap"
+    )
 
 
 def test_context_only_taxonomy_blocks_broker_trigger() -> None:
@@ -222,6 +246,4 @@ def test_stale_quote_trend_mode_or_countertrend_are_not_candidates(monkeypatch):
         strategy = RangeVWAPReclaimStrategy(
             RangeVWAPReclaimStrategyConfig(), History(bars())
         )
-        assert strategy._evaluate_signal(
-            OPTION, indicators(**override), 100.0
-        ) is None
+        assert strategy._evaluate_signal(OPTION, indicators(**override), 100.0) is None
