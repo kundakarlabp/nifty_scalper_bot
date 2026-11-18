@@ -82,6 +82,7 @@ def indicators(**overrides: object) -> dict:
         "bid": 99.80,
         "ask": 100.0,
         "atr": 6.0,
+        "lot_size": 65,
         **overrides,
     }
 
@@ -156,7 +157,7 @@ def test_stale_futures_and_directional_trends_do_not_qualify() -> None:
 def test_option_cost_includes_actual_fees_and_stressed_slippage() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     a = assess_option_cost_risk(
-        {"bid": 99.80, "ask": 100.0, "atr": 6.0}, config=cfg
+        {"bid": 99.80, "ask": 100.0, "atr": 6.0, "lot_size": 65}, config=cfg
     )
     assert a["qualified"] is True, a
     assert a["worst_stop_loss_including_costs"] <= 773
@@ -165,7 +166,7 @@ def test_option_cost_includes_actual_fees_and_stressed_slippage() -> None:
         slippage_stress_bps=200,
     )
     b = assess_option_cost_risk(
-        {"bid": 99.80, "ask": 100.0, "atr": 6.0},
+        {"bid": 99.80, "ask": 100.0, "atr": 6.0, "lot_size": 65},
         config=high_stress,
     )
     assert b["net_reward_risk"] < a["net_reward_risk"]
@@ -174,10 +175,10 @@ def test_option_cost_includes_actual_fees_and_stressed_slippage() -> None:
 def test_overspread_and_high_cash_risk_abstain() -> None:
     cfg = RangeVWAPReclaimStrategyConfig()
     assert assess_option_cost_risk(
-        {"bid": 95, "ask": 100, "atr": 6}, config=cfg
+        {"bid": 95, "ask": 100, "atr": 6, "lot_size": 65}, config=cfg
     )["reason"] == "option_spread_too_wide"
     assert assess_option_cost_risk(
-        {"bid": 200, "ask": 200.2, "atr": 25}, config=cfg
+        {"bid": 200, "ask": 200.2, "atr": 25, "lot_size": 65}, config=cfg
     )["reason"] == "cash_risk_over_cap"
 
 
