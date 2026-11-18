@@ -561,14 +561,11 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         # trading TARGET is the independent exchange-reported session futures
         # VWAP from a fresh cached quote, never a rolling pseudo-VWAP.
         exchange_vwap = _value(indicators.get("futures_vwap"))
-        calculated_vwap = _value(
-            structural.get("session_vwap_before_confirmation")
-        )
+        calculated_vwap = _value(structural.get("session_vwap_before_confirmation"))
         if (
             exchange_vwap is None
             or calculated_vwap is None
-            or indicators.get("futures_vwap_source")
-            != "active_future_quote_vwap"
+            or indicators.get("futures_vwap_source") != "active_future_quote_vwap"
             or abs(exchange_vwap - calculated_vwap)
             > self._cfg.max_exchange_vwap_disagreement_atr * fut_atr
         ):
