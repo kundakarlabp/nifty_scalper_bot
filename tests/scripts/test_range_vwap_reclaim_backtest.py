@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timedelta
+from math import pi, sin
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -13,10 +16,6 @@ from scripts.reporting.range_vwap_reclaim_backtest import (
 
 
 def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
-    from datetime import datetime, timedelta
-    from math import sin, pi
-    from zoneinfo import ZoneInfo
-
     start_at = datetime(2026, 11, 18, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
     history = []
     for i in range(40):
@@ -44,7 +43,10 @@ def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
                     "available_at_ist": (
                         start + timedelta(minutes=1, seconds=5)
                     ).isoformat(),
-                    **{key: row[key] for key in ("open", "high", "low", "close", "volume")},
+                    **{
+                        key: row[key]
+                        for key in ("open", "high", "low", "close", "volume")
+                    },
                 }
             )
     report = run_futures_signal_audit(file)
