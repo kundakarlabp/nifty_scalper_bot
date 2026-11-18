@@ -57,37 +57,85 @@ these two sessions. Treat the thresholds below as conservative hypotheses
 for future prospective recording; choose them on separate development
 data and evaluate on unseen later sessions before broker admission.
 
-## Proposed range-only elite strategy
+## Revision: session VWAP as primary, no local-range-rotation trades
 
-`strategies/elite_strategies/range_vwap_reclaim.py` is a distinct **context**
-member of the existing elite catalog. It does not change VWAPPro / SMC / ORB
-admission, manager arbitration, live exposure, stops, routing or risk switches.
+The range strategy exclusively targets **09:15-anchored NIFTY futures session
+VWAP**. It must not use the rolling 20m volume-weighted center as the actual
+VWAP target. The rolling center is retained only as independent corroboration.
 
-* Explicit opt-in: `ENABLE_RANGE_VWAP_RESEARCH=true`. Default off. The
-  strategy is context-only in canonical taxonomy. In `EXECUTION_MODE=LIVE`,
-  it NEVER returns a vote, regardless of the opt-in setting.
-* Source: 40 consecutive complete 1m candles from canonical NIFTY dated
-  futures, same IST session, valid OHLCV and positive volume; last confirmed
-  candle no older than 90 seconds, zero bar/candle interpolation and no
-  imputed bid/ask. Canonical futures symbol is taken from the existing
-  instrument resolver.
-* Proposed uncalibrated research parameters: rolling last-20 volume-weighted
-  typical price; ATR14; excursion min max(0.8 ATR, 1.1 close sigma);
-  VWAP slope <=1.2 bps/min over 5 min; realized net-direction/total movement
-  efficiency <=0.35; 30-bar width 1.5–6 ATR; confirmation volume relative
-  to prior 20 candles >=0.85; no final impulsive bar >2 ATR.
-* Decision window: 10:00–14:30 IST, excluding the opening and closing volatility zones.
-* **Not knife-catching:** prior closed futures candle touches the excursion,
-  then current fully closed candle reverses without setting a worse low/high,
-  while leaving at least 0.75 futures ATR to the rolling center.
-* Uses underlying canonical CE/PE agreement without a countertrend override,
-  freshness <=2s and existing selected-option eligibility, executable bid/ask,
-  quote age <=1.5s, observed dated contract lot size and option ATR.
-* Research payoff floor: model premium stop max(0.75 option ATR, 3.5% ask),
-  aspirational gross target 2.5 stop distances, at least 1.5 **modeled**
-  after-cost target-to-stop R:R; cash-loss budget <=₹773. Shared Zerodha/NSE
-  brokerage, STT, GST, stamp, exchange and SEBI model; 25bps extra adverse
-  entry and exit slippage. This is geometry, **not expected realized edge**.
+### Causal reference and entry sequence
+
+- Obtain up to 400 most recent IndicatorEngine bars for the canonically
+  resolved NIFTY futures; verify complete, non-provisional, correctly aligned
+  1-minute OHLCV **continuously from 09:15** (minimum 40 bars). Never silently
+  substitute a 40-minute rolling center when a session starts late. Incomplete
+  or gapped history => no research candidate.
+- Compute a causal **bar-derived session VWAP estimate** using
+  volume-weighted typical price of all completed bars **before the proposed
+  confirmation candle**. That estimate freezes the outer band without
+  future-bar leakage. Compute the 20m rolling center independently on the
+  prior 20 candles. Require their divergence <=1.0 ATR and both remaining
+  on the profitable side of the confirmation close.
+- **Actual option target** is the fresh exchange-reported NIFTY futures
+  session VWAP (`futures_vwap_source=active_future_quote_vwap`) from the
+  existing cached futures quote. Require agreement with the earlier
+  bar-derived estimate within 0.50 futures ATR; reject missing, divergent,
+  unproven-source or stale values. Never use a synthetic spot index VWAP,
+  a rolling 20m pseudo-VWAP, or a newly pulled broker quote to authorize
+  a target. Because the exchange quote is read after the confirmation bar,
+  it is used for *target projection only*, never to recalculate its band.
+- Outer band is fixed **before** the confirmation bar: max(0.8 ATR14,
+  1.1 population standard deviations of the prior 20 closes). Require the
+  prior candle's close and extreme beyond that band, then an adjacent fully
+  completed candle which closes back **inside** by at least max(0.10 ATR,
+  5% of band width), with >=30% real body, no worse low/high, adequate
+  prior relative futures volume (>=0.85) and no impulsive >2 ATR candle.
+- No mechanical knife catching. Exclude a sloping session VWAP (>1.2bps
+  per minute), directional efficiency >0.35 and 30-bar range width outside
+  1.5–6 ATR. Require >=0.75 futures ATR remaining to BOTH centers.
+- Keep entry window 10:00–14:30 IST. Canonical RANGE ontology normalizes
+  CHOPPY/RANGING aliases. Require two **chronologically adjacent** observed
+  completed bars in stable RANGE; duplicate ticks within a bar do not count.
+  Reject regime transitions, stale option/underlying quotes and spot/futures
+  directional conflict. The legacy trend bias need not agree with the
+  new two-completed-candle reversal **for research context only**.
+
+### Option and execution evidence (research geometry, not proven alpha)
+
+- Require a verified, near-ATM/selected valid CE or PE contract, observed
+  exchange lot size, bid/ask spread <=0.40%, context age <=2s, option quote
+  age <=1.5s, and verified signed delta 0.25–0.85 absolute.
+- Require fresh, sustained positive **option-premium** OFI (3s window with
+  >=3 updates, >=1.5s elapsed coverage, normalized >=0.10, nonadverse latest
+  1s) and no reported OFI reversal holdoff; reject explicitly adverse observed
+  option-book depth imbalance (<= -0.15). Both CE and PE are bought at
+  the option ask: positive OFI is supportive for either long-premium side.
+- Ignore the old trend-bias direction **only inside independent structural
+  research**. The production strategy manager STILL enforces continuation-only
+  live trade admission; no approval bypass is introduced.
+- Expiry day and unavailable expiry classification are excluded (minimum
+  1 remaining day). Compare other expiry-dependent effects later.
+- Model maximum *reachable* option gain at
+  `abs(observed delta) * session-VWAP futures distance * 0.80`, subtract
+  observed adverse daily theta for an assumed 15/375-minute hold, or deduct
+  1% of option premium when theta is unavailable. Then cap by 2.5 × stop
+  points; do not invent positive gamma, IV expansion or an arbitrary 2.5R
+  target as an automatically attainable outcome.
+- Premium stop >= max(0.75 option ATR, 3.5% ask,
+  1.10 × abs(delta) × futures structural-invalidation distance).
+  Buy at ask +25bps and sell at projected bid (extra observed spread and
+  -25bps). Deduct the repo's broker, STT, GST, exchange and stamp cost model.
+  Require after-cost net target/stop reward-risk >=1.5, stop-risk <=₹773.
+  Stop fill may exceed modeled loss; no protective order is created here.
+- One candidate per session excursion per side. Do not rearm until a subsequent
+  completed futures candle returns within 0.25 ATR of session VWAP. Research
+  setup identity is anchored to the specific preceding excursion candle.
+
+**No local-range support/resistance rotation variant** is introduced.
+Range VWAP Reclaim remains context-only and default disabled. It returns
+no eligible order vote in LIVE mode and does not amend the manager, broker
+safety, or the operator risk cap. Proposed thresholds are engineering
+hypotheses, not statistically selected profitable settings.
 
 ## Rejection and proof boundaries
 
@@ -136,7 +184,7 @@ untouched for compatibility; do not indiscriminately remove it.
 ## Disposition
 
 **Add to elite catalog, research only. NO live order enablement.**
-This is evidence-driven opt-in safe implementation, not a proven profitable
-strategy. The ₹773 cap in the research model does not change the production
+This is a prospective research implementation, not a proven profitable
+strategy. The two-session futures-only proxy cannot validate these new rules. The ₹773 cap in the research model does not change the production
 per-trade 5% risk setting; any discrepancy must be corrected independently
 after broker-state and deployment safety validation.
