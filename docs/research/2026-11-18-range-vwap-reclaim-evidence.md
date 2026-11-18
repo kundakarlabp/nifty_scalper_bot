@@ -98,7 +98,8 @@ VWAP target. The rolling center is retained only as independent corroboration.
   age <=1.5s, and verified signed delta 0.25–0.85 absolute.
 - Require fresh, sustained positive **option-premium** OFI (3s window with
   >=3 updates, >=1.5s elapsed coverage, normalized >=0.10, nonadverse latest
-  1s) and no reported OFI reversal holdoff. Both CE and PE are bought at
+  1s) and no reported OFI reversal holdoff; reject explicitly adverse observed
+  option-book depth imbalance (<= -0.15). Both CE and PE are bought at
   the option ask: positive OFI is supportive for either long-premium side.
 - Ignore the old trend-bias direction **only inside independent structural
   research**. The production strategy manager STILL enforces continuation-only
@@ -107,7 +108,7 @@ VWAP target. The rolling center is retained only as independent corroboration.
   1 remaining day). Compare other expiry-dependent effects later.
 - Model maximum *reachable* option gain at
   `abs(observed delta) * session-VWAP futures distance * 0.80`, subtract
-  observed adverse daily theta for an assumed 15/390-minute hold, or deduct
+  observed adverse daily theta for an assumed 15/375-minute hold, or deduct
   1% of option premium when theta is unavailable. Then cap by 2.5 × stop
   points; do not invent positive gamma, IV expansion or an arbitrary 2.5R
   target as an automatically attainable outcome.
