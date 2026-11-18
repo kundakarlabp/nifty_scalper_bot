@@ -281,8 +281,16 @@ def assess_option_cost_risk(
     option_quote: Mapping[str, Any],
     *,
     config: RangeVWAPReclaimStrategyConfig,
+    side: str | None = None,
+    futures_target_distance: float | None = None,
+    futures_stop_distance: float | None = None,
 ) -> dict[str, Any]:
-    """Test the modeled option payoff; this is not a broker fill forecast."""
+    """Model reachable session-VWAP premium reward, not arbitrary option TP.
+
+    Expected premium appreciation uses OBSERVED delta × remaining futures
+    movement with an adverse haircut and theta decay. No gamma windfall is
+    assumed. Actual future fill prices and option Greeks can change.
+    """
     bid, ask, atr, lot = (
         _value(option_quote.get("bid")),
         _value(option_quote.get("ask")),
@@ -294,23 +302,60 @@ def assess_option_cost_risk(
     quantity = int(lot)
     if bid is None or ask is None or atr is None or bid <= 0 or ask <= bid or atr <= 0:
         return {"qualified": False, "reason": "option_quote_or_atr_missing"}
-    spread_pct = (ask - bid) / ask * 100
+    if side not in {"CE", "PE"}:
+        return {"qualified": False, "reason": "option_contract_side_missing"}
+    delta = _value(option_quote.get("delta"))
+    if delta is None or not (
+        config.min_abs_option_delta <= abs(delta) <= config.max_abs_option_delta
+    ):
+        return {"qualified": False, "reason": "option_delta_unverified"}
+    if (side == "CE" and delta <= 0) or (side == "PE" and delta >= 0):
+        return {"qualified": False, "reason": "option_delta_side_conflict"}
+    distance = _value(futures_target_distance)
+    invalidation_gap = _value(futures_stop_distance)
+    if (
+        distance is None
+        or invalidation_gap is None
+        or distance <= 0
+        or invalidation_gap <= 0
+    ):
+        return {"qualified": False, "reason": "structural_futures_distance_missing"}
+    spread_pct = (ask - bid) / ask * 100.0
     if spread_pct > config.max_option_spread_pct:
         return {"qualified": False, "reason": "option_spread_too_wide"}
-    stop_points = max(0.75 * atr, 0.035 * ask)
-    if stop_points >= ask:
+
+    theta = _value(option_quote.get("theta"))
+    if theta is None:
+        # No free assumption of zero theta: adverse haircut when unobserved.
+        theta_loss = ask * config.unknown_theta_haircut_pct / 100
+        theta_source = "unknown_theta_premium_haircut"
+    else:
+        theta_loss = max(0.0, -theta) * config.assumed_hold_minutes / 390.0
+        theta_source = "observed_theta_daily_390minute_stress"
+    reachable_premium_points = max(
+        0.0,
+        abs(delta) * distance * config.target_delta_haircut - theta_loss,
+    )
+    premium_stop_points = max(
+        0.75 * atr,
+        0.035 * ask,
+        abs(delta) * invalidation_gap * 1.10,
+    )
+    if premium_stop_points >= ask:
         return {"qualified": False, "reason": "option_stop_geometry_invalid"}
-    slippage = config.slippage_stress_bps / 10_000
+    if reachable_premium_points <= 0:
+        return {"qualified": False, "reason": "vwap_target_not_reachable_after_decay"}
+    # Gross reward is capped by both the actual futures session-VWAP
+    # distance and the existing conservative research target multiple.
+    target_gain = min(
+        reachable_premium_points,
+        config.gross_target_r * premium_stop_points,
+    )
+    slippage = config.slippage_stress_bps / 10_000.0
     paid = ask * (1 + slippage)
-    # A long option is bought at the ask, but must be liquidated at the bid.
-    # Include the *observed full entry spread* again at the exit as a
-    # conservative stress proxy, on top of adverse slippage and exchange fees.
-    # This is not a prediction of future spread or guaranteed stop liquidity.
     spread_points = ask - bid
-    stop = (ask - stop_points) * (1 - slippage) - spread_points
-    target = (ask + config.gross_target_r * stop_points) * (
-        1 - slippage
-    ) - spread_points
+    stop = (ask - premium_stop_points) * (1 - slippage) - spread_points
+    target = (ask + target_gain) * (1 - slippage) - spread_points
     if stop <= 0 or target <= paid:
         return {"qualified": False, "reason": "liquidation_price_invalid"}
     stop_cost = estimate_round_trip_cost(
@@ -326,11 +371,18 @@ def assess_option_cost_risk(
         "qualified": False,
         "model_only": True,
         "observed_contract_lot_size": quantity,
+        "observed_delta": round(delta, 5),
+        "futures_session_target_points": round(distance, 4),
+        "futures_structural_stop_points": round(invalidation_gap, 4),
+        "assumed_hold_minutes": config.assumed_hold_minutes,
+        "theta_cost_source": theta_source,
+        "estimated_theta_cost_points": round(theta_loss, 4),
+        "projected_premium_gain_points": round(reachable_premium_points, 4),
         "slippage_each_side_bps": config.slippage_stress_bps,
         "modeled_extra_exit_spread_points": round(spread_points, 4),
-        "premium_stop_points": round(stop_points, 4),
+        "premium_stop_points": round(premium_stop_points, 4),
         "stop_price_model": round(stop, 4),
-        "target_price_model": round(target, 4),
+        "vwap_limited_target_price_model": round(target, 4),
         "worst_stop_loss_including_costs": round(loss, 2),
         "target_net_reward_after_costs": round(reward, 2),
         "net_reward_risk": round(net_rr, 4),
@@ -339,7 +391,7 @@ def assess_option_cost_risk(
         return {**report, "reason": "cash_risk_over_cap"}
     if net_rr < config.min_net_reward_risk:
         return {**report, "reason": "after_cost_reward_risk_low"}
-    return {**report, "qualified": True, "reason": "modeled_geometry_ok"}
+    return {**report, "qualified": True, "reason": "modeled_session_target_ok"}
 
 
 class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
