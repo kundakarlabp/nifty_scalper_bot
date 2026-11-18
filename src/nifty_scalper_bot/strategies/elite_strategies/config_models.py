@@ -70,6 +70,7 @@ class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
     min_reclaim_volume_ratio: float = 0.85
     min_remaining_center_gap_atr: float = 0.75
     max_secondary_center_deviation_atr: float = 1.00
+    max_exchange_vwap_disagreement_atr: float = 0.50
     min_band_reentry_atr: float = 0.10
     min_reclaim_body_fraction: float = 0.30
     min_regime_completed_bars: int = 2
