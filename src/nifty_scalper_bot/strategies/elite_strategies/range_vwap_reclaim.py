@@ -63,11 +63,14 @@ def _weighted_center(rows: Sequence[Mapping[str, Any]]) -> float | None:
     total = sum(float(item["volume"]) for item in rows)
     if total <= 0:
         return None
-    return sum(
-        ((float(item["high"]) + float(item["low"]) + float(item["close"])) / 3)
-        * float(item["volume"])
-        for item in rows
-    ) / total
+    return (
+        sum(
+            ((float(item["high"]) + float(item["low"]) + float(item["close"])) / 3)
+            * float(item["volume"])
+            for item in rows
+        )
+        / total
+    )
 
 
 def _verified_completed_bars(
@@ -81,9 +84,7 @@ def _verified_completed_bars(
             return [], "invalid_futures_bar"
         if raw.get("is_provisional") is True or raw.get("is_complete") is not True:
             continue
-        stamp = _time(
-            raw.get("timestamp") or raw.get("datetime") or raw.get("time")
-        )
+        stamp = _time(raw.get("timestamp") or raw.get("datetime") or raw.get("time"))
         numbers = {
             key: _value(raw.get(key))
             for key in ("open", "high", "low", "close", "volume")
@@ -121,8 +122,7 @@ def _verified_completed_bars(
         if right[0] - left[0] != timedelta(minutes=1):
             return [], "futures_history_gap"
     return [
-        {"timestamp": stamp.isoformat(), **bar}
-        for stamp, bar in selected
+        {"timestamp": stamp.isoformat(), **bar} for stamp, bar in selected
     ], "verified"
 
 
@@ -238,10 +238,7 @@ def assess_option_cost_risk(
     if lot is None or lot < 1 or lot > 1000 or not lot.is_integer():
         return {"qualified": False, "reason": "historical_lot_size_unverified"}
     quantity = int(lot)
-    if (
-        bid is None or ask is None or atr is None or bid <= 0
-        or ask <= bid or atr <= 0
-    ):
+    if bid is None or ask is None or atr is None or bid <= 0 or ask <= bid or atr <= 0:
         return {"qualified": False, "reason": "option_quote_or_atr_missing"}
     spread_pct = (ask - bid) / ask * 100
     if spread_pct > config.max_option_spread_pct:
@@ -257,10 +254,9 @@ def assess_option_cost_risk(
     # This is not a prediction of future spread or guaranteed stop liquidity.
     spread_points = ask - bid
     stop = (ask - stop_points) * (1 - slippage) - spread_points
-    target = (
-        (ask + config.gross_target_r * stop_points) * (1 - slippage)
-        - spread_points
-    )
+    target = (ask + config.gross_target_r * stop_points) * (
+        1 - slippage
+    ) - spread_points
     if stop <= 0 or target <= paid:
         return {"qualified": False, "reason": "liquidation_price_invalid"}
     stop_cost = estimate_round_trip_cost(
@@ -343,9 +339,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):
         if quote_age is None or not 0 <= quote_age <= 1.5:
             self._no_vote("range_option_quote_stale")
             return None
-        future = canonical_nifty_future_symbol(
-            indicators.get("active_futures_symbol")
-        )
+        future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
         getter = getattr(self._indicator_engine, "get_history", None)
         if future is None or not callable(getter):
             self._no_vote("range_futures_history_unavailable")
@@ -375,9 +369,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
             return None
-        setup_id = (
-            f"range_vwap:{future}:{side}:{structural['bar_timestamp']}"
-        )
+        setup_id = f"range_vwap:{future}:{side}:{structural['bar_timestamp']}"
         if setup_id in self._seen:
             self._no_vote("range_setup_already_observed")
             return None
