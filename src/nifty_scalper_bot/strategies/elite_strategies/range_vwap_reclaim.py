@@ -114,6 +114,9 @@ def _verified_completed_bars(
     selected = sorted(decoded.items())[-min_history:]
     if len(selected) < min_history:
         return [], "insufficient_verified_futures_history"
+    most_recent = selected[-1][0] + timedelta(minutes=1)
+    if not 0 <= (decision_at - most_recent).total_seconds() <= 90.0:
+        return [], "futures_completed_bar_stale"
     for left, right in zip(selected, selected[1:]):
         if right[0] - left[0] != timedelta(minutes=1):
             return [], "futures_history_gap"
@@ -318,8 +321,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):
             self._no_vote("range_quote_not_tradable")
             return None
         age = _value(indicators.get("context_age_seconds"))
+        quote_age = _value(indicators.get("data_age_seconds"))
         if age is None or not 0 <= age <= 2.0:
             self._no_vote("range_underlying_context_stale")
+            return None
+        if quote_age is None or not 0 <= quote_age <= 1.5:
+            self._no_vote("range_option_quote_stale")
             return None
         future = canonical_nifty_future_symbol(
             indicators.get("active_futures_symbol")
