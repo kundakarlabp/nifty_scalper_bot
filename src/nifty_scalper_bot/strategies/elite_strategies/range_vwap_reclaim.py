@@ -489,6 +489,9 @@ def assess_option_cost_risk(
         "theta_cost_source": theta_source,
         "estimated_theta_cost_points": round(theta_loss, 4),
         "gamma_usable": gamma_valid,
+        "gamma_upside_at_vwap_points": round(
+            0.5 * float(gamma or 0.0) * distance * distance, 4
+        ) if gamma_valid else None,
         "vega_usable": vega_valid,
         "adverse_iv_cost_points": round(iv_penalty, 4),
         "projected_premium_gain_points": round(reachable_gain, 4),

@@ -15,9 +15,9 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
     RangeVWAPReclaimStrategy,
+    _restore_authenticated_session_bars,
     assess_option_cost_risk,
     assess_range_vwap_reclaim,
-    _restore_authenticated_session_bars,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -105,7 +105,6 @@ def indicators(**overrides: object) -> dict:
         "vega_per_iv_point": 0.01,
         "vega_convention": "per_iv_percentage_point",
         "range_spot_ltp": 25230.0,
-        "futures_ltp": 25245.3,
         "quote_update_version": 123,
         "ofi_ready": True,
         "ofi_3s_complete": True,
@@ -281,7 +280,10 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
     assert a["net_reward_risk"] >= 1.5
     assert a["projected_premium_gain_points"] < 0.55 * 35
     assert a["theta_cost_source"] == "observed_theta_trading_day_linear_stress"
-    assert a["pricing_scenarios"]["at_vwap_fixed_basis"]["net_rr"] >= a["net_reward_risk"]
+    assert (
+        a["pricing_scenarios"]["at_vwap_fixed_basis"]["net_rr"]
+        >= a["net_reward_risk"]
+    )
     b = assess_option_cost_risk(
         quote,
         config=RangeVWAPReclaimStrategyConfig(slippage_stress_bps=200),
