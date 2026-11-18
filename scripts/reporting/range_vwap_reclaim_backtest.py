@@ -1,9 +1,8 @@
-"""Purpose: Run causal, non-executable range-reclaim signal research on Breeze CSV.
+"""Purpose: Audit verified session-VWAP reclaim setups from a minute CSV.
 
-Responsibilities: Require the existing private Breeze exporter fields and
-measure completed-futures-bar signal coverage without assuming option books,
-historical instrument multipliers, or broker fills.
-Safety: No broker imports or order path; zero execution-grade P&L claims.
+Responsibilities: Consume any locally available 1-minute NIFTY futures OHLCV
+with explicit bar availability, and report completed-bar range signals.
+Safety: This signal-only tool never manufactures historical option fills.
 """
 
 from __future__ import annotations
@@ -80,7 +79,7 @@ def run_futures_signal_audit(csv_path: Path) -> dict[str, Any]:
             reasons["insufficient_verified_futures_history"] += 1
             continue
         decision = assess_range_vwap_reclaim(
-            history[-50:], decision_at=item["available"], config=config
+            history[-400:], decision_at=item["available"], config=config
         )
         if not decision["qualified"]:
             reasons[str(decision["reason"])] += 1
