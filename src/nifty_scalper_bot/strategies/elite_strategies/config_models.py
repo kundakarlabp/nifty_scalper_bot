@@ -59,7 +59,7 @@ class VWAPProStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
-    """Prespecified uncalibrated research thresholds; never live authority."""
+    """Prespecified uncalibrated thresholds for guarded research/live pilot."""
 
     min_history_bars: int = 40
     band_atr_multiple: float = 0.80

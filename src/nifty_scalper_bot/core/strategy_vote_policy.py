@@ -6,18 +6,23 @@ Responsibilities:
 - independent_same_side_confirmation checks corroborating evidence.
 
 Boundaries: Pure vote policy; no quote fetching, symbol selection or order entry.
-Safety: Context-only votes cannot create a trigger or override direction.
+Safety: Context-only votes cannot create triggers; range reversal requires a
+separately attested structural and option-flow contract in LIVE pilot mode.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     is_context_only_strategy,
+    normalize_strategy_name,
+    range_vwap_live_enabled,
 )
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 
@@ -26,6 +31,136 @@ _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 class SetupGateDecision:
     passed: bool
     reason: str | None = None
+
+
+def verified_range_vwap_reversal(
+    metadata: Mapping[str, Any], *, strategy: str | None, side: str
+) -> bool:
+    """Authorize only the internally generated LIVE range reversal contract.
+
+    This is not a broker-risk override: the runner validates execution price,
+    affordability, stop, exposure and protective-order readiness independently.
+    """
+    if not range_vwap_live_enabled():
+        return False
+    if normalize_strategy_name(strategy) != "range_vwap_reclaim":
+        return False
+    if metadata.get("role") != "trigger" or metadata.get("setup_pass") is not True:
+        return False
+    if metadata.get("range_option_flow_verified") is not True:
+        return False
+    structure = metadata.get("range_structure")
+    economics = metadata.get("option_cost_risk")
+    if not isinstance(structure, Mapping) or not isinstance(economics, Mapping):
+        return False
+    if (
+        structure.get("qualified") is not True
+        or structure.get("side") != side
+        or structure.get("reversal_direction_source") != "two_completed_futures_candles"
+        or economics.get("qualified") is not True
+        or economics.get("model_only") is not True
+    ):
+        return False
+    try:
+        risk = float(economics["worst_stop_loss_including_costs"])
+        rr = float(economics["net_reward_risk"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return bool(isfinite(risk) and isfinite(rr) and 0 < risk <= 773.0 and rr >= 1.5)
+
+
+def range_legacy_context_mismatch_only(
+    evidence: Any, *, expected_symbol: str, expected_quote_version: Any
+) -> bool:
+    """Allow a proven futures reversal to ignore *only* old trend mismatch.
+
+    Actual adverse OrderFlow/depth, unavailable flow and wrong quote version
+    must still veto admission in the strategy manager.
+    """
+    if normalize_strategy_name(getattr(evidence, "strategy", None)) != "order_flow":
+        return False
+    meta = dict(getattr(evidence, "metadata", {}) or {})
+    if (
+        meta.get("context_alignment_block_reason") != "underlying_direction_mismatch"
+        or meta.get("candidate_symbol") != expected_symbol
+        or expected_quote_version in (None, "")
+        or str(meta.get("quote_update_version")) != str(expected_quote_version)
+        or meta.get("quote_readiness_allowed") is not True
+        or meta.get("ofi_ready") is not True
+        or meta.get("ofi_3s_complete") is not True
+        or meta.get("range_research_holdoff_active") is not False
+        or meta.get("microstructure_conflicts_side") is True
+        or meta.get("strong_depth_conflicts_side") is True
+        or meta.get("ofi_conflicts_side") is True
+    ):
+        return False
+    try:
+        span = float(meta["ofi_3s_span_seconds"])
+        updates = int(meta["ofi_update_count_3s"])
+        ofi_3s = float(meta["ofi_3s_normalized"])
+        ofi_1s = float(meta["ofi_1s_normalized"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        isfinite(span)
+        and isfinite(ofi_3s)
+        and isfinite(ofi_1s)
+        and span >= 1.5
+        and updates >= 3
+        and ofi_3s >= 0.10
+        and ofi_1s >= 0
+    )
+
+
+def verified_range_vwap_final_order_risk(
+    metadata: Mapping[str, Any],
+    *,
+    strategy: str,
+    symbol: str,
+    final_symbol: str,
+    broker_quantity: int,
+    broker_lot_size: int,
+    entry_price: float,
+    ask_price: float,
+    stop_price: float,
+    target_price: float,
+) -> bool:
+    """Recheck final repriced broker plan, not merely the strategy estimate."""
+    if not verified_range_vwap_reversal(
+        metadata,
+        strategy=strategy,
+        side="CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else "",
+    ):
+        return False
+    model = metadata.get("option_cost_risk")
+    if not isinstance(model, Mapping):
+        return False
+    try:
+        modeled_lot_size = int(model["observed_contract_lot_size"])
+        slippage = float(model["slippage_each_side_bps"]) / 10000.0
+        values = (entry_price, ask_price, stop_price, target_price)
+        prices_valid = all(isfinite(float(value)) for value in values)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if (
+        not prices_valid
+        or symbol != final_symbol
+        or broker_lot_size != modeled_lot_size
+        or broker_quantity != modeled_lot_size
+        or modeled_lot_size <= 0
+        or not 0 <= slippage <= 0.01
+        or not 0 < stop_price < max(entry_price, ask_price) < target_price
+    ):
+        return False
+    stressed_entry = max(entry_price, ask_price) * (1.0 + slippage)
+    stressed_stop = stop_price * (1.0 - slippage)
+    fees = estimate_round_trip_cost(
+        entry_price=stressed_entry,
+        exit_price=stressed_stop,
+        quantity=broker_quantity,
+    ).total
+    final_cash_risk = (stressed_entry - stressed_stop) * broker_quantity + fees
+    return bool(isfinite(final_cash_risk) and 0 < final_cash_risk <= 773.0)
 
 
 def is_permanent_context_only(evidence: Any) -> bool:
@@ -135,8 +270,11 @@ __all__ = [
     "SetupGateDecision",
     "independent_same_side_confirmation",
     "is_close_signal",
+    "range_legacy_context_mismatch_only",
     "is_permanent_context_only",
     "partition_votes",
     "setup_gate_decision",
     "vote_role",
+    "verified_range_vwap_reversal",
+    "verified_range_vwap_final_order_risk",
 ]

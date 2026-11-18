@@ -1,5 +1,10 @@
 # NIFTY Range VWAP Reclaim — evidence, contract and promotion decision
-18 November 2026 · Research status: **SHADOW CONTEXT ONLY · NO LIVE ENTRY**
+18 November 2026 · Original research status: **SHADOW CONTEXT ONLY**
+
+19 November 2026 · Guarded broker-live pilot code is available behind an
+explicit host flag; this is **not evidence of strategy profitability or successful
+production activation**. Real trading remains conditional on validated deployment,
+live inputs, an active broker session and existing order protection.
 
 ## Evidence and inference
 
@@ -217,3 +222,32 @@ after broker-state and deployment safety validation.
 - This change is a research-only implementation. Source merge does not
   activate the opt-in flag or authorize orders. The modeled stop cap is not
   an upper bound on realized stop-gap losses.
+
+
+## 19 November 2026: explicit real-broker pilot contract
+
+- A dedicated pilot opt-in (`ENABLE_RANGE_VWAP_LIVE=true`) is required
+  alongside actual `EXECUTION_MODE=LIVE`, a live broker permission
+  (`ENABLE_LIVE=true` or `ENABLE_LIVE_TRADING=true`), and paper/shadow disabled.
+  Research-only settings never silently grant real-order authority.
+- The canonical taxonomy, elite builder, strategy manager and runner now agree
+  on the scoped RangeVWAPReclaim trigger. All unrelated strategies preserve
+  their original direction contracts. Countertrend admission is granted only to
+  a **sole** verified range trigger: completed futures-band reclaim with a
+  same-evaluation OFI quote, validated stressed option economics, and a checked
+  premium stop/target. Fresh adverse context still vetoes the trade.
+- One option lot is requested, conditional on broker affordability. The model
+  admits only reward/risk >= 1.5 and estimated stop loss <= **₹773** including
+  modeled costs. It never overrides broker risk, quote freshness, stale-data,
+  max-loss, position/exposure or protective-exit gates. A gap or failed stop
+  can lose more than ₹773; it is a model cap, not guaranteed realized loss.
+- Broker enablement, observed spot/futures quote, exchange VWAP, option bid/ask,
+  verified spot-referenced delta, exact expiry and contiguous completed 1m
+  futures history remain mandatory. Absence of any prerequisite fails closed.
+- A GitHub merge alone cannot change the host's private runtime env or prove
+  production is running the new commit. Verify effective release SHA and live
+  order readiness before counting any opportunity as an executable trade.
+- This user-authorized pilot uses small live size rather than treating a
+  backtest as a prerequisite. Performance is unknown; all fills, fees, stop
+  slippage, adverse excursions and session subgroup outcomes must be audited
+  retrospectively before increasing exposure.

@@ -1,10 +1,14 @@
 from types import SimpleNamespace
 
+from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     is_permanent_context_only,
     partition_votes,
+    range_legacy_context_mismatch_only,
     setup_gate_decision,
+    verified_range_vwap_final_order_risk,
+    verified_range_vwap_reversal,
     vote_role,
 )
 
@@ -112,3 +116,181 @@ def test_same_family_or_opposite_side_does_not_confirm() -> None:
     opposite_ok, _ = independent_same_side_confirmation([smc, pe])
     assert same_family_ok is False
     assert opposite_ok is False
+
+
+def test_live_range_role_requires_explicit_real_broker_pilot(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "true")
+    assert canonical_strategy_role("range_vwap") == "context"
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    assert canonical_strategy_role("RangeVWAPReclaim") == "trigger"
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "false")
+    assert canonical_strategy_role("range_vwap") == "context"
+
+
+def test_live_range_reversal_requires_proven_structure_flow_and_risk(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    metadata = {
+        "role": "trigger",
+        "setup_pass": True,
+        "range_option_flow_verified": True,
+        "range_structure": {
+            "qualified": True,
+            "side": "CE",
+            "reversal_direction_source": "two_completed_futures_candles",
+        },
+        "option_cost_risk": {
+            "qualified": True,
+            "model_only": True,
+            "worst_stop_loss_including_costs": 700.0,
+            "net_reward_risk": 1.6,
+        },
+    }
+    assert verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="CE"
+    )
+    assert not verified_range_vwap_reversal(metadata, strategy="SMC", side="CE")
+    assert not verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="PE"
+    )
+    assert not verified_range_vwap_reversal(
+        {**metadata, "range_option_flow_verified": False},
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    assert not verified_range_vwap_reversal(
+        {
+            **metadata,
+            "option_cost_risk": {
+                **metadata["option_cost_risk"],
+                "worst_stop_loss_including_costs": 774.0,
+            },
+        },
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    assert not verified_range_vwap_reversal(
+        {
+            **metadata,
+            "option_cost_risk": {
+                **metadata["option_cost_risk"],
+                "net_reward_risk": 1.49,
+            },
+        },
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    triggers, contexts, rejected = partition_votes(
+        [
+            (
+                _signal(),
+                _evidence(
+                    strategy="RangeVWAPReclaim",
+                    side="CE",
+                    **metadata,
+                ),
+            )
+        ]
+    )
+    assert len(triggers) == 1
+    assert not contexts
+    assert not rejected
+
+
+def test_only_old_trend_bias_conflict_is_exempt_for_verified_range() -> None:
+    flow = {
+        "context_alignment_block_reason": "underlying_direction_mismatch",
+        "candidate_symbol": "NFO:NIFTY26NOV25250CE",
+        "quote_update_version": 123,
+        "quote_readiness_allowed": True,
+        "ofi_ready": True,
+        "ofi_3s_complete": True,
+        "range_research_holdoff_active": False,
+        "microstructure_conflicts_side": False,
+        "strong_depth_conflicts_side": False,
+        "ofi_conflicts_side": False,
+        "ofi_3s_span_seconds": 2.0,
+        "ofi_update_count_3s": 4,
+        "ofi_3s_normalized": 0.17,
+        "ofi_1s_normalized": 0.06,
+    }
+
+    def allowed(**overrides):
+        return range_legacy_context_mismatch_only(
+            _evidence(strategy="OrderFlow", **{**flow, **overrides}),
+            expected_symbol="NFO:NIFTY26NOV25250CE",
+            expected_quote_version=123,
+        )
+
+    assert allowed()
+    assert not allowed(microstructure_conflicts_side=True)
+    assert not allowed(ofi_conflicts_side=True)
+    assert not allowed(quote_update_version=122)
+    assert not allowed(ofi_3s_normalized=-0.2)
+    assert not allowed(ofi_3s_complete=False)
+    assert not allowed(context_alignment_block_reason="adverse_microstructure")
+    assert not allowed(range_research_holdoff_active=True)
+
+
+def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    base = {
+        "role": "trigger",
+        "setup_pass": True,
+        "range_option_flow_verified": True,
+        "range_structure": {
+            "qualified": True,
+            "side": "CE",
+            "reversal_direction_source": "two_completed_futures_candles",
+        },
+        "option_cost_risk": {
+            "qualified": True,
+            "model_only": True,
+            "worst_stop_loss_including_costs": 650.0,
+            "net_reward_risk": 1.6,
+            "observed_contract_lot_size": 65,
+            "slippage_each_side_bps": 25.0,
+        },
+    }
+    args = {
+        "strategy": "RangeVWAPReclaim",
+        "symbol": "NFO:NIFTY26NOV25250CE",
+        "final_symbol": "NFO:NIFTY26NOV25250CE",
+        "broker_quantity": 65,
+        "broker_lot_size": 65,
+        "entry_price": 100.0,
+        "ask_price": 100.0,
+        "stop_price": 91.0,
+        "target_price": 120.0,
+    }
+    assert verified_range_vwap_final_order_risk(base, **args)
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "broker_lot_size": 75}
+    )
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "broker_quantity": 130}
+    )
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "stop_price": 85.0}
+    )
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "final_symbol": "NFO:NIFTY26NOV25300CE"}
+    )

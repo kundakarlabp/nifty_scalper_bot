@@ -1,4 +1,4 @@
-"""Causal session-VWAP reclaim, cash risk and no-live-trigger tests.
+"""Causal session-VWAP reclaim, cash risk and guarded live-pilot tests.
 
 These fixtures assert *logic*, not executable historical NIFTY profitability.
 """
@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
+from nifty_scalper_bot.strategies.elite_strategies import (
+    range_vwap_reclaim as range_module,
+)
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RangeVWAPReclaimStrategyConfig,
 )
@@ -597,3 +600,74 @@ def test_authenticated_history_recovery_preserves_open_anchor() -> None:
         live, recovered, future=FUTURE, decision_at=decision_at()
     )
     assert status == "unverified_recovered_bar"
+
+
+def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    # Isolate the approval plumbing from the separate option cost-model tests.
+    monkeypatch.setattr(
+        range_module,
+        "assess_option_cost_risk",
+        lambda *_args, **_kwargs: {
+            "qualified": True,
+            "worst_stop_loss_including_costs": 650.0,
+            "net_reward_risk": 1.6,
+            "stop_price_model": 94.0,
+            "vwap_limited_target_price_model": 112.0,
+            "model_only": True,
+        },
+    )
+    engine = History(bars()[:-1])
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), engine)
+    strategy._evaluate_signal(
+        OPTION,
+        indicators(decision_at=(decision_at() - timedelta(minutes=1)).isoformat()),
+        100.0,
+    )
+    engine.history = bars()
+    signal = strategy._evaluate_signal(OPTION, indicators(), 100.0)
+    assert signal is not None, strategy.last_no_vote_reason
+    assert signal.metadata["role"] == "trigger"
+    assert signal.metadata["can_trigger"] is True
+    assert signal.metadata["research_only"] is False
+    assert signal.metadata["range_option_flow_verified"] is True
+    assert signal.stop_loss == 94.0
+    assert signal.target == 112.0
+
+
+def test_live_range_pilot_rejects_unpriced_or_overbudget_signal(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    for risk, stop, target in (
+        (774.0, 94.0, 112.0),
+        (650.0, 105.0, 112.0),
+        (650.0, 94.0, 99.0),
+    ):
+        monkeypatch.setattr(
+            range_module,
+            "assess_option_cost_risk",
+            lambda *_args, **_kwargs: {
+                "qualified": True,
+                "worst_stop_loss_including_costs": risk,
+                "net_reward_risk": 1.6,
+                "stop_price_model": stop,
+                "vwap_limited_target_price_model": target,
+                "model_only": True,
+            },
+        )
+        strategy = RangeVWAPReclaimStrategy(
+            RangeVWAPReclaimStrategyConfig(), History(bars())
+        )
+        strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+        assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None

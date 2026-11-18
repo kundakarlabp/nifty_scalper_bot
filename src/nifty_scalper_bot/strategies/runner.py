@@ -100,6 +100,7 @@ from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.config.strategy_taxonomy import normalize_strategy_name
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
     active_contract_selection_from_basket,
@@ -127,6 +128,10 @@ from nifty_scalper_bot.data.pipeline import (
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
+from nifty_scalper_bot.core.strategy_vote_policy import (
+    verified_range_vwap_final_order_risk,
+    verified_range_vwap_reversal,
+)
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
@@ -19575,7 +19580,18 @@ class StrategyRunner:
             if contract_side not in {"CE", "PE"} or contract_direction not in {"CE", "PE"}:
                 contract_failures.append("direction_contract_incomplete")
             elif contract_side != contract_direction or current_side != contract_direction:
-                contract_failures.append("countertrend_direction_mismatch")
+                # No blanket countertrend admission. A manager-stamped exception
+                # must independently pass the same structural reversal contract.
+                if not (
+                    direction_contract.get("reversal_exemption") is True
+                    and current_side == contract_side
+                    and verified_range_vwap_reversal(
+                        metadata,
+                        strategy=signal_strategy,
+                        side=current_side,
+                    )
+                ):
+                    contract_failures.append("countertrend_direction_mismatch")
             if str(direction_contract.get("underlying_state") or "").upper() == "TRANSITION":
                 contract_failures.append("underlying_direction_transition")
 
@@ -19857,6 +19873,22 @@ class StrategyRunner:
                 or signal.metadata.get("strategy")
                 or "runner"
             )
+            if normalize_strategy_name(strategy_name) == "range_vwap_reclaim":
+                if not verified_range_vwap_final_order_risk(
+                    dict(signal.metadata or {}),
+                    strategy=strategy_name,
+                    symbol=normalize_symbol(signal.symbol),
+                    final_symbol=normalize_symbol(trade_symbol or base_symbol),
+                    broker_quantity=int(qty),
+                    broker_lot_size=int(lot_size),
+                    entry_price=float(price or 0.0),
+                    ask_price=float(selected_snapshot.get("ask") or 0.0),
+                    stop_price=float(stop_loss or 0.0),
+                    target_price=float(take_profit or 0.0),
+                ):
+                    return _reject_after_dedup(
+                        reason="range_vwap_final_order_cash_risk_or_contract_mismatch",
+                    )
             failure_cd_prefix = f"{base_symbol}|{signal.action}|{strategy_name}|"
             failure_cd_until = max(
                 (

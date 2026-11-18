@@ -56,6 +56,8 @@ from nifty_scalper_bot.core.research_observability import (
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
+    range_legacy_context_mismatch_only,
+    verified_range_vwap_reversal,
 )
 from nifty_scalper_bot.core.smc_flow_confirmation import SustainedSMCFlow
 from nifty_scalper_bot.core.underlying_direction import (
@@ -4447,6 +4449,17 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
         side = next(iter(trigger_sides))
+        # Only this dedicated completed-futures reversal may oppose the older
+        # trend classifier. Require its verified option-flow and cash-risk
+        # evidence; no other strategy inherits an exception.
+        range_reversal_verified = bool(
+            len(trigger_votes) == 1
+            and verified_range_vwap_reversal(
+                dict(trigger_votes[0][0].metadata or {}),
+                strategy=trigger_votes[0][1].strategy,
+                side=side,
+            )
+        )
 
         direction = str(
             indicator_map.get("underlying_direction_bias")
@@ -4478,7 +4491,7 @@ class StrategyManager(_BaseStrategyManager):
         # Continuation-only live admission. Counter-trend entries require a future,
         # separately modeled reversal contract based on underlying structure; option
         # premium behaviour or OrderFlow may never override underlying direction.
-        if side != direction:
+        if side != direction and not range_reversal_verified:
             _record_no_signal(
                 "countertrend_block",
                 "countertrend_requires_structural_reversal_contract",
@@ -4550,6 +4563,14 @@ class StrategyManager(_BaseStrategyManager):
             if self._context_vote_is_timestamped(evidence)
             and bool((evidence.metadata or {}).get("context_quality_eligible"))
             and bool((evidence.metadata or {}).get("effective_context_conflict"))
+            and not (
+                range_reversal_verified
+                and range_legacy_context_mismatch_only(
+                    evidence,
+                    expected_symbol=symbol_norm,
+                    expected_quote_version=indicator_map.get("quote_update_version"),
+                )
+            )
         ]
         if conflicting_context:
             # Preserve the SMC trigger lifecycle even when adverse fresh OFI
@@ -4701,6 +4722,7 @@ class StrategyManager(_BaseStrategyManager):
             not independent_trigger_confirmation
             and not same_side_context
             and not smc_sustained_flow_confirmed
+            and not range_reversal_verified
         ):
             context_diagnostics = [
                 {
@@ -4803,12 +4825,16 @@ class StrategyManager(_BaseStrategyManager):
         primary_signal, primary_evidence = trigger_votes[0]
         metadata = dict(primary_signal.metadata or {})
         approval_path = (
-            "aligned_trigger_consensus"
-            if independent_trigger_confirmation
+            "range_completed_futures_reversal_with_option_flow"
+            if range_reversal_verified
             else (
-                "smc_sustained_orderflow_confirmed"
-                if smc_sustained_flow_confirmed
-                else "single_trigger_context_confirmed"
+                "aligned_trigger_consensus"
+                if independent_trigger_confirmation
+                else (
+                    "smc_sustained_orderflow_confirmed"
+                    if smc_sustained_flow_confirmed
+                    else "single_trigger_context_confirmed"
+                )
             )
         )
         context_strategies = sorted(
@@ -4828,6 +4854,9 @@ class StrategyManager(_BaseStrategyManager):
                     "passed": True,
                     "side": side,
                     "underlying_direction": direction,
+                    "reversal_exemption": bool(
+                        range_reversal_verified and side != direction
+                    ),
                     "underlying_state": direction_state or None,
                     "source": indicator_map.get("direction_context_source"),
                     "age_seconds": indicator_map.get("context_age_seconds"),
@@ -4842,6 +4871,7 @@ class StrategyManager(_BaseStrategyManager):
                     "passed": True,
                     "trigger_consensus": independent_trigger_confirmation,
                     "smc_sustained_flow_confirmed": smc_sustained_flow_confirmed,
+                    "range_option_flow_verified": range_reversal_verified,
                     "confirming_trigger_strategies": confirming_trigger_strategies,
                     "context_strategies": context_strategies,
                 },
