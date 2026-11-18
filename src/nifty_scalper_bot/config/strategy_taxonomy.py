@@ -25,6 +25,9 @@ _ALIASES: dict[str, str] = {
     "vwappro": "vwap_pro",
     "vwap_pro": "vwap_pro",
     "vwap": "vwap_pro",
+    "range_vwap": "range_vwap_reclaim",
+    "range_vwap_reclaim": "range_vwap_reclaim",
+    "rangevwapreclaim": "range_vwap_reclaim",
     "orbpro": "orb_pro",
     "orb_pro": "orb_pro",
     "orb": "orb_pro",
@@ -49,6 +52,9 @@ _ALIASES: dict[str, str] = {
 _TAXONOMY: dict[str, StrategyTaxon] = {
     "smc_lite": StrategyTaxon("smc_lite", "trigger", "reclaim_structure"),
     "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "reclaim_structure"),
+    "range_vwap_reclaim": StrategyTaxon(
+        "range_vwap_reclaim", "context", "range_reversion_research"
+    ),
     "orb_pro": StrategyTaxon("orb_pro", "trigger", "opening_breakout"),
     "gamma_scalping": StrategyTaxon("gamma_scalping", "trigger", "expiry_trigger"),
     "tuesday_gamma_buyer": StrategyTaxon(
