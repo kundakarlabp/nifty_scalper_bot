@@ -80,8 +80,7 @@ def range_legacy_context_mismatch_only(
         return False
     meta = dict(getattr(evidence, "metadata", {}) or {})
     if (
-        meta.get("context_alignment_block_reason")
-        != "underlying_direction_mismatch"
+        meta.get("context_alignment_block_reason") != "underlying_direction_mismatch"
         or meta.get("candidate_symbol") != expected_symbol
         or expected_quote_version in (None, "")
         or str(meta.get("quote_update_version")) != str(expected_quote_version)
