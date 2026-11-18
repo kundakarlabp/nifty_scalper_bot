@@ -83,7 +83,10 @@ def range_vwap_live_enabled() -> bool:
 
     def enabled(key: str) -> bool:
         return str(os.getenv(key, "false")).strip().lower() in {
-            "1", "true", "yes", "on"
+            "1",
+            "true",
+            "yes",
+            "on",
         }
 
     return (
