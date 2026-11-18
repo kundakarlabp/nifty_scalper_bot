@@ -1,4 +1,9 @@
-"""Compatibility facade for elite strategy configuration objects."""
+"""Purpose: Provide stable compatibility exports for elite configuration.
+
+Responsibilities: Re-export the canonical catalog's config models, including
+the opt-in RangeVWAPReclaimStrategyConfig; keep existing imports compatible.
+Safety: No runtime admission settings are changed by this facade.
+"""
 
 from __future__ import annotations
 
