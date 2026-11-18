@@ -2,7 +2,7 @@
 
 Responsibilities: Bind enabled configurations to authoritative trigger/context
 roles and opt-in research extensions without proliferating parallel builders.
-Safety: RangeVWAPReclaim is context-only and not a live order trigger.
+Safety: RangeVWAPReclaim needs explicit LIVE pilot authorization to trigger.
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
-from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    canonical_strategy_role,
+    range_vwap_live_enabled,
+)
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
@@ -161,6 +164,8 @@ def _strategy_runtime_role(
     """Return canonical runtime role for a strategy field, or None when inactive."""
     if field_name == "oi_max_pain" and not _env_true("ENABLE_OI_CONTEXT_PROVIDER"):
         return None
+    if field_name == "range_vwap" and range_vwap_live_enabled():
+        return "trigger" if strategy_mode == "directional_scalp" else None
 
     experimental_flag = _EXPERIMENTAL_CONTEXT_FLAGS.get(field_name)
     if experimental_flag and not _env_true(experimental_flag):
