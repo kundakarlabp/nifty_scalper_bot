@@ -55,8 +55,7 @@ def verified_range_vwap_reversal(
     if (
         structure.get("qualified") is not True
         or structure.get("side") != side
-        or structure.get("reversal_direction_source")
-        != "two_completed_futures_candles"
+        or structure.get("reversal_direction_source") != "two_completed_futures_candles"
         or economics.get("qualified") is not True
         or economics.get("model_only") is not True
     ):
@@ -66,11 +65,50 @@ def verified_range_vwap_reversal(
         rr = float(economics["net_reward_risk"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
+    return bool(isfinite(risk) and isfinite(rr) and 0 < risk <= 773.0 and rr >= 1.5)
+
+
+def range_legacy_context_mismatch_only(
+    evidence: Any, *, expected_symbol: str, expected_quote_version: Any
+) -> bool:
+    """Allow a proven futures reversal to ignore *only* old trend mismatch.
+
+    Actual adverse OrderFlow/depth, unavailable flow and wrong quote version
+    must still veto admission in the strategy manager.
+    """
+    if normalize_strategy_name(getattr(evidence, "strategy", None)) != "order_flow":
+        return False
+    meta = dict(getattr(evidence, "metadata", {}) or {})
+    if (
+        meta.get("context_alignment_block_reason")
+        != "underlying_direction_mismatch"
+        or meta.get("candidate_symbol") != expected_symbol
+        or expected_quote_version in (None, "")
+        or str(meta.get("quote_update_version")) != str(expected_quote_version)
+        or meta.get("quote_readiness_allowed") is not True
+        or meta.get("ofi_ready") is not True
+        or meta.get("ofi_3s_complete") is not True
+        or meta.get("range_research_holdoff_active") is not False
+        or meta.get("microstructure_conflicts_side") is True
+        or meta.get("strong_depth_conflicts_side") is True
+        or meta.get("ofi_conflicts_side") is True
+    ):
+        return False
+    try:
+        span = float(meta["ofi_3s_span_seconds"])
+        updates = int(meta["ofi_update_count_3s"])
+        ofi_3s = float(meta["ofi_3s_normalized"])
+        ofi_1s = float(meta["ofi_1s_normalized"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
     return bool(
-        isfinite(risk)
-        and isfinite(rr)
-        and 0 < risk <= 773.0
-        and rr >= 1.5
+        isfinite(span)
+        and isfinite(ofi_3s)
+        and isfinite(ofi_1s)
+        and span >= 1.5
+        and updates >= 3
+        and ofi_3s >= 0.10
+        and ofi_1s >= 0
     )
 
 
@@ -181,6 +219,7 @@ __all__ = [
     "SetupGateDecision",
     "independent_same_side_confirmation",
     "is_close_signal",
+    "range_legacy_context_mismatch_only",
     "is_permanent_context_only",
     "partition_votes",
     "setup_gate_decision",
