@@ -17,18 +17,28 @@ def test_futures_only_is_never_executable_profitability(tmp_path: Path) -> None:
     history = []
     for i in range(40):
         close = 25250 + 7 * sin(i * pi * 2 / 13)
-        history.append({
-            "timestamp": (start_at + timedelta(minutes=i)).isoformat(),
-            "open": close - .5, "high": close + 2, "low": close - 2,
-            "close": close, "volume": 1000.0,
-        })
+        history.append(
+            {
+                "timestamp": (start_at + timedelta(minutes=i)).isoformat(),
+                "open": close - 0.5,
+                "high": close + 2,
+                "low": close - 2,
+                "close": close,
+                "volume": 1000.0,
+            }
+        )
     file = tmp_path / "minute.csv"
     with file.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
-                "start_ist", "available_at_ist", "open",
-                "high", "low", "close", "volume",
+                "start_ist",
+                "available_at_ist",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
             ],
         )
         writer.writeheader()
