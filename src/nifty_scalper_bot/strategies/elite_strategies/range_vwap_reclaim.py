@@ -229,11 +229,15 @@ def assess_option_cost_risk(
     config: RangeVWAPReclaimStrategyConfig,
 ) -> dict[str, Any]:
     """Test the modeled option payoff; this is not a broker fill forecast."""
-    bid, ask, atr = (
+    bid, ask, atr, lot = (
         _value(option_quote.get("bid")),
         _value(option_quote.get("ask")),
         _value(option_quote.get("atr")),
+        _value(option_quote.get("lot_size")),
     )
+    if lot is None or lot < 1 or lot > 1000 or not lot.is_integer():
+        return {"qualified": False, "reason": "historical_lot_size_unverified"}
+    quantity = int(lot)
     if (
         bid is None or ask is None or atr is None or bid <= 0
         or ask <= bid or atr <= 0
@@ -250,18 +254,18 @@ def assess_option_cost_risk(
     stop = (ask - stop_points) * (1 - slippage)
     target = (ask + config.gross_target_r * stop_points) * (1 - slippage)
     stop_cost = estimate_round_trip_cost(
-        entry_price=paid, exit_price=stop, quantity=65
+        entry_price=paid, exit_price=stop, quantity=quantity
     ).total
     target_cost = estimate_round_trip_cost(
-        entry_price=paid, exit_price=target, quantity=65
+        entry_price=paid, exit_price=target, quantity=quantity
     ).total
-    loss = (paid - stop) * 65 + stop_cost
-    reward = (target - paid) * 65 - target_cost
+    loss = (paid - stop) * quantity + stop_cost
+    reward = (target - paid) * quantity - target_cost
     net_rr = reward / loss if loss > 0 else 0.0
     report = {
         "qualified": False,
         "model_only": True,
-        "lot_size_assumption": 65,
+        "observed_contract_lot_size": quantity,
         "slippage_each_side_bps": config.slippage_stress_bps,
         "premium_stop_points": round(stop_points, 4),
         "stop_price_model": round(stop, 4),
@@ -354,6 +358,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):
             "bid": indicators.get("bid"),
             "ask": indicators.get("ask"),
             "atr": indicators.get("atr"),
+            "lot_size": indicators.get("lot_size"),
         }
         budget = assess_option_cost_risk(quote, config=self._cfg)
         if not budget["qualified"]:
