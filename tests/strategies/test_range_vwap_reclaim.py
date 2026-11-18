@@ -260,16 +260,17 @@ def test_context_only_taxonomy_blocks_broker_trigger() -> None:
 
 def test_shadow_opposing_trend_bias_still_uses_structural_reversal(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    engine = History(bars())
+    engine = History(bars()[:-1])
     strategy = RangeVWAPReclaimStrategy(
         RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), engine
     )
-    assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None
+    earlier = decision_at() - timedelta(minutes=1)
+    assert strategy._evaluate_signal(
+        OPTION, indicators(decision_at=earlier.isoformat()), 100.0
+    ) is None
     assert strategy._regime_bars[FUTURE][1] == 1
-    # A new finalized bar (distinct timestamp) confirms sustained range.
-    strategy._regime_bar_confirmed(
-        FUTURE, (decision_at() + timedelta(minutes=1)).isoformat()
-    )
+    # The *next* chronological finalized candle confirms sustained RANGE.
+    engine.history = bars()
     signal = strategy._evaluate_signal(OPTION, indicators(), 100.0)
     assert signal is not None
     assert signal.metadata["role"] == "context"
@@ -282,12 +283,16 @@ def test_shadow_opposing_trend_bias_still_uses_structural_reversal(monkeypatch) 
 
 def test_live_mode_never_emits_entry_trigger(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    engine = History(bars()[:-1])
     strategy = RangeVWAPReclaimStrategy(
-        RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), History(bars())
+        RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), engine
     )
-    strategy._regime_bar_confirmed(
-        FUTURE, (decision_at() + timedelta(minutes=1)).isoformat()
+    strategy._evaluate_signal(
+        OPTION,
+        indicators(decision_at=(decision_at() - timedelta(minutes=1)).isoformat()),
+        100.0,
     )
+    engine.history = bars()
     assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None
 
 
@@ -313,7 +318,7 @@ def test_stale_regime_transition_expiry_flow_and_option_selection_reject(monkeyp
             History(bars()),
         )
         strategy._regime_bar_confirmed(
-            FUTURE, (decision_at() + timedelta(minutes=1)).isoformat()
+            FUTURE, bars()[-2]["timestamp"]
         )
         assert strategy._evaluate_signal(
             OPTION, indicators(**override), 100.0
