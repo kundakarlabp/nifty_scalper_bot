@@ -1,4 +1,4 @@
-"""Purpose: Research-only NIFTY futures SESSION-VWAP reclaim elite strategy.
+"""Purpose: Guarded LIVE pilot and research NIFTY futures session-VWAP reclaim.
 
 Responsibilities: Verify or strictly recover authenticated completed futures
 minutes from 09:15; compare frozen ATR/sigma and session-anchored bands without
@@ -7,8 +7,8 @@ assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
 OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
-Safety: LIVE always produces no vote; no reversal may override the shared
-underlying-direction, broker-stop or capital authorization contracts.
+Safety: LIVE requires an explicit pilot opt-in, attested reversal and quote
+provenance; broker-stop, order affordability and capital gates remain authoritative.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.config.strategy_taxonomy import range_vwap_live_enabled
 from nifty_scalper_bot.instruments.active_contracts import (
     canonical_nifty_future_symbol,
     canonical_nifty_option_symbol,
@@ -529,7 +530,7 @@ def assess_option_cost_risk(
 
 
 class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
-    """Research-only session-VWAP reversal context, never a LIVE trigger."""
+    """Session-VWAP reversal context; broker trigger only in a guarded pilot."""
 
     def __init__(
         self, config: RangeVWAPReclaimStrategyConfig, indicator_engine: Any
@@ -905,6 +906,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
             return None
+        live_pilot = range_vwap_live_enabled()
+        if live_pilot and (
+            budget["worst_stop_loss_including_costs"] > 773.0
+            or budget["net_reward_risk"] < 1.5
+        ):
+            self._no_vote("range_live_cash_risk_or_net_rr")
+            return None
         if self._active_opportunity in self._opportunities:
             self._opportunities[self._active_opportunity]["status"] = "cost_eligible"
             self._opportunities[self._active_opportunity]["option_cost_risk"] = budget
@@ -923,39 +931,53 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if len(self._consumed_excursions) > 128:
             self._consumed_excursions = {excursion_key}
         LOGGER.info(
-            "RANGE_SESSION_VWAP_RESEARCH_CANDIDATE symbol=%s setup_id=%s "
+            "RANGE_SESSION_VWAP_CANDIDATE symbol=%s setup_id=%s "
             "primary_vwap=%s rolling_center=%s net_rr=%s cash_risk=%s "
-            "direction_proof=completed_futures_reclaim policy=context_only",
+            "direction_proof=completed_futures_reclaim live_pilot=%s",
             symbol,
             setup_id,
             structural["session_vwap_before_confirmation"],
             structural["rolling_20m_secondary_center"],
             budget["net_reward_risk"],
             budget["worst_stop_loss_including_costs"],
+            live_pilot,
         )
-        if str(os.getenv("EXECUTION_MODE", "SHADOW")).upper() == "LIVE":
-            self._no_vote("range_research_only_no_live_trigger")
+        if (
+            str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
+            and not live_pilot
+        ):
+            self._no_vote("range_live_pilot_not_armed")
+            return None
+        stop_model = budget["stop_price_model"]
+        target_model = budget["vwap_limited_target_price_model"]
+        if live_pilot and not stop_model < current_price < target_model:
+            self._no_vote("range_live_stop_target_vs_latest_price_invalid")
             return None
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
             confidence=1.0,
             entry_price=current_price,
-            stop_loss=None,
-            target=None,
+            stop_loss=stop_model if live_pilot else None,
+            target=target_model if live_pilot else None,
             quantity=1,
             strategy_name="RangeVWAPReclaim",
             metadata={
-                "role": "context",
-                "can_trigger": False,
+                "role": "trigger" if live_pilot else "context",
+                "can_trigger": live_pilot,
                 "setup_pass": True,
                 "setup_id": setup_id,
-                "setup_name": "session_vwap_reentry_shadow",
+                "setup_name": (
+                    "session_vwap_reentry_live"
+                    if live_pilot
+                    else "session_vwap_reentry_shadow"
+                ),
                 "side": side,
                 "trade_side": side,
                 "contract_side": side,
                 "source_domain": "futures_completed_bars",
-                "research_only": True,
+                "research_only": not live_pilot,
+                "range_option_flow_verified": True,
                 "reversal_direction_source": "two_completed_futures_candles",
                 "prior_trend_bias": indicators.get("underlying_direction_bias"),
                 "requires_runner_execution_validation": True,
