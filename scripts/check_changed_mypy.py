@@ -44,6 +44,11 @@ def main() -> int:
         if not name.startswith("src/nifty_scalper_bot/") or not name.endswith(".py"):
             continue
         path = Path(name)
+        # Removed modules are checked by the deletion diff; mypy cannot open
+        # a removed source file, and it must not abort unrelated validation.
+        if not path.is_file():
+            print(f"SKIP {name}: removed source file")
+            continue
         current = _mypy(path)
         base = subprocess.run(
             ["git", "show", f"{args.base}:{name}"],
