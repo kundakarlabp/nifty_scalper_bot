@@ -127,6 +127,7 @@ from nifty_scalper_bot.data.pipeline import (
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
+from nifty_scalper_bot.core.strategy_vote_policy import verified_range_vwap_reversal
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
@@ -19575,7 +19576,18 @@ class StrategyRunner:
             if contract_side not in {"CE", "PE"} or contract_direction not in {"CE", "PE"}:
                 contract_failures.append("direction_contract_incomplete")
             elif contract_side != contract_direction or current_side != contract_direction:
-                contract_failures.append("countertrend_direction_mismatch")
+                # No blanket countertrend admission. A manager-stamped exception
+                # must independently pass the same structural reversal contract.
+                if not (
+                    direction_contract.get("reversal_exemption") is True
+                    and current_side == contract_side
+                    and verified_range_vwap_reversal(
+                        metadata,
+                        strategy=signal_strategy,
+                        side=current_side,
+                    )
+                ):
+                    contract_failures.append("countertrend_direction_mismatch")
             if str(direction_contract.get("underlying_state") or "").upper() == "TRANSITION":
                 contract_failures.append("underlying_direction_transition")
 
