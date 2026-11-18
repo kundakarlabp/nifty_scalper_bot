@@ -332,8 +332,10 @@ def assess_option_cost_risk(
         theta_loss = ask * config.unknown_theta_haircut_pct / 100
         theta_source = "unknown_theta_premium_haircut"
     else:
-        theta_loss = max(0.0, -theta) * config.assumed_hold_minutes / 390.0
-        theta_source = "observed_theta_daily_390minute_stress"
+        # NSE cash-market session is 375 minutes, not the US 390 minutes.
+        # This is deliberately a conservative intraday theta stress proxy.
+        theta_loss = max(0.0, -theta) * config.assumed_hold_minutes / 375.0
+        theta_source = "observed_theta_daily_375minute_stress"
     reachable_premium_points = max(
         0.0,
         abs(delta) * distance * config.target_delta_haircut - theta_loss,
@@ -416,16 +418,17 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         current = _time(timestamp)
         if current is None:
             return False
+        required = max(1, int(self._cfg.min_regime_completed_bars))
         previous, n = self._regime_bars.get(future, ("", 0))
         earlier = _time(previous)
         if current == earlier:
-            return n >= self._cfg.min_regime_completed_bars
+            return bool(n >= required)
         if earlier is None or current - earlier != timedelta(minutes=1):
             n = 1
         else:
-            n = min(self._cfg.min_regime_completed_bars, n + 1)
+            n = min(required, n + 1)
         self._regime_bars[future] = timestamp, n
-        return n >= self._cfg.min_regime_completed_bars
+        return bool(n >= required)
 
     def _maybe_reset_excursions(self, future: str, evidence: Mapping[str, Any]) -> None:
         """Rearm only after futures actually return near session VWAP."""
@@ -564,6 +567,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             ofi_updates = int(indicators.get("ofi_update_count_3s") or 0)
         except (TypeError, ValueError, OverflowError):
             ofi_updates = 0
+        depth_imbalance = _value(indicators.get("depth_imbalance"))
+        if depth_imbalance is not None and depth_imbalance <= -0.15:
+            self._no_vote("range_adverse_option_book_depth")
+            return None
         if not (
             indicators.get("ofi_ready") is True
             and indicators.get("ofi_3s_complete") is True
@@ -589,13 +596,25 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         greek_map = greeks if isinstance(greeks, Mapping) else {}
         delta = indicators.get("delta")
         theta = indicators.get("theta")
+        if delta is None:
+            delta = (
+                greek_map.get("delta")
+                if isinstance(greeks, Mapping)
+                else getattr(greeks, "delta", None)
+            )
+        if theta is None:
+            theta = (
+                greek_map.get("theta")
+                if isinstance(greeks, Mapping)
+                else getattr(greeks, "theta", None)
+            )
         quote = {
             "bid": indicators.get("bid"),
             "ask": indicators.get("ask"),
             "atr": indicators.get("atr"),
             "lot_size": indicators.get("lot_size"),
-            "delta": delta if delta is not None else greek_map.get("delta"),
-            "theta": theta if theta is not None else greek_map.get("theta"),
+            "delta": delta,
+            "theta": theta,
         }
         entry = _value(structural.get("underlying_entry_close"))
         target = _value(structural.get("session_vwap_before_confirmation"))
