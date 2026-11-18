@@ -1,6 +1,9 @@
-"""
-Configuration dataclasses for elite strategy package.
-Production-Grade: Full implementation with validation, slots, and self-healing logic.
+"""Purpose: Define and validate elite strategy configuration interfaces.
+
+Responsibilities: Maintain inherited dataclass configs and the aggregate
+EliteStrategiesSettings registry. RangeVWAPReclaimStrategyConfig carries
+prespecified, unvalidated research thresholds; they do not authorize trades.
+Safety: Existing SMC, VWAPPro, ORB and broker-risk configurations are unchanged.
 """
 
 from __future__ import annotations
