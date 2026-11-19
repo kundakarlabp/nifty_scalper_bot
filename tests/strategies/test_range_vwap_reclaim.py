@@ -284,6 +284,10 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
         futures_stop_distance=3,
     )
     assert a["qualified"] is True, a
+    # Bid-based stop activation and adverse liquidation are distinct prices.
+    assert (
+        0 < a["modeled_stressed_stop_fill_price"] < a["stop_price_model"] < quote["ask"]
+    )
     assert a["worst_stop_loss_including_costs"] <= 773
     assert a["net_reward_risk"] >= 1.5
     assert a["projected_premium_gain_points"] < 0.55 * 35
@@ -671,3 +675,70 @@ def test_live_range_pilot_rejects_unpriced_or_overbudget_signal(monkeypatch) -> 
         )
         strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
         assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None
+
+
+def test_range_setup_lifecycle_reuses_manager_broker_callbacks() -> None:
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    setup_id = "range_session_vwap:NFO:NIFTY26NOVFUT:CE:2026-11-18T10:01:00+05:30"
+    key = (FUTURE, "CE", "2026-11-18")
+    opportunity = "one"
+    strategy._seen.add(setup_id)
+    strategy._consumed_excursions.add(key)
+    strategy._pending_excursions[setup_id] = key
+    strategy._opportunities[opportunity] = {
+        "status": "cost_eligible",
+        "modeled_cost_eligible": True,
+        "setup_id": setup_id,
+    }
+
+    # Wrong side, ambiguous broker rejection and stale setup are never released.
+    strategy.notify_entry_rejected(
+        "PE", setup_id=setup_id, reason="no_affordable_execution_candidate"
+    )
+    strategy.notify_entry_rejected(
+        "CE", setup_id="other", reason="no_affordable_execution_candidate"
+    )
+    strategy.notify_entry_rejected(
+        "CE", setup_id=setup_id, reason="broker_submit_unknown"
+    )
+    assert setup_id in strategy._seen and key in strategy._consumed_excursions
+
+    # Runner invokes this only after a deterministic no-broker affordability veto.
+    strategy.notify_entry_rejected(
+        "CE", setup_id=setup_id, reason="no_affordable_execution_candidate"
+    )
+    assert setup_id not in strategy._seen
+    assert key not in strategy._consumed_excursions
+    assert setup_id not in strategy._pending_excursions
+    report = strategy.get_research_snapshot()
+    assert report["cost_eligible_candidates"] == 1
+    assert report["prebroker_capacity_rejections"] == 1
+    assert report["broker_orders_accepted"] == 0
+
+    # Accepted order claims remain consumed even on subsequent rejection calls.
+    strategy._seen.add(setup_id)
+    strategy._consumed_excursions.add(key)
+    strategy._pending_excursions[setup_id] = key
+    strategy.notify_entry_accepted("CE", setup_id=setup_id)
+    strategy.notify_entry_rejected(
+        "CE", setup_id=setup_id, reason="no_affordable_execution_candidate"
+    )
+    assert setup_id in strategy._seen
+    assert key in strategy._consumed_excursions
+    assert report["option_fills_verified"] is False
+    assert strategy.get_research_snapshot()["broker_orders_accepted"] == 1
+
+
+def test_unarmed_range_pilot_does_not_consume_setup(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "false")
+    engine = History(bars())
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(min_net_reward_risk=0.0), engine
+    )
+    strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+    assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None
+    assert not strategy._seen
+    assert not strategy._consumed_excursions

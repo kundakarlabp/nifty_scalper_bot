@@ -7,6 +7,10 @@ assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
 OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
+Entry lifecycle: notify_entry_accepted and notify_entry_rejected use the existing
+StrategyManager callbacks to reconcile exact setup IDs; only a proven pre-broker
+capacity rejection releases a reserved excursion. assess_option_cost_risk models
+the bid-price stop trigger separately from the adverse stop liquidation fill.
 Safety: LIVE requires an explicit pilot opt-in, attested reversal and quote
 provenance; broker-stop, order affordability and capital gates remain authoritative.
 """
@@ -469,13 +473,17 @@ def assess_option_cost_risk(
     slippage = config.slippage_stress_bps / 10000.0
     paid = ask * (1.0 + slippage)
     spread = ask - bid
-    stop = (ask - premium_stop_points) * (1.0 - slippage) - spread
-    if stop <= 0.0:
+    # Keep the executable-bid stop trigger distinct from an adverse fill.
+    # The additional spread allows for bid deterioration after the trigger;
+    # neither estimate guarantees a stop fill through a gap.
+    stop_trigger = ask - premium_stop_points - spread
+    stop_fill = stop_trigger * (1.0 - slippage) - spread
+    if stop_trigger <= 0.0 or stop_fill <= 0.0:
         return {"qualified": False, "reason": "liquidation_price_invalid"}
     stop_cost = estimate_round_trip_cost(
-        entry_price=paid, exit_price=stop, quantity=quantity
+        entry_price=paid, exit_price=stop_fill, quantity=quantity
     ).total
-    loss = (paid - stop) * quantity + stop_cost
+    loss = (paid - stop_fill) * quantity + stop_cost
 
     def modeled_exit(gain: float) -> dict[str, float]:
         capped = min(max(0.0, gain), config.gross_target_r * premium_stop_points)
@@ -534,7 +542,8 @@ def assess_option_cost_risk(
         "slippage_each_side_bps": config.slippage_stress_bps,
         "modeled_extra_exit_spread_points": round(spread, 4),
         "premium_stop_points": round(premium_stop_points, 4),
-        "stop_price_model": round(stop, 4),
+        "stop_price_model": round(stop_trigger, 4),
+        "modeled_stressed_stop_fill_price": round(stop_fill, 4),
         "vwap_limited_target_price_model": selected["exit_bid"],
         "worst_stop_loss_including_costs": round(loss, 2),
         "target_net_reward_after_costs": selected["net_reward"],
@@ -567,15 +576,48 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         self._seen: set[str] = set()
         self._regime_bars: dict[str, tuple[str, int]] = {}
         self._consumed_excursions: set[tuple[str, str, str]] = set()
+        self._pending_excursions: dict[str, tuple[str, str, str]] = {}
         self._opportunities: dict[str, dict[str, Any]] = {}
         self._active_opportunity: str | None = None
+
+    def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
+        """Finalize an emitted setup through the existing runner order callback."""
+        key = self._pending_excursions.get(str(setup_id or ""))
+        if key is None or key[1] != str(side or "").upper():
+            return
+        self._pending_excursions.pop(str(setup_id), None)
+        for row in self._opportunities.values():
+            if row.get("setup_id") == setup_id:
+                row["status"] = "broker_order_accepted"
+                return
+
+    def notify_entry_rejected(
+        self, side: str, *, setup_id: str | None = None, reason: str | None = None
+    ) -> None:
+        """Release only proven pre-broker capacity rejects; never unknown orders."""
+        if reason != "no_affordable_execution_candidate":
+            return
+        identity = str(setup_id or "")
+        key = self._pending_excursions.get(identity)
+        if key is None or key[1] != str(side or "").upper():
+            return
+        self._pending_excursions.pop(identity, None)
+        self._seen.discard(identity)
+        self._consumed_excursions.discard(key)
+        for row in self._opportunities.values():
+            if row.get("setup_id") == identity:
+                row["status"] = "prebroker_rejected"
+                row["prebroker_rejection_reason"] = reason
+                return
 
     def _no_vote(self, reason: str) -> None:
         super()._no_vote(reason)
         key = self._active_opportunity
         if key and key in self._opportunities:
             row = self._opportunities[key]
-            if row.get("status") != "cost_eligible":
+            if row.get("modeled_cost_eligible"):
+                row["post_cost_rejection"] = reason
+            else:
                 row["status"] = "rejected"
                 row["dominant_rejection"] = reason
 
@@ -593,7 +635,20 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             "validated_range_evaluations": len(records),
             "completed_band_reclaims": len(records),
             "cost_eligible_candidates": sum(
-                r.get("status") == "cost_eligible" for r in records
+                r.get("modeled_cost_eligible") is True for r in records
+            ),
+            "broker_orders_accepted": sum(
+                r.get("status") == "broker_order_accepted" for r in records
+            ),
+            "prebroker_capacity_rejections": sum(
+                r.get("status") == "prebroker_rejected" for r in records
+            ),
+            "post_cost_rejection_reasons": list(
+                Counter(
+                    r.get("post_cost_rejection")
+                    for r in records
+                    if r.get("post_cost_rejection")
+                ).most_common(5)
             ),
             "dominant_rejection": rejected.most_common(5),
             "shadow_net_expectancy": None,
@@ -941,8 +996,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_live_cash_risk_or_net_rr")
             return None
         if self._active_opportunity in self._opportunities:
-            self._opportunities[self._active_opportunity]["status"] = "cost_eligible"
-            self._opportunities[self._active_opportunity]["option_cost_risk"] = budget
+            row = self._opportunities[self._active_opportunity]
+            row["status"] = "cost_eligible"
+            row["modeled_cost_eligible"] = True
+            row["option_cost_risk"] = budget
 
         setup_id = (
             f"range_session_vwap:{future}:{side}:"
@@ -951,12 +1008,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if setup_id in self._seen:
             self._no_vote("range_setup_already_observed")
             return None
-        self._seen.add(setup_id)
-        self._consumed_excursions.add(excursion_key)
-        if len(self._seen) > 512:
-            self._seen = {setup_id}
-        if len(self._consumed_excursions) > 128:
-            self._consumed_excursions = {excursion_key}
         LOGGER.info(
             "RANGE_SESSION_VWAP_CANDIDATE symbol=%s setup_id=%s "
             "primary_vwap=%s rolling_center=%s net_rr=%s cash_risk=%s "
@@ -980,6 +1031,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if live_pilot and not stop_model < current_price < target_model:
             self._no_vote("range_live_stop_target_vs_latest_price_invalid")
             return None
+        # Reserve only an actually emitted vote. The manager/runner already
+        # own broker deduplication; callbacks release proven pre-broker rejects.
+        self._seen.add(setup_id)
+        self._consumed_excursions.add(excursion_key)
+        self._pending_excursions[setup_id] = excursion_key
+        if self._active_opportunity in self._opportunities:
+            self._opportunities[self._active_opportunity]["setup_id"] = setup_id
+        if len(self._seen) > 512:
+            self._seen = {setup_id}
+        if len(self._consumed_excursions) > 128:
+            self._consumed_excursions = {excursion_key}
+        if len(self._pending_excursions) > 512:
+            self._pending_excursions.pop(next(iter(self._pending_excursions)))
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
