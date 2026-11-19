@@ -1403,6 +1403,8 @@ class StrategyManager(_BaseStrategyManager):
         self._use_regime_adaptive = bool(app_settings.USE_REGIME_ADAPTIVE)
         self._observability_counters: dict[str, int] = {
             "signals_blocked_by_regime": 0,
+            "regime_gate_denials_observed": 0,
+            "regime_adaptive_fallback_evaluations": 0,
             "signals_blocked_by_risk": 0,
             "orders_submitted": 0,
         }
@@ -2946,7 +2948,8 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
-                    self._observability_counters["signals_blocked_by_regime"] += 1
+                    # A manager denial is not an executed veto in adaptive mode.
+                    self._observability_counters["regime_gate_denials_observed"] += 1
                     log_throttled(
                         log,
                         key=f"regime_scale_fallback:{symbol}",
@@ -2981,6 +2984,7 @@ class StrategyManager(_BaseStrategyManager):
                             },
                         )
                     else:
+                        self._observability_counters["signals_blocked_by_regime"] += 1
                         _log_reject(
                             "regime_gate_block",
                             {"gate_reasons": reasons, "gate": "regime_manager"},
@@ -3010,6 +3014,9 @@ class StrategyManager(_BaseStrategyManager):
                     regime_scale = min(
                         regime_scale, max(self._regime_fallback_scale, 0.0)
                     )
+                    self._observability_counters[
+                        "regime_adaptive_fallback_evaluations"
+                    ] += 1
             except Exception as exc:
                 log.error(
                     "Failure in StrategyManager.generate_signal regime fallback: %s",
@@ -3021,6 +3028,44 @@ class StrategyManager(_BaseStrategyManager):
             if isinstance(regime_snapshot, RegimeSnapshot)
             else None
         )
+        raw_regime_snapshot = None
+        if regime_manager is not None:
+            raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+            if callable(raw_getter):
+                raw_regime_snapshot = raw_getter()
+        raw_regime_name = getattr(raw_regime_snapshot, "regime", None)
+        raw_regime_reason = getattr(raw_regime_snapshot, "reason", None)
+        regime_decision_action = (
+            "manager_allowed"
+            if regime_allowed is True
+            else "adaptive_fallback"
+            if regime_allowed is False and self._use_regime_adaptive
+            else "unavailable"
+        )
+        if regime_manager is not None:
+            log_throttled(
+                log,
+                f"regime_decision_context:{symbol}",
+                "REGIME_DECISION_CONTEXT symbol=%s stable=%s raw=%s raw_reason=%s manager_allowed=%s action=%s scale=%.3f",
+                symbol,
+                regime_name,
+                raw_regime_name,
+                raw_regime_reason,
+                regime_allowed,
+                regime_decision_action,
+                regime_scale,
+                interval_sec=60.0,
+                extra={
+                    "event": "REGIME_DECISION_CONTEXT",
+                    "symbol": symbol,
+                    "stable_regime": regime_name,
+                    "raw_regime": raw_regime_name,
+                    "raw_reason": raw_regime_reason,
+                    "manager_allowed": regime_allowed,
+                    "action": regime_decision_action,
+                    "position_scale": regime_scale,
+                },
+            )
         log.debug(
             "strategy_regime_scaling",
             extra={
@@ -3033,7 +3078,12 @@ class StrategyManager(_BaseStrategyManager):
         )
         indicators = dict(indicators)
         if regime_name is not None:
+            # The transition-filtered label is contextual, not raw confirmation.
             indicators["regime"] = regime_name
+        indicators["regime_stable"] = regime_name
+        indicators["regime_raw"] = raw_regime_name
+        indicators["regime_gate_allowed"] = regime_allowed
+        indicators["regime_evidence_status"] = regime_decision_action
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
         indicators.setdefault("close", current_price)
