@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
+from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.strategies.elite_strategies import (
     range_vwap_reclaim as range_module,
 )
@@ -608,7 +609,7 @@ def test_authenticated_history_recovery_preserves_open_anchor() -> None:
 
 
 def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -631,6 +632,10 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     )
     engine = History(bars()[:-1])
     strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), engine)
+    monkeypatch.setattr(
+        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+    )
+    strategy.attach_persistent_guard(PositionManager(str(tmp_path / "positions.json")))
     strategy._evaluate_signal(
         OPTION,
         indicators(decision_at=(decision_at() - timedelta(minutes=1)).isoformat()),
@@ -767,3 +772,99 @@ def test_session_open_anchor_supports_utc_and_rejects_stale_or_naive() -> None:
     )
     assert not has_ist_session_anchor([], decision_at=decision)
     assert not has_ist_session_anchor(observed, decision_at="bad_timestamp")
+
+
+def test_live_range_durable_guard_survives_restart_and_preserves_unknown_order(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setattr(
+        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+    )
+    file = tmp_path / "positions.json"
+    owner = PositionManager(str(file))
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    strategy.attach_persistent_guard(owner)
+    assert strategy._load_persistent_guard(decision_at())
+    setup_id = "range_session_vwap:NFO:NIFTY26NOVFUT:CE:2026-11-18T09:59:00+05:30"
+    excursion = (FUTURE, "CE", "2026-11-18")
+    strategy._seen.add(setup_id)
+    strategy._consumed_excursions.add(excursion)
+    strategy._pending_excursions[setup_id] = excursion
+    assert strategy._persist_guard()
+
+    # Reload the exact canonical position snapshot; no separate guard file.
+    restored_owner = PositionManager(str(file))
+    restored = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    restored.attach_persistent_guard(restored_owner)
+    assert restored._load_persistent_guard(decision_at())
+    assert setup_id in restored._seen
+    assert excursion in restored._consumed_excursions
+    restored.notify_entry_rejected(
+        "CE", setup_id=setup_id, reason="broker_submit_unknown"
+    )
+    assert setup_id in restored._seen
+    assert excursion in restored._consumed_excursions
+
+    # Deterministic PRE-broker rejection may release, and release is durable.
+    restored.notify_entry_rejected(
+        "CE", setup_id=setup_id, reason="no_affordable_execution_candidate"
+    )
+    again = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    again.attach_persistent_guard(PositionManager(str(file)))
+    assert again._load_persistent_guard(decision_at())
+    assert setup_id not in again._seen
+    assert excursion not in again._consumed_excursions
+
+
+def test_range_guard_fails_closed_without_persisted_owner(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    assert not strategy._load_persistent_guard(decision_at())
+    assert not strategy._persist_guard()
+
+
+def test_range_guard_does_not_authorize_memory_only_write(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setattr(
+        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+    )
+    owner = PositionManager(str(tmp_path / "positions.json"))
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    strategy.attach_persistent_guard(owner)
+    assert strategy._load_persistent_guard(decision_at())
+
+    def no_disk_write(*_args, **_kwargs) -> None:
+        raise OSError("test simulated disk failure")
+
+    monkeypatch.setattr(owner, "save_state", no_disk_write)
+    strategy._seen.add("range_session_vwap:NFO:NIFTY26NOVFUT:CE:test")
+    strategy._consumed_excursions.add((FUTURE, "CE", "2026-11-18"))
+    assert not strategy._persist_guard()
