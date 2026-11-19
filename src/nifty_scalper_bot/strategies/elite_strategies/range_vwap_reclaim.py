@@ -983,6 +983,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "reversal_direction_source": "two_completed_futures_candles",
                 "prior_trend_bias": indicators.get("underlying_direction_bias"),
                 "requires_runner_execution_validation": True,
+                # Reuse the canonical bracket time-stop machinery; never add
+                # a second position manager for this strategy.
+                "range_option_hold_minutes": self._cfg.assumed_hold_minutes,
                 "range_structure": structural,
                 "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
