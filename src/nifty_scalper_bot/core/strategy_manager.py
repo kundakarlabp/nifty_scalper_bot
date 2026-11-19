@@ -3026,13 +3026,15 @@ class StrategyManager(_BaseStrategyManager):
             else None
         )
         evidence_verified = bool(
-            observed_regime is not None
+            regime_manager is not None
+            and isinstance(raw_regime_snapshot, RegimeSnapshot)
             and regime_name is not None
-            and normalize_regime(observed_regime) == normalize_regime(regime_name)
-            and normalize_regime(observed_regime).value != "UNKNOWN"
-            and raw_regime_snapshot is not None
-            and raw_regime_snapshot.confidence >= regime_manager.min_confidence
-        ) if regime_manager is not None else False
+            and normalize_regime(raw_regime_snapshot.regime)
+            == normalize_regime(regime_name)
+            and normalize_regime(raw_regime_snapshot.regime).value != "UNKNOWN"
+            and raw_regime_snapshot.confidence
+            >= getattr(regime_manager, "min_confidence", 0.0)
+        )
         regime_policy = (
             "adaptive_continuation"
             if regime_allowed is False and self._use_regime_adaptive
