@@ -6,6 +6,7 @@
 Responsibilities: PositionManager maintains pending/terminal order state,
 reconciles broker snapshots with local positions and persists recovery state.
 Key interfaces: PositionManager and broker order/position reconciliation helpers.
+Its canonical risk-circuit snapshot can verify RangeVWAP setup reservations on disk.
 Boundaries: OrderManager submits orders; BracketManager chooses protective exits;
 position bookkeeping must not create independent entry or stop decisions.
 Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
