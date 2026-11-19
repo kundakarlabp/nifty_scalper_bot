@@ -740,7 +740,11 @@ class MarketRegimeManager:
                 snapshot.confidence,
                 getattr(stable_snapshot, "regime", None),
                 data.get("adx"),
-                f"{history_momentum:.6f}" if history_momentum is not None else "unavailable",
+                (
+                    f"{history_momentum:.6f}"
+                    if history_momentum is not None
+                    else "unavailable"
+                ),
                 interval_sec=60.0,
                 extra={
                     "event": "REGIME_INPUT_VERIFICATION",
