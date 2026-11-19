@@ -14,6 +14,8 @@ Direction-authority invariant:
 - _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
   direction observations reject non-finite source confidence and age;
   the same bounded freshness rule is used before arbitrating spot/futures.
+- get_regime_gate_counters exposes cumulative real hard vetoes separately
+  from adaptive regime denials for runner interval reporting.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
 - The final option combiner gate independently revalidates direction alignment.
