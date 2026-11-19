@@ -68,6 +68,9 @@ from nifty_scalper_bot.core.underlying_direction import (
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
+from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
+    has_ist_session_anchor,
+)
 from nifty_scalper_bot.strategies.entry_evidence import infer_option_side
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.core.strategy_context_builder import (
@@ -3705,17 +3708,13 @@ class StrategyManager(_BaseStrategyManager):
                         observed = in_memory_getter(
                             fut_id, count=400, field="bars"
                         ) or []
-                        first = observed[0] if observed else {}
-                        first_at = (
-                            first.get("timestamp")
-                            if isinstance(first, t.Mapping) else None
-                        )
-                        # No assumption about UTC vs IST serialisation.
-                        start_is_0915 = bool(
-                            first_at is not None
-                            and "T09:15:00" in str(first_at)
-                        )
-                        if not start_is_0915:
+                        # Reuse the strategy's timezone-aware 09:15 parser;
+                        # UTC-encoded 03:45 bars must not trigger extra reads.
+                        if not has_ist_session_anchor(
+                            observed,
+                            decision_at=indicators.get("decision_at")
+                            or datetime.now(timezone.utc),
+                        ):
                             # Existing local pipeline only; any missing source,
                             # symbol or availability timestamp fails in strategy.
                             key = (
