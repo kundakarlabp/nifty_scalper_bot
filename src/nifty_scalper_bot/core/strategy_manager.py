@@ -3715,17 +3715,38 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
-            if symbol_is_option and (
-                (
-                    indicators.get("regime") is not None
-                    and not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+            regime_blocked = bool(
+                symbol_is_option
+                and indicators.get("regime") is not None
+                and not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+            )
+            direction_blocked = bool(
+                symbol_is_option
+                and indicators.get("underlying_direction_state")
+                == UnderlyingDirectionState.NEUTRAL.value
+                and strategy_name in {"SMC", "VWAPPro", "ORBPro"}
+            )
+            if regime_blocked or direction_blocked:
+                stage = "regime" if regime_blocked else "underlying_direction"
+                log_throttled(
+                    log,
+                    f"strategy_stage_reject:{symbol}:{strategy_name}:{stage}",
+                    "STRATEGY_STAGE_REJECTION stage=%s strategy=%s symbol=%s regime=%s direction_state=%s reason=not_eligible",
+                    stage,
+                    strategy_name,
+                    symbol,
+                    normalize_regime(indicators.get("regime")).value,
+                    indicators.get("underlying_direction_state"),
+                    interval_sec=60.0,
+                    extra={
+                        "event": "STRATEGY_STAGE_REJECTION",
+                        "stage": stage,
+                        "strategy": strategy_name,
+                        "symbol": symbol,
+                        "regime": normalize_regime(indicators.get("regime")).value,
+                        "reason": "not_eligible",
+                    },
                 )
-                or (
-                    indicators.get("underlying_direction_state")
-                    == UnderlyingDirectionState.NEUTRAL.value
-                    and strategy_name in {"SMC", "VWAPPro", "ORBPro"}
-                )
-            ):
                 reason = "strategy_regime_or_direction_ineligible"
                 strategy_reasons[strategy_name] = reason
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
@@ -4265,6 +4286,23 @@ class StrategyManager(_BaseStrategyManager):
                 no_vote_reason_counts=no_vote_reason_counts,
             )
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
+            log_throttled(
+                log,
+                f"strategy_stage_qualified:{symbol}",
+                "STRATEGY_STAGE_QUALIFIED stage=setup symbol=%s strategy=%s setup_category=%s regime=%s economic_ranking_live=%s",
+                symbol,
+                (combined.metadata or {}).get("strategy"),
+                (combined.metadata or {}).get("setup_category"),
+                normalize_regime(indicators.get("regime")).value,
+                False,
+                interval_sec=15.0,
+                extra={
+                    "event": "STRATEGY_STAGE_QUALIFIED",
+                    "stage": "setup",
+                    "symbol": symbol,
+                    "setup_category": (combined.metadata or {}).get("setup_category"),
+                },
+            )
             exit_result = "signal"
             signal_action = combined.action
             _emit_strategy_exit()
