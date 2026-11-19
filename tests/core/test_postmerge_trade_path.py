@@ -870,3 +870,22 @@ def test_invalid_option_prices_never_create_shadow_economics() -> None:
     )
     assert result is not None
     assert result.metadata["shadow_economic_comparison"] == []
+
+
+def test_shadow_model_exception_does_not_block_live_trigger(monkeypatch) -> None:
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    def broken_model(**kwargs):
+        raise ValueError("invalid research cost assumptions")
+
+    monkeypatch.setattr(module, "evaluate_net_reward_risk", broken_model)
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence("OrderFlow", role="context")
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[trigger, context],
+        indicators={**_live_indicators(), "ask": 110.0, "bid": 109.0},
+    )
+    assert approved is not None
+    assert approved.metadata["shadow_economic_comparison"] == []
