@@ -11,6 +11,9 @@ Runtime role:
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains active history counts and uses shared direction-context resolution.
+- Exposes inspect_recent_canonical_history for a bounded, read-only OHLCV
+  check of latest completed MDM, runner and indicator candles after reseeding;
+  count-based readiness is not misreported as full content parity.
 - Reads MDM-finalized candles for LIVE indicator history (no coalesced-tick OHLCV);
   untrusted cumulative observations remain excluded.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
