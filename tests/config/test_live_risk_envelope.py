@@ -248,8 +248,10 @@ def test_live_daily_absolute_ceiling_does_not_grow_with_cash(monkeypatch) -> Non
     monkeypatch.delenv("RISK_MAX_DAY_LOSS", raising=False)
     settings = _build_risk_settings()
     assert settings.max_daily_loss_absolute == pytest.approx(773.0)
-    assert min(20_000.0 * settings.daily_loss_pct / 100.0,
-               settings.max_daily_loss_absolute) <= 773.0
+    effective_cap = min(
+        20_000.0 * settings.daily_loss_pct / 100.0, settings.max_daily_loss_absolute
+    )
+    assert effective_cap == pytest.approx(773.0)
 
 
 def test_live_absolute_ceiling_respects_stricter_operator_override(monkeypatch) -> None:
