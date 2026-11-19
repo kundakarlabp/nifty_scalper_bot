@@ -1,4 +1,13 @@
-"""Central market regime coordinator with gating and diagnostics."""
+"""Central market regime coordinator with gating and diagnostics.
+
+Responsibilities: refresh timestamped underlying indicators and completed
+in-memory price history, stabilise regime transitions, and explain the accepted
+regime evidence in throttled runtime diagnostics.
+
+Safety: Missing or stale history must not be invented, a low ATR alone cannot
+license mean-reversion entries, and existing risk and broker gates remain owned
+by their execution components.
+"""
 
 from __future__ import annotations
 
