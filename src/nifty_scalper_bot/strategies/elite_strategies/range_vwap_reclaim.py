@@ -1,9 +1,9 @@
 """Purpose: Guarded LIVE pilot and research NIFTY futures session-VWAP reclaim.
 
 Responsibilities: Verify or strictly recover authenticated completed futures
-minutes from 09:15; has_ist_session_anchor reuses the canonical timezone
-parser for the manager's bounded local-history recovery. Compare frozen bands
-look-ahead; observe structural reclaim independently of later quote admission.
+minutes from 09:15; has_ist_session_anchor verifies UTC/IST session-open
+identity for bounded local recovery. Frozen ATR/sigma and session-anchored
+bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
