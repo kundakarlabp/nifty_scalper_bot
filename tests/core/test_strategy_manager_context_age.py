@@ -363,6 +363,7 @@ def test_nonfinite_context_input_cannot_supply_direction() -> None:
     )
     assert side is None and score == 0.0
 
+
 def test_atr_noise_does_not_create_a_false_ema_trend_conflict() -> None:
     manager = _direction_manager()
     direction, confidence, reasons = manager._derive_context_direction(
