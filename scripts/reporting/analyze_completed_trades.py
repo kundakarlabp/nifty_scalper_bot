@@ -1,9 +1,10 @@
 """Analyze canonical completed trades without modifying live strategy parameters.
 
-Responsibilities: Optionally isolate one canonical strategy and apply extra
-10/25/50-bps per-side liquidation stress using verified completed-ledger prices.
+Responsibilities: Isolate canonical Range VWAP trade outcomes, observed
+paired bid/ask execution-quality coverage and 10/25/50-bps stress scenarios.
 Safety: No missing premium/quantity, broker-cost identity or independent-trade
-sample may be inferred as zero loss. Sensitivities are not fill-path replays;
+sample may be inferred as zero loss. Calibration is read-only and cannot
+automatically promote any parameter. Sensitivities are not fill-path replays;
 selection diagnostics require complete finite R-multiple coverage.
 """
 
@@ -14,7 +15,9 @@ import json
 import math
 import sys
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +56,7 @@ from nifty_scalper_bot.backtesting.ledger_integrity import (  # noqa: E402
 from nifty_scalper_bot.config.strategy_taxonomy import (  # noqa: E402
     normalize_strategy_name,
 )
+from nifty_scalper_bot.utils.market_hours import IST  # noqa: E402
 from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
     load_candidate_decision_rows,
     load_trade_ledger_rows as load_canonical_trade_ledger_rows,
@@ -338,6 +342,90 @@ def range_vwap_slippage_stress(
     }
 
 
+def range_vwap_execution_calibration(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Read observed paired option fills; never adjust live risk from samples."""
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    pairs: list[tuple[float, float]] = []
+    dates: set[str] = set()
+    for trade in trades:
+        q = trade.execution_quality
+        try:
+            entry = float(q["entry_slippage_bps"])
+            exit_slip = float(q["exit_slippage_bps"])
+            entry_ask = float(q["entry_quote_ask"])
+            exit_bid = float(q["exit_quote_bid"])
+            exit_age_ms = float(q["exit_quote_age_ms"])
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if (
+            trade.cost_source != "broker_virtual_contract_note"
+            or q.get("exit_quote_evidence_source") != "cached_bid_observation"
+            or not all(
+                math.isfinite(value)
+                for value in (entry, exit_slip, entry_ask, exit_bid, exit_age_ms)
+            )
+            or min(entry_ask, exit_bid) <= 0
+            or not 0 <= exit_age_ms <= 2000
+        ):
+            continue
+        pairs.append((entry, exit_slip))
+        dates.add(datetime.fromtimestamp(trade.closed_at, IST).date().isoformat())
+
+    def percentile(values: list[float], pct: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * pct
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        return round(
+            ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower),
+            3,
+        )
+
+    entry_adverse = [max(0.0, pair[0]) for pair in pairs]
+    exit_adverse = [max(0.0, pair[1]) for pair in pairs]
+    complete = len(trades)
+    coverage = len(pairs) / complete if complete else 0.0
+    ready = len(pairs) >= 30 and len(dates) >= 10 and coverage >= 0.9
+    return {
+        "ready_for_research_calibration": ready,
+        "live_parameter_change_allowed": False,
+        "completed_range_trades": complete,
+        "paired_measured_quote_fill_trades": len(pairs),
+        "paired_coverage_fraction": round(coverage, 4),
+        "independent_trading_sessions": len(dates),
+        "minimum_required": {
+            "paired_trades": 30,
+            "sessions": 10,
+            "paired_fraction": 0.9,
+        },
+        "entry_adverse_slippage_median_bps": (
+            round(median(entry_adverse), 3) if entry_adverse else None
+        ),
+        "exit_adverse_slippage_median_bps": (
+            round(median(exit_adverse), 3) if exit_adverse else None
+        ),
+        "entry_adverse_slippage_p95_bps": percentile(entry_adverse, 0.95),
+        "exit_adverse_slippage_p95_bps": percentile(exit_adverse, 0.95),
+        "reason": (
+            "sample_only_not_live_fill_or_regime_parity"
+            if ready
+            else "insufficient_paired_verified_quotes_or_sessions"
+        ),
+    }
+
+
 def load_candidate_returns(path: Path) -> dict[str, list[float]]:
     """Load aligned candidate post-cost return/R series from JSON."""
 
@@ -477,6 +565,11 @@ def main(argv: list[str] | None = None) -> int:
             report["range_vwap_slippage_stress"] = range_vwap_slippage_stress(
                 rows,
                 allow_estimated_costs=args.allow_estimated_costs,
+            )
+            report["range_vwap_execution_calibration"] = (
+                range_vwap_execution_calibration(
+                    rows, allow_estimated_costs=args.allow_estimated_costs
+                )
             )
         report["selected_strategy_note"] = (
             "Closed-trade metrics and candidate decisions are strategy-filtered; "

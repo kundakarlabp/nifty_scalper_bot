@@ -311,6 +311,39 @@ def test_exit_research_stop_limit_gap_cannot_claim_fill() -> None:
     assert result["outcomes"]["lock_60pct"]["reason"] == "stop_limit_gap_risk"
 
 
+def test_range_time_stop_comparison_never_uses_quotes_after_actual_exit() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    trade = _exit_trade()
+    trade["exit_filled_at"] = "2026-10-21T04:21:00+00:00"
+    start = datetime(2026, 10, 21, 4, 3, tzinfo=timezone.utc)
+    observed = []
+    for seconds in range(5, 18 * 60 + 1, 5):
+        at = start + timedelta(seconds=seconds)
+        elapsed = seconds / 60
+        bid = 112.0 if elapsed <= 10 else 104.0
+        observed.append(
+            {
+                "kind": "tick",
+                "available_at": at.isoformat(),
+                "payload": {
+                    "symbol": trade["symbol"],
+                    "depth": {"buy": [{"price": bid, "quantity": 65}]},
+                },
+            }
+        )
+    comparison = _exit_research().compare_trade(trade, observed)
+    assert comparison["coverage_ready"] is True
+    assert comparison["outcomes"]["time_stop_10m"]["status"] == "MODELED_TIME_STOP"
+    assert comparison["outcomes"]["time_stop_10m"]["net"] == 677.5
+    assert comparison["outcomes"]["time_stop_15m"]["status"] == "MODELED_TIME_STOP"
+    assert comparison["outcomes"]["time_stop_15m"]["net"] == 157.5
+    assert comparison["outcomes"]["time_stop_20m"]["status"] == "UNRESOLVED"
+    assert comparison["outcomes"]["time_stop_20m"]["reason"] == (
+        "time_stop_outside_actual_observed_position"
+    )
+
+
 def test_exit_research_invalid_trade_geometry_or_slippage_fails_closed() -> None:
     trade = _exit_trade()
     trade["initial_stop"] = None

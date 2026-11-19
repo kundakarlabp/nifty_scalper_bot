@@ -345,4 +345,56 @@ def test_strategy_cli_with_no_range_trades_does_not_infer_returns(
     assert report["overall_post_cost"]["trade_count"] == 0
     assert report["range_vwap_slippage_stress"]["ready"] is False
     assert report["range_vwap_slippage_stress"]["scenarios"] == []
+    calibration = report["range_vwap_execution_calibration"]
+    assert calibration["ready_for_research_calibration"] is False
+    assert calibration["paired_measured_quote_fill_trades"] == 0
     assert report["parameter_change"]["allowed"] is False
+
+
+def test_range_calibration_requires_paired_quotes_and_sessions() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    start = datetime(2026, 11, 1, 13, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rows = []
+    for i in range(30):
+        closed_at = start + timedelta(days=i // 3)
+        rows.append(
+            {
+                "trade_id": f"range-{i}",
+                "closed_at": closed_at.timestamp(),
+                "strategy": "RangeVWAPReclaim",
+                "state": "CLOSED",
+                "ledger_complete": True,
+                "gross_pnl": 45.0,
+                "estimated_costs": 20.0,
+                "net_pnl": 25.0,
+                "execution_quality": {
+                    "entry_slippage_bps": 10.0 + i % 3,
+                    "exit_slippage_bps": 20.0 + i % 3,
+                    "entry_quote_ask": 101.0,
+                    "exit_quote_bid": 103.0,
+                    "exit_quote_age_ms": 90.0,
+                    "exit_quote_evidence_source": "cached_bid_observation",
+                },
+                "outcome": {
+                    "cost_source": "broker_virtual_contract_note",
+                    "effective_costs": {"total": 20.0},
+                },
+            }
+        )
+
+    calibrated = module.range_vwap_execution_calibration(rows)
+    assert calibrated["ready_for_research_calibration"] is True
+    assert calibrated["completed_range_trades"] == 30
+    assert calibrated["independent_trading_sessions"] == 10
+    assert calibrated["paired_coverage_fraction"] == 1.0
+    assert calibrated["entry_adverse_slippage_median_bps"] == 11.0
+    assert calibrated["exit_adverse_slippage_median_bps"] == 21.0
+    assert calibrated["live_parameter_change_allowed"] is False
+
+    # Missing a contemporaneous exit quote cannot count as paired evidence.
+    rows[0]["execution_quality"]["exit_quote_evidence_source"] = "unavailable"
+    incomplete = module.range_vwap_execution_calibration(rows)
+    assert incomplete["paired_measured_quote_fill_trades"] == 29
+    assert incomplete["ready_for_research_calibration"] is False

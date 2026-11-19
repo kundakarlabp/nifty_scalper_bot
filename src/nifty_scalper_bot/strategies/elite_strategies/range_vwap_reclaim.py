@@ -8,10 +8,12 @@ assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
 OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
-Entry lifecycle: notify_entry_accepted and notify_entry_rejected use the existing
-StrategyManager callbacks to reconcile exact setup IDs; only a proven pre-broker
-capacity rejection releases a reserved excursion. assess_option_cost_risk models
-the bid-price stop trigger separately from the adverse stop liquidation fill.
+Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
+StrategyManager callbacks; exact setup/consumption state is restored and
+write-verified through PositionManager's same-day risk circuit before LIVE
+emission; only a proven pre-broker rejection releases a reservation.
+assess_option_cost_risk models the bid-price stop trigger separately from
+an adverse stop liquidation fill.
 Safety: LIVE requires an explicit pilot opt-in, attested reversal and quote
 provenance; broker-stop, order affordability and capital gates remain authoritative.
 """
@@ -23,6 +25,7 @@ import os
 import statistics
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -595,15 +598,129 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         self._regime_bars: dict[str, tuple[str, int]] = {}
         self._consumed_excursions: set[tuple[str, str, str]] = set()
         self._pending_excursions: dict[str, tuple[str, str, str]] = {}
+        self._guard_owner: Any | None = None
+        self._guard_date: str | None = None
+        self._guard_lock = RLock()
         self._opportunities: dict[str, dict[str, Any]] = {}
         self._active_opportunity: str | None = None
 
+    def attach_persistent_guard(self, position_manager: Any) -> None:
+        """Reuse canonical position/risk persistence; never open a second store."""
+        self._guard_owner = position_manager
+
+    def _load_persistent_guard(self, decision_at: datetime) -> bool:
+        """Restore only current-session reservations, or fail closed for LIVE."""
+        if not range_vwap_live_enabled():
+            return True
+        owner = self._guard_owner
+        reader = getattr(owner, "get_risk_circuit_state", None)
+        writer = getattr(owner, "persist_range_vwap_setup_guard", None)
+        today = getattr(owner, "_trading_date_ist", None)
+        if not callable(reader) or not callable(writer) or not callable(today):
+            return False
+        day = decision_at.astimezone(_IST).date().isoformat()
+        if today() != day:
+            return False
+        with self._guard_lock:
+            if self._guard_date == day:
+                return True
+            try:
+                parent = reader()
+                if not isinstance(parent, Mapping):
+                    return False
+                saved = (
+                    parent.get("range_vwap_setup_guard")
+                    if parent.get("trading_date") == day
+                    else None
+                )
+                if saved is None:
+                    seen, consumed, pending = set(), set(), {}
+                else:
+                    if (
+                        not isinstance(saved, Mapping)
+                        or saved.get("version") != 1
+                        or saved.get("trading_date") != day
+                        or not isinstance(saved.get("seen"), list)
+                        or not isinstance(saved.get("consumed"), list)
+                        or not isinstance(saved.get("pending"), Mapping)
+                    ):
+                        return False
+                    seen = set(saved["seen"])
+                    consumed = {tuple(item) for item in saved["consumed"]}
+                    pending = {
+                        str(identity): tuple(item)
+                        for identity, item in saved["pending"].items()
+                    }
+                    if (
+                        len(seen) > 512
+                        or len(consumed) > 128
+                        or len(pending) > 512
+                        or not all(
+                            isinstance(identity, str)
+                            and identity.startswith("range_session_vwap:")
+                            for identity in seen
+                        )
+                        or not all(
+                            len(key) == 3
+                            and isinstance(key[0], str)
+                            and key[1] in {"CE", "PE"}
+                            and key[2] == day
+                            for key in consumed
+                        )
+                        or not all(
+                            identity in seen and key in consumed
+                            for identity, key in pending.items()
+                        )
+                    ):
+                        return False
+                self._seen = seen
+                self._consumed_excursions = consumed
+                self._pending_excursions = pending
+                self._guard_date = day
+                return True
+            except (OSError, TypeError, ValueError, AttributeError):
+                return False
+
+    def _persist_guard(self) -> bool:
+        """Reserve BEFORE returning a live order signal, verify state on disk."""
+        if not range_vwap_live_enabled():
+            return True
+        owner = self._guard_owner
+        writer = getattr(owner, "persist_range_vwap_setup_guard", None)
+        if not callable(writer) or self._guard_date is None:
+            return False
+        with self._guard_lock:
+            if (
+                len(self._seen) > 512
+                or len(self._consumed_excursions) > 128
+                or len(self._pending_excursions) > 512
+            ):
+                return False
+            payload = {
+                "version": 1,
+                "trading_date": self._guard_date,
+                "seen": sorted(self._seen),
+                "consumed": [list(key) for key in sorted(self._consumed_excursions)],
+                "pending": {
+                    identity: list(key)
+                    for identity, key in sorted(self._pending_excursions.items())
+                },
+            }
+            try:
+                return writer(payload) is True
+            except (OSError, TypeError, ValueError, RuntimeError):
+                return False
+
     def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Finalize an emitted setup through the existing runner order callback."""
-        key = self._pending_excursions.get(str(setup_id or ""))
-        if key is None or key[1] != str(side or "").upper():
-            return
-        self._pending_excursions.pop(str(setup_id), None)
+        with self._guard_lock:
+            key = self._pending_excursions.get(str(setup_id or ""))
+            if key is None or key[1] != str(side or "").upper():
+                return
+            self._pending_excursions.pop(str(setup_id), None)
+            if not self._persist_guard():
+                # Keep durable pending state if broker ACK persistence fails.
+                self._pending_excursions[str(setup_id)] = key
         for row in self._opportunities.values():
             if row.get("setup_id") == setup_id:
                 row["status"] = "broker_order_accepted"
@@ -616,12 +733,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if reason != "no_affordable_execution_candidate":
             return
         identity = str(setup_id or "")
-        key = self._pending_excursions.get(identity)
-        if key is None or key[1] != str(side or "").upper():
-            return
-        self._pending_excursions.pop(identity, None)
-        self._seen.discard(identity)
-        self._consumed_excursions.discard(key)
+        with self._guard_lock:
+            key = self._pending_excursions.get(identity)
+            if key is None or key[1] != str(side or "").upper():
+                return
+            self._pending_excursions.pop(identity, None)
+            self._seen.discard(identity)
+            self._consumed_excursions.discard(key)
+            if not self._persist_guard():
+                # Failed release must retain the original reservation.
+                self._seen.add(identity)
+                self._consumed_excursions.add(key)
+                self._pending_excursions[identity] = key
+                return
         for row in self._opportunities.values():
             if row.get("setup_id") == identity:
                 row["status"] = "prebroker_rejected"
@@ -704,9 +828,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return
         if abs(last - center) > 0.25 * atr:
             return
-        self._consumed_excursions = {
-            key for key in self._consumed_excursions if key[0] != future
-        }
+        with self._guard_lock:
+            previous = self._consumed_excursions
+            # An uncertain broker outcome must not rearm just because futures
+            # touched VWAP; retain it until existing entry callback resolves.
+            unresolved = set(self._pending_excursions.values())
+            retained = {
+                key for key in previous if key[0] != future or key in unresolved
+            }
+            if retained == previous:
+                return
+            self._consumed_excursions = retained
+            if not self._persist_guard():
+                self._consumed_excursions = previous
 
     def _evaluate_signal(
         self,
@@ -782,6 +916,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     structural["history_recovery"] = recovery_reason
             else:
                 structural["history_recovery"] = recovery_reason
+        if not self._load_persistent_guard(decision_at):
+            self._no_vote("range_durable_setup_guard_unavailable")
+            return None
         self._maybe_reset_excursions(future, structural)
         timestamp = str(structural.get("bar_timestamp") or "")
         if not timestamp or not self._regime_bar_confirmed(future, timestamp):
@@ -1051,17 +1188,27 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return None
         # Reserve only an actually emitted vote. The manager/runner already
         # own broker deduplication; callbacks release proven pre-broker rejects.
-        self._seen.add(setup_id)
-        self._consumed_excursions.add(excursion_key)
-        self._pending_excursions[setup_id] = excursion_key
+        # Atomic reserve across simultaneous eligible CE/PE contract evaluations.
+        # The broker/idempotency system remains the final order authority.
+        with self._guard_lock:
+            if setup_id in self._seen or excursion_key in self._consumed_excursions:
+                self._no_vote("range_setup_reserved_concurrently")
+                return None
+            self._seen.add(setup_id)
+            self._consumed_excursions.add(excursion_key)
+            self._pending_excursions[setup_id] = excursion_key
+            if not self._persist_guard():
+                self._no_vote("range_durable_setup_reservation_failed")
+                return None
         if self._active_opportunity in self._opportunities:
             self._opportunities[self._active_opportunity]["setup_id"] = setup_id
-        if len(self._seen) > 512:
-            self._seen = {setup_id}
-        if len(self._consumed_excursions) > 128:
-            self._consumed_excursions = {excursion_key}
-        if len(self._pending_excursions) > 512:
-            self._pending_excursions.pop(next(iter(self._pending_excursions)))
+        if not live_pilot:
+            if len(self._seen) > 512:
+                self._seen = {setup_id}
+            if len(self._consumed_excursions) > 128:
+                self._consumed_excursions = {excursion_key}
+            if len(self._pending_excursions) > 512:
+                self._pending_excursions.pop(next(iter(self._pending_excursions)))
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
