@@ -712,13 +712,14 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
 
     def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Finalize an emitted setup through the existing runner order callback."""
-        key = self._pending_excursions.get(str(setup_id or ""))
-        if key is None or key[1] != str(side or "").upper():
-            return
-        self._pending_excursions.pop(str(setup_id), None)
-        if not self._persist_guard():
-            # A durable pending reservation is safer than losing a broker ACK.
-            self._pending_excursions[str(setup_id)] = key
+        with self._guard_lock:
+            key = self._pending_excursions.get(str(setup_id or ""))
+            if key is None or key[1] != str(side or "").upper():
+                return
+            self._pending_excursions.pop(str(setup_id), None)
+            if not self._persist_guard():
+                # Keep durable pending state if broker ACK persistence fails.
+                self._pending_excursions[str(setup_id)] = key
         for row in self._opportunities.values():
             if row.get("setup_id") == setup_id:
                 row["status"] = "broker_order_accepted"
@@ -731,18 +732,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if reason != "no_affordable_execution_candidate":
             return
         identity = str(setup_id or "")
-        key = self._pending_excursions.get(identity)
-        if key is None or key[1] != str(side or "").upper():
-            return
-        self._pending_excursions.pop(identity, None)
-        self._seen.discard(identity)
-        self._consumed_excursions.discard(key)
-        if not self._persist_guard():
-            # Failed release must retain the original reservation locally.
-            self._seen.add(identity)
-            self._consumed_excursions.add(key)
-            self._pending_excursions[identity] = key
-            return
+        with self._guard_lock:
+            key = self._pending_excursions.get(identity)
+            if key is None or key[1] != str(side or "").upper():
+                return
+            self._pending_excursions.pop(identity, None)
+            self._seen.discard(identity)
+            self._consumed_excursions.discard(key)
+            if not self._persist_guard():
+                # Failed release must retain the original reservation.
+                self._seen.add(identity)
+                self._consumed_excursions.add(key)
+                self._pending_excursions[identity] = key
+                return
         for row in self._opportunities.values():
             if row.get("setup_id") == identity:
                 row["status"] = "prebroker_rejected"
