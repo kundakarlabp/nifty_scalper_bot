@@ -1,14 +1,22 @@
-"""Purpose: Market-aware profit protection and winner extension for brackets.
+"""Purpose: Strategy-aware, executable-bid profit protection for open brackets.
 
-Responsibilities: Validate executable option quote timestamps, depth and spread,
-assess continuation evidence, and propose monotonic trailing and target changes.
-Ownership: The canonical BracketManager alone owns broker stop modification,
-hard SL, TP1, time-stop, position reconciliation and final exit execution.
-Safety: Stale, nonfinite, future-dated or contradictory quotes cannot authorize
-an adaptive stop ratchet. An extension requires an existing protected profit
-floor; uncertain context falls back to the existing FINAL_TP.
-No broker calls or second trailing authority are introduced. Evidence comes
-from the already-wired IndicatorEngine and market-data facade/cache.
+Responsibilities: Assess continuation by independent premium/underlying/fresh
+futures-volume evidence; classify original entry strategy from provenance;
+calculate cost-adjusted, monotonic stop candidates from fresh full-size bids
+and spread; preserve the original FINAL_TP for VWAP mean-reversion entries.
+Interface: assess_continuation and tighten_adaptive_profit_lock provide
+read-only quality evidence and optional virtual ratchets; the private
+_exit_strategy_family and _adaptive_cost_per_unit helpers resolve the
+entry thesis and an uncapped full round-trip fee estimate.
+Ownership: BoundBracketManager selects ONE optional trailing algorithm per
+tick. The canonical BracketManager alone modifies exchange stop orders and
+owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
+Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
+quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
+ratchets require verified broker stop trigger and position-size coverage.
+Virtual desired stops never imply an acknowledged stop or guaranteed fill.
+No broker calls or competing exchange-stop owner are introduced here.
+Evidence comes from the already-wired IndicatorEngine and market-data cache.
 """
 
 from __future__ import annotations
