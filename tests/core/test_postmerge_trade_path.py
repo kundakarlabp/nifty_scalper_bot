@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -836,8 +837,8 @@ def test_cost_comparison_ranks_without_changing_live_primary(monkeypatch) -> Non
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
     original = _signal_evidence("VWAPPro")
-    alternative = _signal_evidence("ORBPro")
-    alternative[0].take_profit = 145.0
+    alternative_signal, alternative_evidence = _signal_evidence("ORBPro")
+    alternative = (replace(alternative_signal, take_profit=145.0), alternative_evidence)
     result = manager._combine_strategy_votes(
         symbol=_CE,
         signals=[original, alternative],
