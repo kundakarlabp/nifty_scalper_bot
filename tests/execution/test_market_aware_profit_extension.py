@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta, timezone
+from time import time
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +43,7 @@ class FakeMarketData:
             FUTURE: {
                 "symbol": FUTURE,
                 "ltp": 24_755.0 if strong else 24_620.0,
+                "received_at": time(),
             },
             "NFO:NIFTY2681124500PE": {
                 "symbol": "NFO:NIFTY2681124500PE",
@@ -79,6 +82,29 @@ class FakeMarketData:
 class FakeIndicatorEngine:
     def __init__(self, *, strong: bool = True) -> None:
         self.strong = strong
+
+    def get_history(self, symbol: str, count=None, *, field="close"):
+        if symbol != FUTURE or field != "bars":
+            return []
+        now = datetime.now(timezone.utc)
+        bars = [
+            {
+                "timestamp": now - timedelta(minutes=21 - i),
+                "volume": 500_000.0,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+            for i in range(20)
+        ]
+        bars.append(
+            {
+                "timestamp": now - timedelta(minutes=1),
+                "volume": 920_000.0 if self.strong else 310_000.0,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+        )
+        return bars[-count:] if count is not None else bars
 
     def get_indicators(self, symbol: str, names):
         del names
@@ -473,6 +499,8 @@ def test_live_adaptive_default_requires_real_exchange_protection(monkeypatch):
     assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert bracket.sl_trigger_price == 94.0
     bracket.exchange_stop_order_id = "broker-stop-1"
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 65
     assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert bracket.sl_trigger_price > 94.0
 
@@ -619,6 +647,8 @@ def test_adaptive_live_mode_requires_existing_exchange_protection(monkeypatch):
     assert bracket.sl_trigger_price == 94.0
 
     bracket.exchange_stop_order_id = "protected-stop-1"
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 65
     assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert bracket.sl_trigger_price > 94.0
     assert "virtual_stop" in bracket.trade_provenance["adaptive_profit_lock"]
@@ -675,7 +705,7 @@ def test_adaptive_atr_does_not_silently_override_strong_giveback(monkeypatch):
         ),
         negative=(),
         critical_block=False,
-        snapshot={"regime": "TREND_UP"},
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
     )
     monkeypatch.setattr(profit_extension, "assess_continuation", lambda *_: strong)
     quote = manager._market_data.quotes[SYMBOL]
@@ -753,7 +783,8 @@ def test_adaptive_peak_age_requires_deterioration_before_tightening(monkeypatch)
     assert bracket.sl_trigger_price < 113.5
 
 
-def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
+def test_legacy_fallback_coalesces_only_its_own_trailing_proposals(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
     bracket = SimpleNamespace(
@@ -773,11 +804,6 @@ def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
         owner._sync_exchange_protective_stop(target)
         return True
 
-    def adaptive(owner, target, _ltp):
-        target.sl_trigger_price = 108
-        owner._sync_exchange_protective_stop(target)
-        return True
-
     monkeypatch.setattr(RuntimeBracketManager, "_apply_trailing_math", canonical)
     monkeypatch.setattr(
         RuntimeBracketManager,
@@ -785,9 +811,77 @@ def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
         lambda _self, target: calls.append(target.sl_trigger_price) or True,
     )
     monkeypatch.setattr(profit_extension, "tighten_market_aware_floor", market)
-    monkeypatch.setattr(profit_extension, "tighten_adaptive_profit_lock", adaptive)
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_adaptive_profit_lock",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("adaptive must not compete with the legacy owner")
+        ),
+    )
     assert manager._apply_trailing_math(bracket)
-    assert calls == [108]
+    assert calls == [105]
+
+
+def test_adaptive_owner_never_runs_canonical_optional_tiers(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
+    calls = []
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_apply_trailing_math",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("canonical tier must not pre-tighten the adaptive policy")
+        ),
+    )
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_market_aware_floor",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("legacy market floor must not compete with adaptive")
+        ),
+    )
+
+    def adaptive(owner, target, _ltp):
+        target.sl_trigger_price = 105.0
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    monkeypatch.setattr(profit_extension, "tighten_adaptive_profit_lock", adaptive)
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda _self, target: calls.append(target.sl_trigger_price) or True,
+    )
+    assert manager._apply_trailing_math(bracket)
+    assert calls == [105.0]
+
+
+def test_adaptive_missing_quote_does_not_revert_to_ltponly_trailing(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
+    calls = []
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_apply_trailing_math",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("stale/absent bid must not invoke an LTP fallback")
+        ),
+    )
+    monkeypatch.setattr(
+        profit_extension, "tighten_adaptive_profit_lock", lambda *_: False
+    )
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda *_: calls.append("modify") or True,
+    )
+    assert not manager._apply_trailing_math(bracket)
+    assert bracket.sl_trigger_price == 101.0
+    assert not calls
 
 
 def test_exchange_sync_coalescer_is_thread_scoped(monkeypatch):
@@ -850,3 +944,230 @@ def test_adaptive_enabled_skips_competing_legacy_market_stop(monkeypatch):
     )
     assert manager._apply_trailing_math(bracket)
     assert calls == [105]
+
+
+def test_strategy_aware_adaptive_classification_preserves_vwap_thesis():
+    decision = ContinuationDecision(
+        extend=False,
+        evidence_count=4,
+        positive=(
+            "premium_momentum",
+            "underlying_vwap_alignment",
+            "futures_volume_confirmation",
+        ),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "RANGE", "futures_volume_verified": True},
+    )
+    vwap = _bracket()
+    vwap.trade_provenance["strategy_name"] = "VWAPPro"
+    vwap.trade_provenance["setup_name"] = "session_vwap_reentry_live"
+    smc = _bracket()
+    smc.trade_provenance["strategy_name"] = "SMC"
+    reversal = _bracket()
+    reversal.trade_provenance["setup_name"] = "failed_breakout_reversal"
+    assert profit_extension._adaptive_continuation_state(decision, vwap) == "NORMAL"
+    assert profit_extension._adaptive_continuation_state(decision, smc) == "WEAK"
+    assert profit_extension._adaptive_continuation_state(decision, reversal) == "NORMAL"
+
+
+def test_strong_requires_fresh_independent_futures_activity():
+    bracket = _bracket()
+    bracket.trade_provenance["strategy_name"] = "SMC"
+    base = {
+        "premium_momentum",
+        "premium_volume_expansion",
+        "underlying_vwap_alignment",
+    }
+    case = ContinuationDecision(
+        extend=False,
+        evidence_count=6,
+        positive=tuple(sorted(base)),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._adaptive_continuation_state(case, bracket) == "NORMAL"
+    # Futures volume on its own cannot overrule an out-of-date futures quote.
+    stale = ContinuationDecision(
+        extend=False,
+        evidence_count=7,
+        positive=tuple(sorted(base | {"futures_volume_confirmation"})),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": False},
+    )
+    assert profit_extension._adaptive_continuation_state(stale, bracket) == "NORMAL"
+    fresh = ContinuationDecision(
+        extend=False,
+        evidence_count=7,
+        positive=stale.positive,
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._adaptive_continuation_state(fresh, bracket) == "STRONG"
+
+
+def test_stale_futures_volume_cannot_count_as_independent_activity():
+    manager = FakeManager(strong=True)
+    manager._market_data.quotes[FUTURE]["received_at"] = time() - 30
+    decision = assess_continuation(manager, _bracket(), 120.0)
+    assert decision.snapshot["futures_volume_verified"] is False
+    assert "futures_volume_confirmation" not in decision.positive
+    assert decision.extend is False
+
+
+def test_vwap_reversion_keeps_original_final_target():
+    manager = FakeManager(strong=True)
+    bracket = _bracket()
+    bracket.trade_provenance["strategy_name"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "session_vwap_reentry_live"
+    before = bracket.tp_trigger_price
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+    assert action is not None and action["type"] == "FINAL_TP"
+    assert bracket.tp_trigger_price == before
+
+
+def test_full_cost_model_overrides_capped_breakeven_estimate():
+    from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+
+    manager = FakeManager(strong=True)
+    manager._breakeven_cost_per_unit = lambda _bracket: 0.10
+    bracket = _bracket()
+    quote = _adaptive_market(manager, bid=115.0)
+    expected = estimate_round_trip_cost(
+        entry_price=bracket.entry_price,
+        exit_price=quote["bid"],
+        quantity=bracket.remaining_quantity,
+    ).cost_per_unit
+    cost = profit_extension._adaptive_cost_per_unit(manager, bracket, quote["bid"])
+    assert cost is not None and cost >= expected
+
+
+def test_live_adaptive_refuses_unconfirmed_or_undersized_broker_stop(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager, bid=115.0)
+    bracket.exchange_stop_order_id = "stop-1"
+    bracket.exchange_stop_quantity = 65
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 20
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    bracket.exchange_stop_quantity = 65
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    evidence = bracket.trade_provenance["adaptive_profit_lock"]
+    assert evidence["broker_recorded_stop"] == 94.0
+    assert evidence["broker_orderbook_confirmed_stop"] is None
+    assert evidence["estimated_net_at_virtual_trigger_points"] > 0
+    assert evidence["estimated_net_at_recorded_trigger_points"] < 0
+    assert evidence["estimated_net_at_confirmed_trigger_points"] is None
+
+
+def test_completed_futures_volume_cannot_be_replaced_by_provisional_spike():
+    manager = FakeManager(strong=True)
+    history = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    # A huge provisional tick is not a completed-volume confirmation.
+    history[-1]["volume"] = 9_000_000
+    history[-1]["is_complete"] = False
+    history[-1]["is_provisional"] = True
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: history
+    ratio, bar_age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert bar_age is not None
+    assert ratio == pytest.approx(1.0)
+
+
+def test_old_completed_futures_bar_does_not_authorize_strong_continuation():
+    manager = FakeManager(strong=True)
+    history = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    for bar in history:
+        bar["timestamp"] -= timedelta(minutes=10)
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: history
+    ratio, age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert ratio is None
+    assert age is not None and age > 150
+    assessment = assess_continuation(manager, _bracket(), 120.0)
+    assert assessment.snapshot["futures_volume_verified"] is False
+    assert "futures_volume_confirmation" not in assessment.positive
+
+
+def test_vwappro_continuation_is_not_misclassified_as_mean_reversion():
+    bracket = _bracket()
+    bracket.trade_provenance["strategy_name"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "vwap_continuation"
+    assert profit_extension._exit_strategy_family(bracket) == "TREND_CONTINUATION"
+    positive = (
+        "premium_momentum",
+        "underlying_vwap_alignment",
+        "futures_volume_confirmation",
+    )
+    decision = ContinuationDecision(
+        extend=True,
+        evidence_count=5,
+        positive=positive,
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._adaptive_continuation_state(decision, bracket) == "STRONG"
+    manager = FakeManager(strong=True)
+    extension = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+    assert extension is None
+    assert bracket.tp_trigger_price > 118.0
+
+
+def test_simple_vwap_reclaim_keeps_reversion_target_without_trend_proof():
+    bracket = _bracket()
+    bracket.trade_provenance["strategy"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "vwap_reclaim"
+    assert profit_extension._exit_strategy_family(bracket) == "VWAP_RECLAIM"
+    manager = FakeManager(strong=True)
+    original_target = bracket.tp_trigger_price
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+    assert action is not None and action["type"] == "FINAL_TP"
+    assert bracket.tp_trigger_price == original_target
+
+
+def test_futures_volume_cannot_use_previous_sessions_as_baseline():
+    manager = FakeManager(strong=True)
+    bars = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    # Only the final candle belongs to the current market session.
+    for bar in bars[:-1]:
+        bar["timestamp"] -= timedelta(days=1)
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: bars
+    ratio, bar_age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert ratio is None
+    assert bar_age is not None and bar_age <= 150
+
+
+def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
+    bracket = _bracket()
+    decision = ContinuationDecision(
+        extend=True,
+        evidence_count=7,
+        positive=(
+            "premium_momentum",
+            "underlying_vwap_alignment",
+            "futures_volume_confirmation",
+        ),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
+    assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"

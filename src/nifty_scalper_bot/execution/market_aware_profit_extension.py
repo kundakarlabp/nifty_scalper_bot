@@ -1,14 +1,24 @@
-"""Purpose: Market-aware profit protection and winner extension for brackets.
+"""Purpose: Strategy-aware, executable-bid profit protection for open brackets.
 
-Responsibilities: Validate executable option quote timestamps, depth and spread,
-assess continuation evidence, and propose monotonic trailing and target changes.
-Ownership: The canonical BracketManager alone owns broker stop modification,
-hard SL, TP1, time-stop, position reconciliation and final exit execution.
-Safety: Stale, nonfinite, future-dated or contradictory quotes cannot authorize
-an adaptive stop ratchet. An extension requires an existing protected profit
-floor; uncertain context falls back to the existing FINAL_TP.
-No broker calls or second trailing authority are introduced. Evidence comes
-from the already-wired IndicatorEngine and market-data facade/cache.
+Responsibilities: Assess continuation by independent premium/underlying/fresh
+futures-volume evidence; classify original entry setup subtype from provenance;
+calculate cost-adjusted, monotonic stops from fresh full-size bids, spread,
+fresh futures quotes and timestamped completed futures-volume candles; preserve
+the original FINAL_TP for VWAP mean-reversion entries.
+Interface: assess_continuation and tighten_adaptive_profit_lock provide
+read-only quality evidence and optional virtual ratchets; the private
+_exit_strategy_family, _verified_futures_volume_ratio and
+_adaptive_cost_per_unit helpers resolve the entry thesis, independent completed
+futures volume and uncapped round-trip fee estimates.
+Ownership: BoundBracketManager selects ONE optional trailing algorithm per
+tick. The canonical BracketManager alone modifies exchange stop orders and
+owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
+Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
+quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
+ratchets require a recorded broker stop trigger and position-size coverage.
+A recorded trigger is NOT an orderbook-confirmed stop or guaranteed fill.
+No broker calls or competing exchange-stop owner are introduced here.
+Evidence comes from the already-wired IndicatorEngine and market-data cache.
 """
 
 from __future__ import annotations
@@ -647,12 +657,14 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
                 negative=negative,
             )
 
-    futures_volume_ratio = _raw_float(future, "futures_volume_ratio", "volume_ratio")
-    if futures_volume_ratio is None:
-        fut_volume = _field(future, "volume")
-        fut_avg = _field(future, "avg_volume")
-        if fut_volume is not None and fut_avg is not None and fut_avg > 0:
-            futures_volume_ratio = fut_volume / fut_avg
+    future_quote_age = _quote_age_seconds(future_quote)
+    futures_volume_ratio, futures_bar_age = _verified_futures_volume_ratio(
+        manager, future_symbol, future_quote
+    )
+    futures_volume_verified = futures_volume_ratio is not None
+    # The ratio is based on a completed, timestamped futures bar and *earlier*
+    # completed bars from the current active contract. Repeated option ticks,
+    # premium volume, or stale futures candles cannot synthesize confirmation.
     if futures_volume_ratio is not None:
         evidence_count += 1
         if futures_volume_ratio >= 1.10:
@@ -669,7 +681,6 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
                 positive=positive,
                 negative=negative,
             )
-
     direction_bias = str(
         future.get("direction_bias")
         or future.get("underlying_direction_bias")
@@ -766,13 +777,8 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
             "underlying_direction_context",
         )
     )
-    activity_support = any(
-        item in positive
-        for item in (
-            "premium_volume_expansion",
-            "futures_volume_confirmation",
-            "premium_adx",
-        )
+    activity_support = bool(
+        futures_volume_verified and "futures_volume_confirmation" in positive
     )
     should_extend = bool(
         not critical_block
@@ -791,6 +797,9 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         "spread_pct": spread_pct,
         "quote_age_s": quote_age,
         "futures_volume_ratio": futures_volume_ratio,
+        "futures_volume_verified": futures_volume_verified,
+        "future_quote_age_s": future_quote_age,
+        "futures_bar_age_s": futures_bar_age,
         "regime": regime or None,
         "direction_bias": direction_bias or None,
         "direction_confidence": direction_conf,
@@ -963,6 +972,10 @@ def extend_final_target_if_supported(
     action = dict(final_action)
     if str(action.get("type") or "") != "FINAL_TP":
         return action
+    # VWAP mean-reversion takes profit at its thesis target; converting its
+    # successful reversion into a breakout trade changes the entry contract.
+    if _exit_strategy_family(bracket) in {"MEAN_REVERSION", "VWAP_RECLAIM"}:
+        return action
     if not _env_bool("MARKET_AWARE_PROFIT_EXTENSION_ENABLED", True):
         return action
 
@@ -1133,10 +1146,117 @@ def _adaptive_executable_bid(
     return bid, spread, quote
 
 
+def _exit_strategy_family(bracket: Any) -> str:
+    """Use the actual frozen setup subtype; VWAPPro itself is not a thesis."""
+    provenance = getattr(bracket, "trade_provenance", {})
+    proof = provenance if isinstance(provenance, Mapping) else {}
+    setup = str(proof.get("setup_name") or "").strip().lower()
+    strategy_raw = (
+        proof.get("strategy_name")
+        or proof.get("strategy")
+        or getattr(bracket, "tag", None)
+        or ""
+    )
+    strategy = str(strategy_raw).strip().lower()
+    if "failed_breakout" in setup or "failed-breakout" in setup:
+        return "REVERSAL"
+    if (
+        setup == "session_vwap_reentry_live"
+        or "mean_reversion" in setup
+        or "mean-reversion" in setup
+        or strategy in {"rangevwapreclaim", "range_vwap_reclaim"}
+    ):
+        return "MEAN_REVERSION"
+    if setup in {
+        "vwap_trend_pullback_retest",
+        "vwap_reclaim_momentum",
+        "vwap_continuation",
+    }:
+        return "TREND_CONTINUATION"
+    if setup.startswith("vwap_") or strategy == "vwappro":
+        # A simple premium VWAP reclaim/penetration is not automatically a
+        # confirmed trend breakout, nor is it a return-to-value exit.
+        return "VWAP_RECLAIM"
+    if "liquidity_sweep" in setup or any(token in strategy for token in ("smc", "orb")):
+        return "TREND_CONTINUATION"
+    return "UNCLASSIFIED"
+
+
+def _adaptive_cost_per_unit(manager: Any, bracket: Any, bid: float) -> float | None:
+    """Conservative full round-trip fee model; never use a capped fee as net P&L."""
+    existing = _cost_floor(manager, bracket)
+    entry = _positive(getattr(bracket, "entry_price", None))
+    quantity = int(getattr(bracket, "remaining_quantity", 0) or 0)
+    if existing <= 0 or entry is None or quantity <= 0:
+        return None
+    try:
+        from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+
+        modeled = estimate_round_trip_cost(
+            entry_price=entry, exit_price=bid, quantity=quantity
+        )
+        actual_model = _positive(getattr(modeled, "cost_per_unit", None))
+    except Exception:  # noqa: BLE001 - missing fees must block net-profit claims
+        return None
+    return max(existing, actual_model) if actual_model is not None else None
+
+
+def _verified_futures_volume_ratio(
+    manager: Any, symbol: str, quote: Mapping[str, Any]
+) -> tuple[float | None, float | None]:
+    """Return volume from a recent completed futures bar, never provisional data.
+
+    An independently fresh WS futures quote proves the contract is active; an
+    unambiguous completed historical bar supplies the volume numerator and
+    earlier completed bars supply the denominator. Generic runtime direction
+    context ages do NOT certify the volume source's candle time.
+    """
+    quote_age = _quote_age_seconds(quote)
+    if not symbol or quote_age is None or quote_age > 3.0:
+        return None, None
+    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
+    if not callable(getter):
+        return None, None
+    try:
+        bars = getter(symbol, count=22, field="bars")
+    except Exception:  # noqa: BLE001 - no inference from absent history
+        return None, None
+    if not isinstance(bars, (list, tuple)):
+        return None, None
+    completed: list[tuple[float, float]] = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        if bar.get("is_complete") is not True or bar.get("is_provisional") is True:
+            continue
+        volume = _as_float(bar.get("volume"))
+        age = _quote_age_seconds({"timestamp": bar.get("timestamp")})
+        if volume is not None and volume >= 0 and age is not None:
+            completed.append((age, volume))
+    if len(completed) < 6:
+        return None, None
+    bar_age, current_volume = completed[-1]
+    # Candle timestamps may be the minute OPEN; last completed one-minute
+    # candle can legitimately be 60-120 seconds old at the next observation.
+    if bar_age > 150.0 or current_volume <= 0:
+        return None, bar_age
+    # The first bars after the open must not borrow yesterday's volumes as
+    # today's baseline. Previous completed bars must precede this bar and be
+    # recent enough to belong to the same active intraday observation window.
+    earlier = [volume for age, volume in completed[-21:-1] if bar_age < age <= 1800.0]
+    if len(earlier) < 5:
+        return None, bar_age
+    average = sum(earlier) / len(earlier)
+    if average <= 0:
+        return None, bar_age
+    return current_volume / average, bar_age
+
+
 def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -> str:
-    """One vote per independent market family; correlated indicators do not stack."""
+    """Count premium, underlying and *verified futures* activity only once each."""
     positives = set(decision.positive)
     negatives = set(decision.negative)
+    strategy = _exit_strategy_family(bracket)
     premium_support = bool(
         positives & {"premium_momentum", "premium_vwap_hold", "premium_ema_support"}
     )
@@ -1148,9 +1268,10 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
             "underlying_direction_context",
         }
     )
-    activity_support = bool(
-        positives & {"futures_volume_confirmation", "premium_volume_expansion"}
-    )
+    # Option momentum and option volume share an information source and must
+    # not count as two independent votes for a STRONG trend continuation.
+    futures_verified = decision.snapshot.get("futures_volume_verified") is True
+    activity_support = futures_verified and "futures_volume_confirmation" in positives
     premium_conflict = bool(
         negatives
         & {
@@ -1158,6 +1279,7 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
             "premium_vwap_lost",
             "premium_ema_weak",
             "premium_adx_weak",
+            "premium_volume_fade",
         }
     )
     underlying_conflict = bool(
@@ -1168,7 +1290,7 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
             "underlying_direction_conflict",
         }
     )
-    activity_conflict = bool(negatives & {"futures_volume_fade", "premium_volume_fade"})
+    activity_conflict = futures_verified and "futures_volume_fade" in negatives
     provenance = getattr(bracket, "trade_provenance", {})
     provenance = provenance if isinstance(provenance, Mapping) else {}
     entry_invalid = any(
@@ -1177,13 +1299,24 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         for key in ("direction_contract", "setup_contract", "confirmation_contract")
     )
     regime = normalize_regime(decision.snapshot.get("regime"))
+    # RANGE is not evidence of a failed mean-reversion or failed-breakout
+    # thesis. It *is* adverse to an explicitly trend-continuation setup.
+    invalid_regime = regime in {
+        MarketRegime.RANGE,
+        MarketRegime.LOW_ACTIVITY,
+    } and strategy in {"TREND_CONTINUATION", "UNCLASSIFIED"}
     if (
         entry_invalid
         or underlying_conflict
         or sum((premium_conflict, underlying_conflict, activity_conflict)) >= 2
-        or regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
+        or invalid_regime
     ):
         return "WEAK"
+    # Keep a VWAP trade's original reversion target; do not widen its trail
+    # merely because the option premium and the index both show momentum.
+    # Unknown entry provenance must not earn a wider trend-continuation trail.
+    if strategy in {"MEAN_REVERSION", "VWAP_RECLAIM", "UNCLASSIFIED"}:
+        return "NORMAL"
     if (
         regime is MarketRegime.TREND
         and premium_support
@@ -1214,25 +1347,31 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         return False
     live_mode = getattr(manager, "_is_live_execution", None)
-    if (
-        callable(live_mode)
-        and live_mode()
-        and not getattr(bracket, "exchange_stop_order_id", None)
-    ):
-        return False
+    if callable(live_mode) and live_mode():
+        acknowledged = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
+        protected_qty = int(getattr(bracket, "exchange_stop_quantity", 0) or 0)
+        remaining_qty = int(getattr(bracket, "remaining_quantity", 0) or 0)
+        if (
+            not getattr(bracket, "exchange_stop_order_id", None)
+            or acknowledged is None
+            or protected_qty < remaining_qty
+            or remaining_qty <= 0
+        ):
+            # A broker order ID alone does not prove the resting trigger/size.
+            return False
     entry = _positive(getattr(bracket, "entry_price", None))
     initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
     if entry is None or initial_stop is None or initial_stop >= entry:
-        return False
-    cost = _cost_floor(manager, bracket)
-    if not math.isfinite(cost) or cost <= 0.0:
-        # A zero/failed cost estimate cannot establish a minimum NET lock.
         return False
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
         return False
     bid, spread, quote = executable
     if bid <= entry:
+        return False
+    cost = _adaptive_cost_per_unit(manager, bracket, bid)
+    if cost is None or not math.isfinite(cost) or cost <= 0:
+        # Never call a capped, unavailable or zero fee estimate NET profit.
         return False
     config = getattr(bracket, "trailing_config", None)
     if not isinstance(config, dict):
@@ -1268,7 +1407,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
 
     # The shared assessment cache is retained for rate control. Two quality
     # confirmations need distinct assessments, not just distinct option ticks.
-    decision = _cached_assessment(manager, bracket, float(ltp))
+    decision = _cached_assessment(manager, bracket, bid)
     assessment_at = _as_float(getattr(bracket, "_profit_extension_assessed_mono", None))
     wanted = _adaptive_continuation_state(decision, bracket)
     state = str(config.get("_adaptive_profit_state") or "NORMAL")
@@ -1379,7 +1518,31 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
+        # A successful modify_order response updates the local broker record;
+        # only an orderbook-reconciled trail revision proves exchange geometry.
+        # A virtual ratchet, recorded broker trigger, and confirmed broker stop
+        # must NEVER be conflated with an actual exit fill.
+        recorded = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
+        confirmed_stop = None
+        config_history = (getattr(bracket, "trailing_config", {}) or {}).get(
+            "trail_history", []
+        )
+        if recorded is not None and isinstance(config_history, list):
+            for record in reversed(config_history):
+                if not isinstance(record, Mapping):
+                    continue
+                if not record.get("broker_confirmed"):
+                    continue
+                if str(record.get("exchange_order_id") or "") != str(
+                    getattr(bracket, "exchange_stop_order_id", None) or ""
+                ):
+                    continue
+                level = _positive(record.get("new_sl"))
+                if level is not None and abs(level - recorded) <= _TICK_SIZE / 2:
+                    confirmed_stop = recorded
+                    break
         provenance["adaptive_profit_lock"] = {
+            "strategy_family": _exit_strategy_family(bracket),
             "state": state,
             "highest_executable_bid": round(high, 2),
             "bid": round(bid, 2),
@@ -1390,6 +1553,22 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             "peak_age_sec": round(peak_age, 2),
             "stalled": stalled,
             "virtual_stop": round(candidate, 2),
+            "broker_recorded_stop": recorded,
+            "broker_orderbook_confirmed_stop": confirmed_stop,
+            "modeled_cost_per_unit": round(cost, 4),
+            "estimated_net_at_virtual_trigger_points": round(
+                candidate - entry - cost - slippage, 4
+            ),
+            "estimated_net_at_recorded_trigger_points": (
+                round(recorded - entry - cost - slippage, 4)
+                if recorded is not None
+                else None
+            ),
+            "estimated_net_at_confirmed_trigger_points": (
+                round(confirmed_stop - entry - cost - slippage, 4)
+                if confirmed_stop is not None
+                else None
+            ),
         }
     saver = getattr(manager, "save_state", None)
     if callable(saver):
