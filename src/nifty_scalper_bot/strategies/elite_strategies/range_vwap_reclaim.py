@@ -996,9 +996,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_live_cash_risk_or_net_rr")
             return None
         if self._active_opportunity in self._opportunities:
-            self._opportunities[self._active_opportunity]["status"] = "cost_eligible"
-            self._opportunities[self._active_opportunity]["modeled_cost_eligible"] = True
-            self._opportunities[self._active_opportunity]["option_cost_risk"] = budget
+            row = self._opportunities[self._active_opportunity]
+            row["status"] = "cost_eligible"
+            row["modeled_cost_eligible"] = True
+            row["option_cost_risk"] = budget
 
         setup_id = (
             f"range_session_vwap:{future}:{side}:"
