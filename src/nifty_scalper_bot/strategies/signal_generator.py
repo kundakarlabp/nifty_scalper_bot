@@ -1837,21 +1837,26 @@ class StrategyManager:
         # The legacy quote-counter delta is never substituted for a verified
         # completed futures candle, preserving causal volume provenance.
         volume_provenance = indicators.get("futures_completed_bar_volume_provenance")
+        provenance = volume_provenance if isinstance(volume_provenance, dict) else {}
+        completed_ready = indicators.get("futures_completed_bar_volume_ready")
         log_throttled(
             self._logger,
             f"futures_volume_evidence_route:{active_future}",
-            "FUTURES_VOLUME_EVIDENCE_ROUTED symbol=%s ready=%s completed_ratio=%s quote_counter_ratio=%s source=%s reason=%s",
+            (
+                "FUTURES_VOLUME_EVIDENCE_ROUTED symbol=%s ready=%s "
+                "completed_ratio=%s quote_counter_ratio=%s source=%s reason=%s"
+            ),
             active_future,
-            indicators.get("futures_completed_bar_volume_ready"),
+            completed_ready,
             indicators.get("futures_completed_bar_volume_ratio"),
             indicators.get("futures_volume_ratio"),
-            volume_provenance.get("source") if isinstance(volume_provenance, dict) else None,
-            volume_provenance.get("reason") if isinstance(volume_provenance, dict) else "unavailable",
+            provenance.get("source"),
+            provenance.get("reason", "unavailable"),
             interval_sec=60.0,
             extra={
                 "event": "FUTURES_VOLUME_EVIDENCE_ROUTED",
                 "symbol": active_future,
-                "volume_evidence_ready": indicators.get("futures_completed_bar_volume_ready"),
+                "volume_evidence_ready": completed_ready,
             },
         )
 
