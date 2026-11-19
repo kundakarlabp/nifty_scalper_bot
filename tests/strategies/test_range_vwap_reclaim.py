@@ -629,7 +629,8 @@ def test_authenticated_history_recovery_preserves_open_anchor() -> None:
 
 
 def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -843,9 +844,7 @@ def test_live_range_durable_guard_survives_restart_and_preserves_unknown_order(
     restored.notify_entry_rejected(
         "CE", setup_id=setup_id, reason="no_affordable_execution_candidate"
     )
-    again = RangeVWAPReclaimStrategy(
-        RangeVWAPReclaimStrategyConfig(), History(bars())
-    )
+    again = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), History(bars()))
     again.attach_persistent_guard(PositionManager(str(file)))
     assert again._load_persistent_guard(decision_at())
     assert setup_id not in again._seen
