@@ -616,7 +616,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         reader = getattr(owner, "get_risk_circuit_state", None)
         writer = getattr(owner, "persist_range_vwap_setup_guard", None)
         today = getattr(owner, "_trading_date_ist", None)
-        if not all(callable(fn) for fn in (reader, writer, today)):
+        if not callable(reader) or not callable(writer) or not callable(today):
             return False
         day = decision_at.astimezone(_IST).date().isoformat()
         if today() != day:
