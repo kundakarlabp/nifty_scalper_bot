@@ -1139,3 +1139,17 @@ def test_simple_vwap_reclaim_keeps_reversion_target_without_trend_proof():
     )
     assert action is not None and action["type"] == "FINAL_TP"
     assert bracket.tp_trigger_price == original_target
+
+
+def test_futures_volume_cannot_use_previous_sessions_as_baseline():
+    manager = FakeManager(strong=True)
+    bars = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    # Only the final candle belongs to the current market session.
+    for bar in bars[:-1]:
+        bar["timestamp"] -= timedelta(days=1)
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: bars
+    ratio, bar_age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert ratio is None
+    assert bar_age is not None and bar_age <= 150
