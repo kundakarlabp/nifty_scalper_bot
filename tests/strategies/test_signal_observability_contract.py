@@ -367,3 +367,17 @@ def test_zero_volume_rejection_has_bounded_provenance_log_without_admission_chan
     assert '"_option_volume_parity_sampled_at"' in manager_source
     assert 'self._no_vote("option_candle_no_trades")' in vwap_source
     assert "if vol <= 0:" in vwap_source
+
+
+def test_regime_gate_counters_distinguish_hard_blocks_from_soft_denials() -> None:
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+
+    manager = object.__new__(StrategyManager)
+    manager._observability_counters = {
+        "signals_blocked_by_regime": 2,
+        "regime_gate_rejections_observed": 7,
+    }
+    assert manager.get_regime_gate_counters() == {
+        "hard_blocks": 2,
+        "gate_denials": 7,
+    }
