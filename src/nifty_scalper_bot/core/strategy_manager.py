@@ -2653,9 +2653,9 @@ class StrategyManager(_BaseStrategyManager):
         # Both location and trend families must already agree.
         evidence_score = min(
             0.95,
-            0.65
-            + 0.04 * max(0, len(location_votes) - 1)
-            + 0.04 * max(0, len(trend_votes) - 1),
+            0.80
+            + 0.02 * max(0, len(location_votes) - 1)
+            + 0.02 * max(0, len(trend_votes) - 1),
         )
         if tick_side == side:
             evidence_score = min(0.95, evidence_score + 0.03)

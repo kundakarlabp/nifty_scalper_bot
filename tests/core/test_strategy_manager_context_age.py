@@ -317,5 +317,5 @@ def test_direction_evidence_score_changes_with_independent_corroboration() -> No
         strong, role="futures_context"
     )
     assert weak_side == strong_side == "CE"
-    assert 0.5 < weak_score < strong_score <= 0.95
-    assert weak_score != 0.80  # Not a fixed probability-style confidence.
+    assert weak_score == 0.80  # Preserve the existing VWAP quality-gate floor.
+    assert weak_score < strong_score <= 0.95  # Corroboration is not probability.
