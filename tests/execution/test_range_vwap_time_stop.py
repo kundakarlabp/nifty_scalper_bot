@@ -45,15 +45,23 @@ def test_range_hard_time_stop_uses_existing_bracket_exit() -> None:
     assert exit_action["type"] == "TIME_STOP"
     assert "RANGE_VWAP_MAX_HOLD" in exit_action["reason"]
     assert exit_action["qty"] == 65
-    assert manager._time_stop_action(
-        _bracket(setup="session_vwap_reentry_live", held_seconds=13 * 60, progress=12),
-        104.0,
-    ) is None
+    assert (
+        manager._time_stop_action(
+            _bracket(
+                setup="session_vwap_reentry_live", held_seconds=13 * 60, progress=12
+            ),
+            104.0,
+        )
+        is None
+    )
     # Existing non-range strategies retain their original progress exemption.
-    assert manager._time_stop_action(
-        _bracket(setup="vwap_continuation", held_seconds=16 * 60, progress=12),
-        104.0,
-    ) is None
+    assert (
+        manager._time_stop_action(
+            _bracket(setup="vwap_continuation", held_seconds=16 * 60, progress=12),
+            104.0,
+        )
+        is None
+    )
     # The shared stalled-position time-stop remains effective for range trades.
     old = _bracket(
         setup="session_vwap_reentry_live", held_seconds=13 * 60, progress=1.0
@@ -66,9 +74,7 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     manager._exit_quotes = {}
     manager._time_stop_seconds = 12 * 60
     manager._time_stop_min_progress_r = 0.5
-    bracket = _bracket(
-        setup="session_vwap_reentry_live", held_seconds=30, progress=0.0
-    )
+    bracket = _bracket(setup="session_vwap_reentry_live", held_seconds=30, progress=0.0)
     bracket.trade_provenance.update(
         range_futures_contract="NFO:NIFTY26NOVFUT",
         range_futures_side="CE",
