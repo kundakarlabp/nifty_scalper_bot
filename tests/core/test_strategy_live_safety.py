@@ -540,6 +540,44 @@ def test_live_fresh_spot_futures_disagreement_remains_fail_closed(
     )
 
 
+
+def test_fresh_flat_range_is_neutral_not_spot_futures_transition(monkeypatch) -> None:
+    _live_env(monkeypatch)
+
+    class _RangeProbe(_CallingStrategy):
+        name = "RangeVWAPReclaim"
+
+    manager, probe = _manager_with_strategy(
+        _Engine(5, indicators={"regime": "RANGE"}), _RangeProbe()
+    )
+    now = time.time()
+    flat = {
+        "timestamp": now - 0.2,
+        "quote_age_s": 0.2,
+        "close": 100.0,
+        "vwap": 100.0,
+        "ema_fast": 100.0,
+        "ema_slow": 100.0,
+        "direction_context_reasons": ["direction_requires_location_and_trend"],
+    }
+    manager._latest_context_snapshots = {
+        "spot_context": {**flat, "role": "spot_context"},
+        "futures_context": {**flat, "role": "futures_context"},
+    }
+    manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+    assert probe.last_indicators is not None
+    assert probe.last_indicators["underlying_direction_state"] == "NEUTRAL"
+    assert probe.last_indicators["range_neutral_context_verified"] is True
+    assert probe.last_indicators.get("underlying_direction_bias") is None
+
+    manager._latest_context_snapshots["futures_context"][
+        "direction_context_reasons"
+    ] = ["price_location_conflict"]
+    manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+    assert probe.last_indicators["underlying_direction_state"] == "UNAVAILABLE"
+    assert probe.last_indicators.get("range_neutral_context_verified") is not True
+
+
 def test_live_strategy_manager_invokes_strategy_when_canonical_freshness_gate_passes(
     monkeypatch,
 ) -> None:
