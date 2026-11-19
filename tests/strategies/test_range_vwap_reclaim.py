@@ -236,9 +236,10 @@ def test_option_reward_repriced_to_current_futures_not_completed_candle(
         abs(completed_close - signal.metadata["range_futures_invalidation"]),
         abs(current_future - signal.metadata["range_futures_invalidation"]),
     )
-    assert signal.metadata["option_cost_risk"][
-        "target_points_removed_due_to_quote_drift"
-    ] > 0
+    assert (
+        signal.metadata["option_cost_risk"]["target_points_removed_due_to_quote_drift"]
+        > 0
+    )
 
 
 def test_partial_intraday_history_cannot_impersonate_session_vwap() -> None:
