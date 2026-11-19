@@ -1177,9 +1177,7 @@ def _exit_strategy_family(bracket: Any) -> str:
         # A simple premium VWAP reclaim/penetration is not automatically a
         # confirmed trend breakout, nor is it a return-to-value exit.
         return "VWAP_RECLAIM"
-    if "liquidity_sweep" in setup or any(
-        token in strategy for token in ("smc", "orb")
-    ):
+    if "liquidity_sweep" in setup or any(token in strategy for token in ("smc", "orb")):
         return "TREND_CONTINUATION"
     return "UNCLASSIFIED"
 
