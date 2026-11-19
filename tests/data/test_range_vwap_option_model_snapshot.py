@@ -63,3 +63,14 @@ def test_missing_invalid_expiring_or_wrong_contract_fails_closed() -> None:
     assert _hub().get_option_model_snapshot(
         "NFO:UNKNOWN", spot_price=25230, bid=99.8, ask=100
     ) == {}
+
+
+def test_existing_lazy_datahub_greeks_use_canonical_pricing_signature() -> None:
+    hub = _hub()
+    hub._iv_cache = {}
+    hub._greeks_cache = {}
+    hub._oi_cache = {}
+    hub.get_latest_price = lambda _symbol: 25230.0
+    hub._capture_option_metrics(SYMBOL, {"ltp": 100.0})
+    assert hub._iv_cache[SYMBOL] > 0
+    assert 0 < hub._greeks_cache[SYMBOL]["delta"] < 1
