@@ -10,6 +10,9 @@ Runtime role:
   orphan/position resync.
 - _record_trade_quality_shadow captures bounded cached executable bid/ask
   observations for research only; it never participates in live stop decisions.
+- _range_vwap_underlying_exit_action reuses the existing protective/target exit
+  dispatcher with a verified active futures cache and frozen session-VWAP
+  invalidation/target carried through the canonical TradePlan provenance.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
@@ -2753,6 +2756,10 @@ class BracketManager:
                     "reason": "HARD_TP_BREACH",
                 }
 
+        range_exit = self._range_vwap_underlying_exit_action(bracket, ltp)
+        if range_exit is not None:
+            return range_exit
+
         time_stop = self._time_stop_action(bracket, ltp)
         if time_stop is not None:
             return time_stop
@@ -3702,6 +3709,67 @@ class BracketManager:
             return 0.0
         # Never let an implausible cost estimate swallow the whole stop band.
         return min(cost, entry * 0.02)
+
+    def _range_vwap_underlying_exit_action(
+        self, bracket: BracketState, ltp: float
+    ) -> dict[str, Any] | None:
+        """Exit a verified VWAP pilot when its frozen futures thesis resolves.
+
+        Read only the existing active-futures cache; never query the broker
+        synchronously on the protective exit path. An absent, rotated or stale
+        futures quote cannot veto the ordinary option stop/target/time stop.
+        """
+        proof = bracket.trade_provenance or {}
+        if (
+            proof.get("setup_name") != "session_vwap_reentry_live"
+            or bracket.side != "BUY"
+            or bracket.remaining_quantity <= 0
+        ):
+            return None
+        source = self._market_data
+        active = getattr(source, "get_active_nifty_future_symbol_cached", None)
+        cached_ltp = getattr(source, "get_cached_ltp", None)
+        if not callable(active) or not callable(cached_ltp):
+            return None
+        symbol = str(proof.get("range_futures_contract") or "")
+        side = str(proof.get("range_futures_side") or "").upper()
+        if not symbol or side not in {"CE", "PE"}:
+            return None
+        try:
+            if normalize_symbol(active()) != normalize_symbol(symbol):
+                return None
+            target = float(proof["range_futures_target"])
+            invalidation = float(proof["range_futures_invalidation"])
+            future_price = cached_ltp(
+                symbol, max_age_seconds=2.0, require_ws=False
+            )
+            current = float(future_price)
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if (
+            not all(math.isfinite(v) and v > 0 for v in (target, invalidation, current))
+            or (side == "CE" and invalidation >= target)
+            or (side == "PE" and target >= invalidation)
+        ):
+            return None
+        at_target = current >= target if side == "CE" else current <= target
+        at_stop = current <= invalidation if side == "CE" else current >= invalidation
+        if not at_target and not at_stop:
+            return None
+        return {
+            "decision": (
+                BracketTickDecision.EXIT_STOP.value
+                if at_stop else BracketTickDecision.EXIT_TARGET.value
+            ),
+            "type": "SL" if at_stop else "FINAL_TP",
+            "price": ltp,
+            "qty": bracket.remaining_quantity,
+            "reason": (
+                "HARD_SL_BREACH RANGE_VWAP_FUTURES_INVALIDATION"
+                if at_stop else "RANGE_VWAP_FUTURES_TARGET"
+            ),
+            "trigger_price_source": "active_future_cached_ltp",
+        }
 
     def _time_stop_action(
         self, bracket: BracketState, ltp: float
