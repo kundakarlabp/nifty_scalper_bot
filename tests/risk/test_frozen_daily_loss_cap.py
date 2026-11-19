@@ -116,3 +116,58 @@ def test_explicit_rupee_ceiling_limits_five_percent_of_growing_balance() -> None
     assert manager._configured_daily_loss_cap(15_699.0) == pytest.approx(773.0)
     RiskManager._sync_daily_cap_from_verified_balance(manager, 15_699.0)
     assert manager._switches.max_day_loss == pytest.approx(773.0)
+
+
+def test_traded_day_accepts_stricter_absolute_ceiling_without_cash_rebase() -> None:
+    """Premium-paid cash must not shrink a frozen cap below the INR ceiling."""
+    evidence = PositionEvidence()
+    evidence.entries = 1
+    evidence.positions = [object()]
+    manager = _owner(evidence, starting_cap=784.95)
+    manager._completed_trade_costs_today = 71.506732
+    manager.settings.max_daily_loss_absolute = 773.0
+
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 5_000.0)
+    assert manager._switches.max_day_loss == pytest.approx(773.0)
+    assert evidence.state["daily_loss_cap"] == pytest.approx(773.0)
+
+    # Subsequent premium debit, cash release or balance increase cannot
+    # rebase the already-frozen envelope.
+    evidence.positions = []
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 2_000.0)
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 25_000.0)
+    assert manager._switches.max_day_loss == pytest.approx(773.0)
+
+
+def test_traded_day_never_increases_cap_when_absolute_override_is_higher() -> None:
+    evidence = PositionEvidence()
+    evidence.entries = 1
+    manager = _owner(evidence, starting_cap=784.95)
+    manager._completed_trade_costs_today = 70.0
+    manager.settings.max_daily_loss_absolute = 900.0
+
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 25_000.0)
+    assert manager._switches.max_day_loss == pytest.approx(784.95)
+    assert evidence.state == {}
+
+
+def test_traded_day_never_rebases_from_premium_without_absolute_ceiling() -> None:
+    evidence = PositionEvidence()
+    evidence.positions = [object()]
+    manager = _owner(evidence, starting_cap=784.95)
+    manager.settings.max_daily_loss_absolute = 0.0
+
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 4_000.0)
+    assert manager._switches.max_day_loss == pytest.approx(784.95)
+    assert evidence.state == {}
+
+
+def test_already_tripped_circuit_can_only_be_tightened() -> None:
+    evidence = PositionEvidence()
+    manager = _owner(evidence, starting_cap=784.95)
+    manager._breaker_tripped = True
+    manager.settings.max_daily_loss_absolute = 773.0
+
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 15_699.0)
+    assert manager._breaker_tripped is True
+    assert manager._switches.max_day_loss == pytest.approx(773.0)
