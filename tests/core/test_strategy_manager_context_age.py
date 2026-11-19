@@ -310,7 +310,9 @@ def test_direction_evidence_score_changes_with_independent_corroboration() -> No
         "vwap_slope": 0.1,
         "ema_slope": 0.1,
     }
-    weak_side, weak_score, _ = manager._derive_context_direction(weak, role="futures_context")
+    weak_side, weak_score, _ = manager._derive_context_direction(
+        weak, role="futures_context"
+    )
     strong_side, strong_score, _ = manager._derive_context_direction(
         strong, role="futures_context"
     )
