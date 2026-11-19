@@ -1260,9 +1260,7 @@ class SMCStrategy(EliteStrategy):
                     if present
                 ]
                 local_support_present = bool(local_support_sources)
-                raw_regime = indicators.get("regime") or indicators.get(
-                    "market_regime"
-                )
+                raw_regime = indicators.get("regime") or indicators.get("market_regime")
                 regime = normalize_regime(raw_regime)
                 if raw_regime is not None and regime in {
                     MarketRegime.UNKNOWN,
