@@ -665,7 +665,7 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     # The ratio is based on a completed, timestamped futures bar and *earlier*
     # completed bars from the current active contract. Repeated option ticks,
     # premium volume, or stale futures candles cannot synthesize confirmation.
-    if futures_volume_verified:
+    if futures_volume_ratio is not None:
         evidence_count += 1
         if futures_volume_ratio >= 1.10:
             _record_evidence(
