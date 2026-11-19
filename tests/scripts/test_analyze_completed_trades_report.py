@@ -345,12 +345,13 @@ def test_strategy_cli_with_no_range_trades_does_not_infer_returns(
     assert report["overall_post_cost"]["trade_count"] == 0
     assert report["range_vwap_slippage_stress"]["ready"] is False
     assert report["range_vwap_slippage_stress"]["scenarios"] == []
-    assert report["range_vwap_execution_calibration"]["ready_for_research_calibration"] is False
-    assert report["range_vwap_execution_calibration"]["paired_measured_quote_fill_trades"] == 0
+    calibration = report["range_vwap_execution_calibration"]
+    assert calibration["ready_for_research_calibration"] is False
+    assert calibration["paired_measured_quote_fill_trades"] == 0
     assert report["parameter_change"]["allowed"] is False
 
 
-def test_range_calibration_requires_real_paired_quotes_and_independent_sessions() -> None:
+def test_range_calibration_requires_paired_quotes_and_sessions() -> None:
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
