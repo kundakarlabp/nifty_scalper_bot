@@ -279,6 +279,17 @@ def assess_range_vwap_reclaim(
         "range_width_atr": round(width, 4),
         "volume_ratio": round(rvol, 4),
         "underlying_latest_close": float(latest["close"]),
+        # Prospective diagnostics only: do not curve-fit new LIVE filters
+        # without an independent after-cost option-execution sample.
+        "reclaim_body_fraction": round(body_fraction, 4),
+        "reclaim_lower_wick_fraction": (
+            round((min(float(latest["open"]), float(latest["close"])) - float(latest["low"])) / bar_range, 4)
+            if bar_range > 0 else 0.0
+        ),
+        "reclaim_upper_wick_fraction": (
+            round((float(latest["high"]) - max(float(latest["open"]), float(latest["close"]))) / bar_range, 4)
+            if bar_range > 0 else 0.0
+        ),
     }
     if slope_bps > config.max_vwap_slope_bps_per_min:
         return {**evidence, "reason": "session_vwap_sloping"}
@@ -986,6 +997,8 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 # Reuse the canonical bracket time-stop machinery; never add
                 # a second position manager for this strategy.
                 "range_option_hold_minutes": self._cfg.assumed_hold_minutes,
+                "range_option_model_source": indicators.get("range_option_model_source"),
+                "range_option_contract_expiry": indicators.get("range_option_contract_expiry"),
                 "range_structure": structural,
                 "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
