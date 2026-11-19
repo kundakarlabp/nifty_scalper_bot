@@ -20233,6 +20233,10 @@ class StrategyRunner:
                     ),
                     "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
                     "range_option_hold_minutes": metadata.get("range_option_hold_minutes"),
+                    "range_futures_contract": metadata.get("range_futures_contract"),
+                    "range_futures_side": metadata.get("range_futures_side"),
+                    "range_futures_target": metadata.get("range_futures_target"),
+                    "range_futures_invalidation": metadata.get("range_futures_invalidation"),
                     "signal_id": signal.deterministic_id,
                     "trace_id": trace_id,
                     "strategy_profile_version": getattr(self, "_build_info", {}).get(
