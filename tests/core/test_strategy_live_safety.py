@@ -540,7 +540,6 @@ def test_live_fresh_spot_futures_disagreement_remains_fail_closed(
     )
 
 
-
 def test_fresh_flat_range_is_neutral_not_spot_futures_transition(monkeypatch) -> None:
     _live_env(monkeypatch)
 
