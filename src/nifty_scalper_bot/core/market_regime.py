@@ -1281,8 +1281,7 @@ class MarketRegimeDetector:
             ema_fast is not None
             and ema_slow is not None
             and ema_slow != 0
-            and abs((ema_fast - ema_slow) / abs(ema_slow))
-            < params.ema_ratio_trend
+            and abs((ema_fast - ema_slow) / abs(ema_slow)) < params.ema_ratio_trend
         )
         range_proven = bool(
             adx_norm is not None
