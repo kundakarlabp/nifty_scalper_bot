@@ -234,3 +234,39 @@ def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() 
         )
         == []
     )
+
+
+def test_rejection_sample_disambiguates_regime_and_futures_volume_evidence() -> None:
+    """A legacy quote delta of zero must not hide verified futures bars."""
+    owner = _owner({}, {})
+    row = record_strategy_rejection_sample(
+        owner,
+        strategy="VWAPPro",
+        symbol=CE,
+        reason="distance_outside_band",
+        indicators={
+            "regime": "TREND",
+            "regime_stable": "trend",
+            "regime_observed": "unknown",
+            "regime_evidence_verified": False,
+            "regime_policy": "adaptive_continuation",
+            "futures_volume_ratio": 0.0,
+            "futures_completed_bar_volume_ratio": 1.25,
+            "futures_completed_bar_volume_ready": True,
+            "futures_completed_bar_volume_symbol": "NFO:NIFTY26NOVFUT",
+            "futures_completed_bar_volume_provenance": {
+                "private": "no_mapping_in_scalar_sample"
+            },
+        },
+        at=STAMP,
+    )
+    assert row is not None
+    context = row["context"]
+    assert context["regime_observed"] == "unknown"
+    assert context["regime_stable"] == "trend"
+    assert context["regime_evidence_verified"] is False
+    assert context["regime_policy"] == "adaptive_continuation"
+    assert context["futures_volume_ratio"] == 0.0
+    assert context["futures_completed_bar_volume_ratio"] == 1.25
+    assert context["futures_completed_bar_volume_ready"] is True
+    assert "futures_completed_bar_volume_provenance" not in context
