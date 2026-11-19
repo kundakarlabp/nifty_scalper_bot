@@ -639,6 +639,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             "prebroker_capacity_rejections": sum(
                 r.get("status") == "prebroker_rejected" for r in records
             ),
+            "post_cost_rejection_reasons": list(
+                Counter(
+                    r.get("post_cost_rejection")
+                    for r in records
+                    if r.get("post_cost_rejection")
+                ).most_common(5)
+            ),
             "dominant_rejection": rejected.most_common(5),
             "shadow_net_expectancy": None,
             "shadow_mfe_mae": None,
