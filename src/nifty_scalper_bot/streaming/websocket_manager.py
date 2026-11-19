@@ -946,7 +946,8 @@ class WebSocketManager:
                 self._stream_health = "idle"
                 self._logger.info(
                     "WEBSOCKET_SHUTDOWN_ERROR_IGNORED code=%s reason=%s",
-                    code, reason,
+                    code,
+                    reason,
                     extra={"event": "WEBSOCKET_SHUTDOWN_ERROR_IGNORED", "code": code},
                 )
                 return
@@ -984,7 +985,8 @@ class WebSocketManager:
                 self._stream_health = "idle"
                 self._logger.info(
                     "WEBSOCKET_SHUTDOWN_CLOSE_IGNORED code=%s reason=%s",
-                    code, reason,
+                    code,
+                    reason,
                     extra={"event": "WEBSOCKET_SHUTDOWN_CLOSE_IGNORED", "code": code},
                 )
                 return
