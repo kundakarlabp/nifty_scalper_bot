@@ -15,11 +15,11 @@ import asyncio
 import math
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Deque, Mapping, MutableMapping
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.market_regime import (
@@ -653,11 +653,18 @@ class MarketRegimeManager:
                     for bar in bars or []:
                         if not isinstance(bar, Mapping):
                             continue
-                        if bar.get("is_complete") is not True or bar.get("is_provisional") is True:
+                        if (
+                            bar.get("is_complete") is not True
+                            or bar.get("is_provisional") is True
+                        ):
                             continue
                         stamp = bar.get("timestamp")
-                        ts = stamp if isinstance(stamp, datetime) else datetime.fromisoformat(
-                            str(stamp).replace("Z", "+00:00")
+                        ts = (
+                            stamp
+                            if isinstance(stamp, datetime)
+                            else datetime.fromisoformat(
+                                str(stamp).replace("Z", "+00:00")
+                            )
                         )
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=now_ist.tzinfo)
@@ -707,7 +714,11 @@ class MarketRegimeManager:
             log_throttled(
                 logger,
                 f"regime_input_verification:{self._indicator_symbol}",
-                "REGIME_INPUT_VERIFICATION symbol=%s regime=%s reason=%s adx_available=%s ema_pair_available=%s atr_available=%s completed_history_bars=%s volume_available=%s confidence=%.3f",
+                (
+                    "REGIME_INPUT_VERIFICATION symbol=%s regime=%s reason=%s "
+                    "adx_available=%s ema_pair_available=%s atr_available=%s "
+                    "completed_history_bars=%s volume_available=%s confidence=%.3f"
+                ),
                 self._indicator_symbol,
                 snapshot.regime,
                 snapshot.reason,
