@@ -3387,6 +3387,7 @@ class StrategyManager(_BaseStrategyManager):
             indicators.pop("direction_context_source", None)
             indicators.pop("underlying_direction_state", None)
             indicators.pop("direction_transition", None)
+            indicators.pop("range_neutral_context_verified", None)
             indicators.pop("direction_resolution_reason", None)
 
             spot_observation = _resolve_underlying_observation(
