@@ -1379,6 +1379,13 @@ class StrategyManager(_BaseStrategyManager):
             orchestrator=orchestrator,
             futures_symbol=futures_symbol,
         )
+        # Same PositionManager risk snapshot that already survives restarts.
+        # No alternative journal or broker idempotency owner is introduced.
+        for strategy in strategies:
+            if getattr(strategy, "name", "") == "RangeVWAPReclaim":
+                attach = getattr(strategy, "attach_persistent_guard", None)
+                if callable(attach):
+                    attach(position_manager)
         self._regime_signal_getter = regime_signal_getter
         self._regime_manager = market_regime_manager
         self._performance: dict[str, StrategyPerformance] = {}
