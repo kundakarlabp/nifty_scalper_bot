@@ -880,7 +880,7 @@ async def test_recent_history_parity_matches_after_canonical_reseed() -> None:
     assert report["first_mismatch"] is None
 
 
-async def test_recent_history_parity_detects_wrong_runner_close_with_equal_counts() -> None:
+async def test_parity_detects_runner_close_drift_with_equal_counts() -> None:
     symbol = "NSE:NIFTY"
     runner = _runner(_bars(30))
     runner.sync_history_from_mdm(
