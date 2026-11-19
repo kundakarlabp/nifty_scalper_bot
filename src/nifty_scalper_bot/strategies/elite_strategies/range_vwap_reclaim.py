@@ -825,18 +825,19 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return
         if abs(last - center) > 0.25 * atr:
             return
-        previous = self._consumed_excursions
-        # An uncertain, still-pending broker outcome must not be rearmed just
-        # because underlying futures touched VWAP in the meantime.
-        unresolved = set(self._pending_excursions.values())
-        retained = {
-            key for key in previous if key[0] != future or key in unresolved
-        }
-        if retained == previous:
-            return
-        self._consumed_excursions = retained
-        if not self._persist_guard():
-            self._consumed_excursions = previous
+        with self._guard_lock:
+            previous = self._consumed_excursions
+            # An uncertain broker outcome must not rearm just because futures
+            # touched VWAP; retain it until existing entry callback resolves.
+            unresolved = set(self._pending_excursions.values())
+            retained = {
+                key for key in previous if key[0] != future or key in unresolved
+            }
+            if retained == previous:
+                return
+            self._consumed_excursions = retained
+            if not self._persist_guard():
+                self._consumed_excursions = previous
 
     def _evaluate_signal(
         self,
@@ -1184,12 +1185,18 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return None
         # Reserve only an actually emitted vote. The manager/runner already
         # own broker deduplication; callbacks release proven pre-broker rejects.
-        self._seen.add(setup_id)
-        self._consumed_excursions.add(excursion_key)
-        self._pending_excursions[setup_id] = excursion_key
-        if not self._persist_guard():
-            self._no_vote("range_durable_setup_reservation_failed")
-            return None
+        # Atomic reserve across simultaneous eligible CE/PE contract evaluations.
+        # The broker/idempotency system remains the final order authority.
+        with self._guard_lock:
+            if setup_id in self._seen or excursion_key in self._consumed_excursions:
+                self._no_vote("range_setup_reserved_concurrently")
+                return None
+            self._seen.add(setup_id)
+            self._consumed_excursions.add(excursion_key)
+            self._pending_excursions[setup_id] = excursion_key
+            if not self._persist_guard():
+                self._no_vote("range_durable_setup_reservation_failed")
+                return None
         if self._active_opportunity in self._opportunities:
             self._opportunities[self._active_opportunity]["setup_id"] = setup_id
         if not live_pilot:
