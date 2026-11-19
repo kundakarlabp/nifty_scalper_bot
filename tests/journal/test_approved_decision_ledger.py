@@ -73,3 +73,55 @@ def test_approved_decision_after_fill_preserves_structural_provenance(
     assert row == ("ENTRY_FILLED", "executed-signal", 1_790_232_002.0, 1_790_232_001.0)
     assert approved["meta"]["approval_path"] == "single_trigger_context_confirmed"
     assert approved["meta"]["setup_pass"] is True
+
+
+def test_causal_bracket_decision_time_survives_late_approval() -> None:
+    base = 1_790_232_000.0
+    common = {
+        "trade_id": "TRD_causal-sequence",
+        "signal_id": "causal-sequence",
+        "symbol": "NFO:NIFTY26SEP23250CE",
+    }
+    registered = {
+        **common,
+        "event_name": "bracket.registered",
+        "timestamp": base + 1.0,
+        "meta": {"decision_ts": base + 0.2},
+    }
+    filled = {
+        **common,
+        "event_name": "entry.filled",
+        "timestamp": base + 2.0,
+        "qty": 65,
+        "price": 125.0,
+        "meta": {},
+    }
+    late_approval = {
+        **common,
+        "event_name": "candidate.approved",
+        "timestamp": base + 3.0,
+        "meta": {},
+    }
+    assert _build_trade_row(registered)["decision_at"] == base + 0.2
+
+    with sqlite3.connect(":memory:") as conn:
+        ensure_trade_ledger_schema(conn)
+        materialize_trade_events(conn, [registered, filled, late_approval])
+        result = conn.execute(
+            "SELECT decision_at, entry_filled_at FROM trade_ledger "
+            "WHERE trade_id = 'TRD_causal-sequence'"
+        ).fetchone()
+    assert result == (base + 0.2, base + 2.0)
+
+
+def test_bracket_cannot_claim_future_or_ancient_decision() -> None:
+    base = 1_790_232_000.0
+    event = {
+        "trade_id": "TRD_timestamp-guard",
+        "event_name": "bracket.registered",
+        "timestamp": base,
+        "meta": {"decision_ts": base + 5.0},
+    }
+    assert _build_trade_row(event)["decision_at"] is None
+    event["meta"]["decision_ts"] = base - 301.0
+    assert _build_trade_row(event)["decision_at"] is None

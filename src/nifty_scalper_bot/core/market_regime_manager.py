@@ -2,7 +2,9 @@
 
 Responsibilities: refresh timestamped underlying indicators and completed
 in-memory price history, stabilise regime transitions, and explain the accepted
-regime evidence in throttled runtime diagnostics.
+regime evidence in throttled runtime diagnostics. Execution readers use
+get_execution_snapshot(), which preserves TREND/RANGE transition confirmation
+but immediately honours unsafe raw observations.
 
 Safety: Missing or stale history must not be invented, a low ATR alone cannot
 license mean-reversion entries, and existing risk and broker gates remain owned
@@ -570,6 +572,30 @@ class MarketRegimeManager:
             )
             return None
 
+    def get_execution_snapshot(self) -> RegimeSnapshot | None:
+        """Apply raw-data safety vetoes without discarding stable transition history."""
+        with self._lock:
+            stable, raw = self._current, self._raw_current
+        if raw is None or stable is None:
+            return raw or stable
+        # Hysteresis is appropriate for confirmed TREND/RANGE transitions, but
+        # an unverified or quiet/unsafe observation must not inherit a stale
+        # tradeable stable label while entry gates evaluate the raw state.
+        state = normalize_regime(raw.regime)
+        if (
+            state
+            in {
+                MarketRegime.UNKNOWN,
+                MarketRegime.LOW_ACTIVITY,
+                MarketRegime.VOLATILE,
+                MarketRegime.EVENT,
+            }
+            or raw.confidence < self.min_confidence
+            or time.time() - raw.updated_at > self.stale_after_seconds
+        ):
+            return raw
+        return stable
+
     def get_history(self, limit: int = 10) -> list[RegimeSnapshot]:
         """Return a list of recent regime snapshots up to *limit*."""
         logger.debug(
@@ -806,6 +832,9 @@ class MarketRegimeManager:
                 snapshot = self._current
                 raw_snapshot = self._raw_current
                 bypass = self._bypass
+            # Keep the decision's regime identity aligned with the snapshot
+            # that strategy selection is allowed to consume.
+            snapshot = self.get_execution_snapshot()
             if bypass:
                 bypass_reasons = ("bypass_enabled",)
                 decision = RegimeDecision(

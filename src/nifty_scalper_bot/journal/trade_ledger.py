@@ -2,7 +2,10 @@
 
 This module is deliberately not an execution or accounting authority. It derives
 one query-friendly row per trade_id from events already accepted by TradeJournal
-and writes that row in the same SQLite transaction.
+and writes that row in the same SQLite transaction. A bracket's validated
+decision_ts anchors signal time when approval journaling arrives after fill;
+broker order/fill timestamps remain independent authorities.
+Safety: the read model never authorizes orders or claims broker protection.
 """
 
 from __future__ import annotations
@@ -544,6 +547,17 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
     elif "ledger_complete" in meta:
         ledger_complete = int(bool(meta.get("ledger_complete")))
 
+    # A candidate.approved journal event is sometimes emitted after the order
+    # fills. Bracket registration already carries the causal decision timestamp;
+    # anchor signal_at there rather than falsely dating the signal after fill.
+    decision_timestamp = _number(meta.get("decision_ts"))
+    if (
+        event_name != "bracket.registered"
+        or decision_timestamp is None
+        or not 0.0 <= timestamp - decision_timestamp <= 300.0
+    ):
+        decision_timestamp = None
+
     return {
         "trade_id": trade_id,
         "signal_id": _first_text(event.get("signal_id"), outcome.get("signal_id")),
@@ -580,9 +594,13 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         ),
         "ledger_complete": ledger_complete,
         "decision_at": (
-            timestamp
-            if event_name in {"signal.evaluated", "candidate.approved"}
-            else None
+            decision_timestamp
+            if decision_timestamp is not None
+            else (
+                timestamp
+                if event_name in {"signal.evaluated", "candidate.approved"}
+                else None
+            )
         ),
         "entry_submitted_at": (
             timestamp if event_name == "order.acknowledged" else None
