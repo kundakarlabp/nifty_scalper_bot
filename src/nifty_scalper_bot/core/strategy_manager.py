@@ -4979,13 +4979,17 @@ class StrategyManager(_BaseStrategyManager):
                     or not qty.is_integer()
                 ):
                     continue
-                estimate = evaluate_net_reward_risk(
-                    entry_price=quote_ask,
-                    stop_price=stop,
-                    target_price=target,
-                    quantity=int(qty),
-                    half_spread=(quote_ask - quote_bid) / 2.0,
-                )
+                try:
+                    estimate = evaluate_net_reward_risk(
+                        entry_price=quote_ask,
+                        stop_price=stop,
+                        target_price=target,
+                        quantity=int(qty),
+                        half_spread=(quote_ask - quote_bid) / 2.0,
+                    )
+                except (ArithmeticError, TypeError, ValueError):
+                    # Research comparisons cannot veto an approved LIVE trigger.
+                    continue
                 economic_shadow.append(
                     {
                         "strategy": evidence.strategy,
