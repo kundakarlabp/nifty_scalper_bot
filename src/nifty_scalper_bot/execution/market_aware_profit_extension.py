@@ -1,7 +1,7 @@
 """Purpose: Strategy-aware, executable-bid profit protection for open brackets.
 
 Responsibilities: Assess continuation by independent premium/underlying/fresh
-futures-volume evidence; classify original entry strategy from provenance;
+futures-volume evidence; classify original entry setup subtype from provenance;
 calculate cost-adjusted, monotonic stops from fresh full-size bids, spread,
 fresh futures quotes and timestamped completed futures-volume candles; preserve
 the original FINAL_TP for VWAP mean-reversion entries.
@@ -974,7 +974,7 @@ def extend_final_target_if_supported(
         return action
     # VWAP mean-reversion takes profit at its thesis target; converting its
     # successful reversion into a breakout trade changes the entry contract.
-    if _exit_strategy_family(bracket) == "MEAN_REVERSION":
+    if _exit_strategy_family(bracket) in {"MEAN_REVERSION", "VWAP_RECLAIM"}:
         return action
     if not _env_bool("MARKET_AWARE_PROFIT_EXTENSION_ENABLED", True):
         return action
@@ -1147,24 +1147,38 @@ def _adaptive_executable_bid(
 
 
 def _exit_strategy_family(bracket: Any) -> str:
-    """Classify only explicit entry provenance; never infer a new setup."""
+    """Use the actual frozen setup subtype; VWAPPro itself is not a thesis."""
     provenance = getattr(bracket, "trade_provenance", {})
     proof = provenance if isinstance(provenance, Mapping) else {}
-    names = (
-        proof.get("strategy_name"),
-        proof.get("strategy"),
-        proof.get("setup_name"),
-        getattr(bracket, "tag", None),
-    )
-    known = " ".join(str(value or "").lower() for value in names)
-    if "failed_breakout" in known or "failed-breakout" in known:
+    setup = str(proof.get("setup_name") or "").strip().lower()
+    strategy = str(
+        proof.get("strategy_name") or proof.get("strategy")
+        or getattr(bracket, "tag", None) or ""
+    ).strip().lower()
+    if "failed_breakout" in setup or "failed-breakout" in setup:
         return "REVERSAL"
-    if any(token in known for token in ("vwap", "mean_reversion", "mean-reversion")):
+    if (
+        setup == "session_vwap_reentry_live"
+        or "mean_reversion" in setup
+        or "mean-reversion" in setup
+        or strategy in {"rangevwapreclaim", "range_vwap_reclaim"}
+    ):
         return "MEAN_REVERSION"
-    if any(token in known for token in ("smc", "orb", "liquidity_sweep")):
+    if setup in {
+        "vwap_trend_pullback_retest",
+        "vwap_reclaim_momentum",
+        "vwap_continuation",
+    }:
+        return "TREND_CONTINUATION"
+    if setup.startswith("vwap_") or strategy == "vwappro":
+        # A simple premium VWAP reclaim/penetration is not automatically a
+        # confirmed trend breakout, nor is it a return-to-value exit.
+        return "VWAP_RECLAIM"
+    if any(token in strategy for token in ("smc", "orb")) or (
+        "liquidity_sweep" in setup
+    ):
         return "TREND_CONTINUATION"
     return "UNCLASSIFIED"
-
 
 def _adaptive_cost_per_unit(manager: Any, bracket: Any, bid: float) -> float | None:
     """Conservative full round-trip fee model; never use a capped fee as net P&L."""
@@ -1292,7 +1306,7 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         return "WEAK"
     # Keep a VWAP trade's original reversion target; do not widen its trail
     # merely because the option premium and the index both show momentum.
-    if strategy == "MEAN_REVERSION":
+    if strategy in {"MEAN_REVERSION", "VWAP_RECLAIM"}:
         return "NORMAL"
     if (
         regime is MarketRegime.TREND
