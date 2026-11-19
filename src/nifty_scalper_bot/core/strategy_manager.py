@@ -3694,7 +3694,10 @@ class StrategyManager(_BaseStrategyManager):
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
             if symbol_is_option and (
-                not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                (
+                    normalize_regime(indicators.get("regime")) is not MarketRegime.UNKNOWN
+                    and not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                )
                 or (
                     indicators.get("underlying_direction_state")
                     == UnderlyingDirectionState.NEUTRAL.value
