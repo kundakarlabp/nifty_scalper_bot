@@ -211,3 +211,58 @@ async def test_stale_or_unfinished_history_never_proves_range() -> None:
     await manager.refresh_from_indicators()
     assert manager.get_raw_snapshot().regime == "unknown"
     assert manager.get_raw_snapshot().reason == "range_evidence_unverified"
+
+
+def test_execution_regime_honours_raw_safety_without_discarding_hysteresis() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=2)
+    now = time.time()
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NSE:NIFTY",
+            regime="trend",
+            confidence=0.85,
+            reason="confirmed",
+            updated_at=now,
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NSE:NIFTY",
+            regime="unknown",
+            confidence=0.0,
+            reason="range_evidence_unverified",
+            updated_at=now + 0.1,
+            adjustments={},
+        )
+    )
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_execution_snapshot().regime == "unknown"
+    assert manager.can_trade(record_decision=False) is False
+    assert "regime_unknown" in manager.get_filter_reasons()
+
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NSE:NIFTY",
+            regime="low_activity",
+            confidence=0.65,
+            reason="quiet_tape",
+            updated_at=now + 0.2,
+            adjustments={},
+        )
+    )
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_execution_snapshot().regime == "low_activity"
+
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NSE:NIFTY",
+            regime="range",
+            confidence=0.78,
+            reason="range_evidence_confirmed",
+            updated_at=now + 0.3,
+            adjustments={},
+        )
+    )
+    # A newly observed valid RANGE still requires normal transition confirmation.
+    assert manager.get_execution_snapshot().regime == "trend"
