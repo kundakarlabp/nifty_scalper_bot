@@ -227,6 +227,7 @@ def test_feature_bearing_tick_can_update_regime_normally() -> None:
     assert snapshot.regime == "trend"
     assert manager.get_current_regime() == "trend"
 
+
 def test_unknown_observation_does_not_validate_retained_trend() -> None:
     """Raw UNKNOWN is a rejected quality gate despite a retained stable TREND."""
     manager = MarketRegimeManager(MarketRegimeDetector())
