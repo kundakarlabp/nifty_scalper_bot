@@ -139,6 +139,8 @@ def verified_range_vwap_final_order_risk(
         modeled_lot_size = int(model["observed_contract_lot_size"])
         slippage = float(model["slippage_each_side_bps"]) / 10000.0
         expected_stop = float(model["stop_price_model"])
+        modeled_stop_fill = float(model["modeled_stressed_stop_fill_price"])
+        exit_spread_stress = float(model["modeled_extra_exit_spread_points"])
         expected_target = float(model["vwap_limited_target_price_model"])
         values = (
             entry_price,
@@ -146,6 +148,8 @@ def verified_range_vwap_final_order_risk(
             stop_price,
             target_price,
             expected_stop,
+            modeled_stop_fill,
+            exit_spread_stress,
             expected_target,
         )
         prices_valid = all(isfinite(float(value)) for value in values)
@@ -158,6 +162,8 @@ def verified_range_vwap_final_order_risk(
         or broker_quantity != modeled_lot_size
         or modeled_lot_size <= 0
         or not 0 <= slippage <= 0.01
+        or not 0 < modeled_stop_fill < expected_stop
+        or not 0 <= exit_spread_stress < expected_stop
         or not 0 < stop_price < max(entry_price, ask_price) < target_price
         # Never let generic premium geometry silently replace the reachable
         # session-VWAP stop/target with a synthetic wider target.
@@ -167,7 +173,14 @@ def verified_range_vwap_final_order_risk(
     ):
         return False
     stressed_entry = max(entry_price, ask_price) * (1.0 + slippage)
-    stressed_stop = stop_price * (1.0 - slippage)
+    # The trigger is a bid threshold, not a guaranteed liquidation fill.
+    # Preserve the strategy's more adverse scenario when the entry quote drifts.
+    stressed_stop = min(
+        modeled_stop_fill,
+        stop_price * (1.0 - slippage) - exit_spread_stress,
+    )
+    if stressed_stop <= 0:
+        return False
     fees = estimate_round_trip_cost(
         entry_price=stressed_entry,
         exit_price=stressed_stop,
