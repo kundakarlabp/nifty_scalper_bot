@@ -18,7 +18,7 @@ def test_market_regime_detector_range_on_low_atr() -> None:
     snapshot = detector.evaluate("NIFTY", {"atr": 4.0}, {"atr": 4.0})
     assert snapshot.regime == "range"
     assert snapshot.adjustments["bias"] == "neutral"
-    assert snapshot.adjustments["display_regime"] == "ranging/choppy"
+    assert snapshot.adjustments["display_regime"] == "ranging"
 
 
 def test_market_regime_detector_broadcasts_events() -> None:
@@ -113,3 +113,26 @@ def test_missing_regime_features_are_unknown_not_range() -> None:
     assert snapshot.regime == "unknown"
     assert snapshot.confidence == 0.0
     assert snapshot.reason == "insufficient_regime_features"
+
+
+def test_quiet_tape_requires_low_volume_and_flat_trend_proof() -> None:
+    detector = MarketRegimeDetector(RegimeParameters())
+    quiet = detector.evaluate(
+        "NIFTY",
+        {"adx": 10.0, "volume_ratio": 0.4, "price_series": [100.0, 100.01]},
+    )
+    assert quiet.regime == "low_activity"
+    assert quiet.reason == "low_volume_flat_trend_confirmed"
+    assert quiet.adjustments["display_regime"] == "low activity"
+    assert quiet.adjustments["sizing_multiplier"] <= 1.0
+
+    # Low volume without independent trend/momentum evidence is not enough.
+    insufficient = detector.evaluate("NIFTY", {"volume_ratio": 0.4})
+    assert insufficient.regime != "low_activity"
+
+
+def test_choppy_and_normal_labels_do_not_authorize_mean_reversion() -> None:
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+
+    assert normalize_regime("CHOPPY") is MarketRegime.UNKNOWN
+    assert normalize_regime("NORMAL") is MarketRegime.UNKNOWN

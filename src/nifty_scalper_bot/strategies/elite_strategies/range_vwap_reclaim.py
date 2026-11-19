@@ -317,6 +317,8 @@ def assess_range_vwap_reclaim(
         "reclaim_bar_range_atr": round(bar_range / atr, 4),
         "range_width_atr": round(width, 4),
         "volume_ratio": round(rvol, 4),
+        "volume_reference": "trailing_20_completed_futures_minutes_not_clock_matched",
+        "volume_reference_mean": round(baseline, 4),
         "underlying_latest_close": float(latest["close"]),
         # Prospective diagnostics only: do not curve-fit new LIVE filters
         # without an independent after-cost option-execution sample.

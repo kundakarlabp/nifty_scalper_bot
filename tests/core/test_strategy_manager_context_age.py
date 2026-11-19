@@ -319,3 +319,46 @@ def test_direction_evidence_score_changes_with_independent_corroboration() -> No
     assert weak_side == strong_side == "CE"
     assert weak_score == 0.80  # Preserve the existing VWAP quality-gate floor.
     assert weak_score < strong_score <= 0.95  # Corroboration is not probability.
+
+
+def test_direction_price_noise_floor_prevents_minuscule_crossovers(
+    monkeypatch,
+) -> None:
+    manager = _direction_manager()
+    tiny = {
+        "close": 100.2,
+        "vwap": 100.0,
+        "ema_fast": 100.2,
+        "ema_slow": 100.0,
+        "atr": 10.0,
+        "vwap_slope": 0.1,
+    }
+    side, confidence, reasons = manager._derive_context_direction(
+        tiny, role="futures_context"
+    )
+    assert side is None and confidence == 0.0
+    assert "direction_price_inside_atr_noise_floor" in reasons
+
+    actual = {**tiny, "close": 101.0, "ema_fast": 101.0}
+    side, confidence, _ = manager._derive_context_direction(
+        actual, role="futures_context"
+    )
+    assert side == "CE" and confidence >= 0.80
+    monkeypatch.setenv("STRATEGY_CONTEXT_PRICE_NOISE_FLOOR_ATR", "0")
+    side, _, _ = manager._derive_context_direction(tiny, role="futures_context")
+    assert side == "CE"
+
+
+def test_nonfinite_context_input_cannot_supply_direction() -> None:
+    manager = _direction_manager()
+    side, score, _ = manager._derive_context_direction(
+        {
+            "close": float("nan"),
+            "vwap": 100.0,
+            "ema_fast": float("inf"),
+            "ema_slow": 100.0,
+            "vwap_slope": 0.1,
+        },
+        role="spot_context",
+    )
+    assert side is None and score == 0.0

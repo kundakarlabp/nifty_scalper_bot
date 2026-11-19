@@ -37,6 +37,7 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
@@ -67,6 +68,7 @@ from nifty_scalper_bot.core.underlying_direction import (
     arbitrate_underlying_direction,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
@@ -2531,8 +2533,9 @@ class StrategyManager(_BaseStrategyManager):
             if value is None:
                 return None
             try:
-                return float(value)
-            except (TypeError, ValueError):
+                parsed = float(value)
+                return parsed if isfinite(parsed) else None
+            except (TypeError, ValueError, OverflowError):
                 return None
         close = _f("close") or _f("ltp") or _f("price")
         ltp = _f("ltp") or _f("last_price") or _f("price")
@@ -2549,6 +2552,20 @@ class StrategyManager(_BaseStrategyManager):
         vwap_slope = _f("vwap_slope")
         ema_slope = _f("ema_slope")
         futures_volume_ratio = _f("futures_volume_ratio")
+        underlying_atr = _f("atr")
+        # Normalise price-space comparisons only; VWAP/EMA slope input units
+        # are not interchangeable with underlying price units.
+        noise_setting = parse_float_env(
+            os.getenv("STRATEGY_CONTEXT_PRICE_NOISE_FLOOR_ATR"), 0.05
+        )
+        noise_floor_atr = (
+            min(0.20, max(0.0, noise_setting)) if isfinite(noise_setting) else 0.05
+        )
+        noise_points = (
+            noise_floor_atr * underlying_atr
+            if underlying_atr is not None and underlying_atr > 0.0
+            else 0.0
+        )
         reasons: list[str] = []
         location_votes: list[str] = []
         trend_votes: list[str] = []
@@ -2562,6 +2579,10 @@ class StrategyManager(_BaseStrategyManager):
             bucket: list[str],
         ) -> None:
             if lhs is None or rhs is None:
+                return
+            if abs(lhs - rhs) <= noise_points:
+                if noise_points > 0.0:
+                    reasons.append("direction_price_inside_atr_noise_floor")
                 return
             if lhs > rhs:
                 bucket.append("CE")
@@ -3696,7 +3717,7 @@ class StrategyManager(_BaseStrategyManager):
             strategy_name = str(getattr(strategy, "name", "") or "")
             if symbol_is_option and (
                 (
-                    normalize_regime(indicators.get("regime")) is not MarketRegime.UNKNOWN
+                    indicators.get("regime") is not None
                     and not strategy_regime_eligible(strategy_name, indicators.get("regime"))
                 )
                 or (
@@ -4025,8 +4046,29 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 continue
-            vote.metadata["regime_name"] = str(regime_name or "UNKNOWN")
-            vote.metadata["regime_routing_mode"] = "observe_only"
+            vote.metadata["regime_name"] = normalize_regime(
+                indicators.get("regime")
+            ).value
+            vote.metadata["regime_routing_mode"] = (
+                "eligibility_checked"
+                if indicators.get("regime") is not None
+                else "strategy_owned_unknown_regime"
+            )
+            setup_type = str(vote.metadata.get("setup_type") or "").lower()
+            strategy_key = normalize_strategy_name(strategy_name)
+            vote.metadata["setup_category"] = (
+                "range_mean_reversion"
+                if strategy_key == "range_vwap_reclaim"
+                else "opening_breakout"
+                if strategy_key == "orb_pro"
+                else "liquidity_sweep_reclaim"
+                if strategy_key == "smc_lite"
+                else "trend_pullback_retest"
+                if "retest" in setup_type
+                else "trend_continuation"
+                if strategy_key == "vwap_pro"
+                else "context"
+            )
             signal_votes.append((adjusted, vote))
 
         # Preserve every structurally valid vote. MAX_STRATEGY_VOTES is kept
@@ -4903,11 +4945,64 @@ class StrategyManager(_BaseStrategyManager):
                     )
                     or None
                 ),
+                "setup_category": (evidence.metadata or {}).get("setup_category"),
             }
             for signal, evidence in trigger_votes
         ]
         primary_signal, primary_evidence = trigger_votes[0]
         metadata = dict(primary_signal.metadata or {})
+        # Observability only: the live primary remains first-eligible until
+        # comparable, chronological fill-based evidence supports a selector.
+        economic_shadow: list[dict[str, t.Any]] = []
+        quote_ask = _safe_float_value(indicator_map.get("ask"))
+        quote_bid = _safe_float_value(indicator_map.get("bid"))
+        if (
+            quote_ask is not None
+            and quote_bid is not None
+            and isfinite(quote_ask)
+            and isfinite(quote_bid)
+            and 0 < quote_bid < quote_ask
+        ):
+            for candidate_signal, evidence in trigger_votes:
+                stop = _safe_float_value(candidate_signal.stop_loss)
+                target = _safe_float_value(candidate_signal.take_profit)
+                qty = _safe_float_value(candidate_signal.quantity)
+                if (
+                    str(candidate_signal.symbol or "").upper() != symbol_norm
+                    or candidate_signal.action != "BUY"
+                    or stop is None
+                    or target is None
+                    or qty is None
+                    or not all(isfinite(v) for v in (stop, target, qty))
+                    or not (0 < stop < quote_ask < target)
+                    or qty < 1
+                    or not qty.is_integer()
+                ):
+                    continue
+                try:
+                    estimate = evaluate_net_reward_risk(
+                        entry_price=quote_ask,
+                        stop_price=stop,
+                        target_price=target,
+                        quantity=int(qty),
+                        half_spread=(quote_ask - quote_bid) / 2.0,
+                    )
+                except (ArithmeticError, TypeError, ValueError):
+                    # Research comparisons cannot veto an approved LIVE trigger.
+                    continue
+                economic_shadow.append(
+                    {
+                        "strategy": evidence.strategy,
+                        "setup_category": (evidence.metadata or {}).get(
+                            "setup_category"
+                        ),
+                        "net_rr_proxy": round(estimate.net_rr, 3),
+                        "net_reward_proxy": round(estimate.net_reward, 2),
+                        "net_risk_proxy": round(estimate.net_risk, 2),
+                        "cost_model": "shared_round_trip_quote_proxy",
+                    }
+                )
+        economic_shadow.sort(key=lambda row: row["net_rr_proxy"], reverse=True)
         approval_path = (
             "range_completed_futures_reversal_with_option_flow"
             if range_reversal_verified
@@ -4964,6 +5059,11 @@ class StrategyManager(_BaseStrategyManager):
                 "excluded_unconfirmed_triggers": excluded_unconfirmed_triggers,
                 "primary_selection_policy": "first_eligible_trigger",
                 "qualified_trigger_candidates": qualified_trigger_candidates,
+                "setup_category": (primary_evidence.metadata or {}).get(
+                    "setup_category"
+                ),
+                "shadow_economic_comparison": economic_shadow,
+                "shadow_economic_ranking_used_for_entry": False,
                 # confidence=1.0 here is a binary gate result, not a
                 # calibrated probability of winning a net-cost trade.
                 "confidence_semantics": "binary_structural_admission",

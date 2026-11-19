@@ -32,8 +32,8 @@ class MarketRegime(str, Enum):
 
 # Historical spellings accepted from configuration, persisted state and
 # upstream producers. Directional trend labels collapse to TREND because
-# direction is carried separately; CHOPPY collapses to RANGE because no
-# producer ever emitted a distinct chop state.
+# direction is carried separately. Ambiguous CHOPPY/NORMAL labels do not
+# establish a verified mean-reverting RANGE and must fail closed.
 _ALIASES: dict[str, MarketRegime] = {
     "TREND": MarketRegime.TREND,
     "TRENDING": MarketRegime.TREND,
@@ -45,9 +45,9 @@ _ALIASES: dict[str, MarketRegime] = {
     "RANGING": MarketRegime.RANGE,
     "RANGE_BOUND": MarketRegime.RANGE,
     "RANGEBOUND": MarketRegime.RANGE,
-    "CHOPPY": MarketRegime.RANGE,
-    "CHOP": MarketRegime.RANGE,
-    "NORMAL": MarketRegime.RANGE,
+    "CHOPPY": MarketRegime.UNKNOWN,
+    "CHOP": MarketRegime.UNKNOWN,
+    "NORMAL": MarketRegime.UNKNOWN,
     "VOLATILE": MarketRegime.VOLATILE,
     "HIGH_VOLATILITY": MarketRegime.VOLATILE,
     "HIGH_VOL": MarketRegime.VOLATILE,

@@ -1260,9 +1260,14 @@ class SMCStrategy(EliteStrategy):
                     if present
                 ]
                 local_support_present = bool(local_support_sources)
-                regime = normalize_regime(
-                    indicators.get("regime") or indicators.get("market_regime")
-                )
+                raw_regime = indicators.get("regime") or indicators.get("market_regime")
+                regime = normalize_regime(raw_regime)
+                if raw_regime is not None and regime in {
+                    MarketRegime.UNKNOWN,
+                    MarketRegime.LOW_ACTIVITY,
+                }:
+                    self._no_vote("smc_regime_unverified_or_inactive")
+                    return None
                 # A single BOS/CHOCH generated from the option premium is
                 # correlated with the same option's flow/price observation.
                 # In RANGE it cannot independently validate the futures sweep.

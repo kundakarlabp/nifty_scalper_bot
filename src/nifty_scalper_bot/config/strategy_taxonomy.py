@@ -137,6 +137,17 @@ def strategy_regime_eligible(name: str | None, regime: object) -> bool:
             MarketRegime.EVENT,
         },
     }
+    if key == "orb_pro" and state is MarketRegime.RANGE:
+        return os.getenv(
+            "EXECUTION_MODE", "SHADOW"
+        ).strip().upper() == "SHADOW" and os.getenv(
+            "ORB_RESEARCH_ALLOW_RANGE_TRANSITION", "false"
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     return state in eligible[key] if key in eligible else True
 
 

@@ -1,4 +1,12 @@
-"""Market regime detection and fan-out utilities for trading components."""
+"""Market regime detection and fan-out utilities for trading components.
+
+Responsibilities: classify trend, range, high-volatility, event and low-activity
+conditions from corroborated market inputs; publish timestamped snapshots.
+The lightweight runner classifier is diagnostic only, not a live entry authority.
+
+Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
+mean reversion, and caller-owned entry/risk guards remain authoritative.
+"""
 
 from __future__ import annotations
 
@@ -1241,6 +1249,24 @@ class MarketRegimeDetector:
             range_score_value = max(range_score_value, 1.0)
             reasons["range"] = "atr_within_range"
 
+        # Quiet tape is not automatically a tradeable mean-reverting range.
+        # Require contemporaneous volume, trend and momentum corroboration.
+        if (
+            volume is not None
+            and 0.0 <= volume < params.calm_volume_multiple
+            and adx_norm is not None
+            and adx_norm <= params.adx_chop_threshold
+            and momentum is not None
+            and momentum < params.price_momentum_range
+            and volatile_score < 1.0
+            and trend_score_value < 1.0
+            and (
+                realized_pct is None
+                or realized_pct < params.realized_vol_calm_threshold
+            )
+        ):
+            return "low_activity", 0.65, "low_volume_flat_trend_confirmed"
+
         scored = {
             "volatile": volatile_score,
             "trend": trend_score_value,
@@ -1511,7 +1537,16 @@ class MarketRegimeDetector:
                 "bias": "neutral",
                 "sizing_multiplier": multipliers[RegimeType.RANGE],
                 "blocklist": ["breakout"],
-                "display_regime": "ranging/choppy",
+                "display_regime": "ranging",
+            },
+            "low_activity": {
+                "bias": "protect",
+                "sizing_multiplier": min(
+                    multipliers[RegimeType.RANGE],
+                    multipliers[RegimeType.VOLATILE],
+                ),
+                "blocklist": ["breakout", "mean_reversion", "scalper"],
+                "display_regime": "low activity",
             },
             "volatile": {
                 "bias": "volatility",

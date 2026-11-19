@@ -767,6 +767,8 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
         assert signal is None
         if regime == "TREND":
             assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
+        elif regime == "CHOPPY":
+            assert strategy.last_no_vote_reason == "smc_regime_unverified_or_inactive"
         else:
             assert strategy.last_no_vote_reason == (
                 "smc_range_correlated_structure_only"
