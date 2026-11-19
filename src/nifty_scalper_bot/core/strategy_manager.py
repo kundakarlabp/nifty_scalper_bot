@@ -2951,12 +2951,9 @@ class StrategyManager(_BaseStrategyManager):
                     reasons=reasons,
                     snapshot=regime_snapshot,
                 )
-                if not allowed:
-                    self._observability_counters["regime_filter_rejections"] += 1
-                    if self._use_regime_adaptive and symbol_role == "tradable_option":
-                        self._observability_counters[
-                            "regime_adaptive_continuations"
-                        ] += 1
+                self._record_regime_filter_outcome(
+                    allowed=bool(allowed), symbol_role=symbol_role
+                )
                 if not allowed and not self._use_regime_adaptive:
                     if symbol_role in {"spot_context", "futures_context"}:
                         log_throttled(
@@ -2979,7 +2976,6 @@ class StrategyManager(_BaseStrategyManager):
                             },
                         )
                     else:
-                        self._observability_counters["signals_blocked_by_regime"] += 1
                         _log_reject(
                             "regime_gate_block",
                             {"gate_reasons": reasons, "gate": "regime_manager"},
@@ -5235,6 +5231,20 @@ class StrategyManager(_BaseStrategyManager):
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
+
+    def _record_regime_filter_outcome(
+        self, *, allowed: bool, symbol_role: str
+    ) -> None:
+        """Count raw filter rejections separately from final entry blocks."""
+        if allowed:
+            return
+        self._observability_counters["regime_filter_rejections"] += 1
+        if symbol_role in {"spot_context", "futures_context"}:
+            return
+        if self._use_regime_adaptive:
+            self._observability_counters["regime_adaptive_continuations"] += 1
+        else:
+            self._observability_counters["signals_blocked_by_regime"] += 1
 
     def _log_regime_gate_decision(
         self,
