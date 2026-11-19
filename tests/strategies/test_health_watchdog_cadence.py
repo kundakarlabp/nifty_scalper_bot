@@ -152,9 +152,7 @@ def test_skipped_tick_count_is_reported_for_slow_scans(monkeypatch) -> None:
         entered.set()
         release.wait(timeout=2.0)
 
-    def _capture_watchdog_log(
-        _logger, _key: str, message: str, **kwargs: object
-    ) -> None:
+    def _capture_watchdog_log(_logger, _key: str, message: str, **kwargs: object) -> None:
         extra = kwargs.get("extra")
         if isinstance(extra, dict) and extra.get("event") == "HEALTH_WATCHDOG_SLOW":
             reports.append({"message": message, "level": kwargs.get("level"), **extra})
