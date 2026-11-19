@@ -17442,7 +17442,11 @@ class StrategyRunner:
         )
         final_md["bracket_anchor_mode"] = (
             "absolute_level"
-            if final_md["option_trade_plan_source"] == "explicit_premium_stop"
+            if (
+                metadata.get("bracket_anchor_mode") == "absolute_level"
+                and metadata.get("range_option_flow_verified") is True
+            )
+            or final_md["option_trade_plan_source"] == "explicit_premium_stop"
             else "distance"
         )
         self._logger.info(
