@@ -249,6 +249,7 @@ def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> N
     assert evidence["unreferenced_broker_order_count"] == 1
     assert evidence["final_net_pnl_broker_reconciled"] is False
 
+
 def test_range_vwap_completed_analysis_filters_other_strategies() -> None:
     def row(trade_id: str, strategy: str, amount: float) -> dict:
         return {
@@ -287,7 +288,9 @@ def test_range_vwap_completed_analysis_filters_other_strategies() -> None:
     assert stress["ready"] is True
     assert stress["option_profitability_proven"] is False
     assert [row["extra_slippage_bps_each_side"] for row in stress["scenarios"]] == [
-        10, 25, 50
+        10,
+        25,
+        50,
     ]
     assert stress["scenarios"][0]["net_pnl"] == 616.35
     assert stress["scenarios"][2]["net_pnl"] < stress["scenarios"][0]["net_pnl"]
