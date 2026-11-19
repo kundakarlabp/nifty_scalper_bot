@@ -297,3 +297,25 @@ def test_entry_acceptance_forwards_exact_setup_identity_to_strategy() -> None:
     manager.notify_entry_accepted("SMC", "PE", setup_id="smcv2:nifty:PE:1")
 
     assert observed == [("PE", "smcv2:nifty:PE:1")]
+
+
+def test_direction_evidence_score_changes_with_independent_corroboration() -> None:
+    manager = _direction_manager()
+    weak = {"close": 101.0, "vwap": 100.0, "ema_fast": 101.0, "ema_slow": 100.0}
+    strong = {
+        **weak,
+        "ema_50": 100.0,
+        "previous_close": 99.0,
+        "day_open": 99.5,
+        "vwap_slope": 0.1,
+        "ema_slope": 0.1,
+    }
+    weak_side, weak_score, _ = manager._derive_context_direction(
+        weak, role="futures_context"
+    )
+    strong_side, strong_score, _ = manager._derive_context_direction(
+        strong, role="futures_context"
+    )
+    assert weak_side == strong_side == "CE"
+    assert 0.5 < weak_score < strong_score <= 0.95
+    assert weak_score != 0.80  # Not a fixed probability-style confidence.

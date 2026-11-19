@@ -2,6 +2,8 @@
 
 Responsibilities: Normalize strategy identity; classify RangeVWAPReclaim as a
 trigger only under the explicit LIVE pilot and otherwise as research context.
+strategy_regime_eligible maps structural entry triggers to the canonical market
+regime without replacing strategy-owned setup checks or OrderFlow context.
 Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
@@ -9,6 +11,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +117,29 @@ def canonical_signal_family(
     return taxon.signal_family if taxon is not None else default
 
 
+def strategy_regime_eligible(name: str | None, regime: object) -> bool:
+    """Route structural triggers; strategy-owned setup gates remain binding."""
+    key = normalize_strategy_name(name)
+    state = normalize_regime(regime)
+    eligible = {
+        "range_vwap_reclaim": {MarketRegime.RANGE},
+        "vwap_pro": {MarketRegime.TREND},
+        "smc_lite": {
+            MarketRegime.TREND,
+            MarketRegime.RANGE,
+            MarketRegime.VOLATILE,
+            MarketRegime.EVENT,
+        },
+        "orb_pro": {
+            MarketRegime.TREND,
+            MarketRegime.RANGE,
+            MarketRegime.VOLATILE,
+            MarketRegime.EVENT,
+        },
+    }
+    return state in eligible[key] if key in eligible else True
+
+
 def is_context_only_strategy(name: str | None) -> bool:
     return canonical_strategy_role(name) == "context"
 
@@ -125,4 +152,5 @@ __all__ = [
     "normalize_strategy_name",
     "range_vwap_live_enabled",
     "strategy_taxon",
+    "strategy_regime_eligible",
 ]
