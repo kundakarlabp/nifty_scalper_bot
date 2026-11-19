@@ -138,30 +138,53 @@ def test_running_flag_is_cleared_even_when_the_scan_raises() -> None:
     assert calls == [1]
 
 
-def test_skipped_tick_count_is_reported_for_slow_scans(caplog) -> None:
-    """Operators need to see how many ticks a slow scan displaced."""
+def test_skipped_tick_count_is_reported_for_slow_scans(monkeypatch) -> None:
+    """A slow scan reports elapsed time and displaced ticks, without log-capture races."""
     import logging
 
     r = _runner(interval=0.0)
+    entered = threading.Event()
+    release = threading.Event()
+    logged = threading.Event()
+    reports: list[dict[str, object]] = []
 
     def _slow() -> None:
-        time.sleep(0.12)
+        entered.set()
+        release.wait(timeout=2.0)
 
+    def _capture_watchdog_log(
+        _logger, _key: str, message: str, **kwargs: object
+    ) -> None:
+        extra = kwargs.get("extra")
+        if isinstance(extra, dict) and extra.get("event") == "HEALTH_WATCHDOG_SLOW":
+            reports.append({"message": message, "level": kwargs.get("level"), **extra})
+            logged.set()
+
+    # The production formatter can replace pytest's logging capture handler.
+    # Observe the structured event at the call boundary instead of caplog,
+    # and synchronize with the worker rather than racing its completion.
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.log_throttled",
+        _capture_watchdog_log,
+    )
     r._health_watchdog = _slow
-    with caplog.at_level(logging.WARNING):
+    try:
         r._run_health_watchdog_on_cadence()
-        deadline = time.time() + 2.0
-        while r._health_watchdog_running and time.time() < deadline:
-            time.sleep(0.01)
+        assert entered.wait(timeout=2.0)
+        r._run_health_watchdog_on_cadence()  # Must count one displaced scan.
+        time.sleep(0.12)
+    finally:
+        release.set()
 
-    recs = [
-        rec for rec in caplog.records
-        if getattr(rec, "event", None) == "HEALTH_WATCHDOG_SLOW"
-    ]
-    assert recs, "slow scan was not reported"
-    assert recs[-1].duration_ms >= 100.0
-    assert hasattr(recs[-1], "ticks_skipped")
-
+    assert logged.wait(timeout=2.0), "slow-scan warning was not emitted"
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["level"] == logging.WARNING
+    assert float(report["duration_ms"]) >= 100.0
+    assert report["ticks_skipped"] == 1
+    assert "HEALTH_WATCHDOG_SLOW" in str(report["message"])
+    assert "ticks_skipped=1" in str(report["message"])
+    assert r._health_watchdog_running is False
 
 def test_slow_scan_does_not_block_tick_caller() -> None:
     r = _runner(interval=0.0)
