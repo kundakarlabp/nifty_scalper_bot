@@ -21,6 +21,7 @@ from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
     _restore_authenticated_session_bars,
     assess_option_cost_risk,
     assess_range_vwap_reclaim,
+    has_ist_session_anchor,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -742,3 +743,28 @@ def test_unarmed_range_pilot_does_not_consume_setup(monkeypatch) -> None:
     assert strategy._evaluate_signal(OPTION, indicators(), 100.0) is None
     assert not strategy._seen
     assert not strategy._consumed_excursions
+
+def test_session_open_anchor_supports_utc_and_rejects_stale_or_naive() -> None:
+    observed = [
+        {"timestamp": "2026-11-19T03:45:00Z", "is_complete": True}
+    ]
+    decision = datetime(2026, 11, 19, 10, 0, tzinfo=IST)
+    assert has_ist_session_anchor(observed, decision_at=decision)
+    assert has_ist_session_anchor(
+        [{"timestamp": "2026-11-19T09:15:00+05:30"}],
+        decision_at=decision,
+    )
+    assert not has_ist_session_anchor(
+        [{"timestamp": "2026-11-18T03:45:00Z"}],
+        decision_at=decision,
+    )
+    assert not has_ist_session_anchor(
+        [{"timestamp": "2026-11-19T09:15:00"}],
+        decision_at=decision,
+    )
+    assert not has_ist_session_anchor(
+        [{"timestamp": "2026-11-19T03:46:00Z"}],
+        decision_at=decision,
+    )
+    assert not has_ist_session_anchor([], decision_at=decision)
+    assert not has_ist_session_anchor(observed, decision_at="bad_timestamp")
