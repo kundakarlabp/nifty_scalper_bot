@@ -286,9 +286,7 @@ def test_reachable_option_reward_is_futures_delta_theta_and_cost_limited() -> No
     assert a["qualified"] is True, a
     # Bid-based stop activation and adverse liquidation are distinct prices.
     assert (
-        0 < a["modeled_stressed_stop_fill_price"]
-        < a["stop_price_model"]
-        < quote["ask"]
+        0 < a["modeled_stressed_stop_fill_price"] < a["stop_price_model"] < quote["ask"]
     )
     assert a["worst_stop_loss_including_costs"] <= 773
     assert a["net_reward_risk"] >= 1.5
