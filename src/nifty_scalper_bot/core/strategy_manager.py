@@ -3003,13 +3003,21 @@ class StrategyManager(_BaseStrategyManager):
                     log_throttled(
                         log,
                         key=f"regime_scale_fallback:{symbol}",
-                        msg="strategy_regime_scale_fallback",
+                        msg=(
+                            "strategy_regime_hard_block"
+                            if hard_block else "strategy_regime_scale_fallback"
+                        ),
                         interval_sec=30.0,
                         extra={
-                            "event": "strategy_regime_scale_fallback",
+                            "event": (
+                                "strategy_regime_hard_block"
+                                if hard_block else "strategy_regime_scale_fallback"
+                            ),
                             "symbol": symbol,
                             "gate_reasons": list(reasons),
-                            "scale": 1.0,
+                            "scale": (
+                                0.0 if hard_block else self._regime_fallback_scale
+                            ),
                         },
                     )
                 if hard_block:
