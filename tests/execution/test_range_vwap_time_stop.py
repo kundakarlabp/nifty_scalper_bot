@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.bracket_core import BracketManager, BracketState
 
@@ -58,3 +59,61 @@ def test_range_hard_time_stop_uses_existing_bracket_exit() -> None:
         setup="session_vwap_reentry_live", held_seconds=13 * 60, progress=1.0
     )
     assert manager._time_stop_action(old, 99.0)["type"] == "TIME_STOP"
+
+
+def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> None:
+    manager = object.__new__(BracketManager)
+    manager._exit_quotes = {}
+    manager._time_stop_seconds = 12 * 60
+    manager._time_stop_min_progress_r = 0.5
+    bracket = _bracket(
+        setup="session_vwap_reentry_live", held_seconds=30, progress=0.0
+    )
+    bracket.trade_provenance.update(
+        range_futures_contract="NFO:NIFTY26NOVFUT",
+        range_futures_side="CE",
+        range_futures_target=25250.0,
+        range_futures_invalidation=25230.0,
+    )
+    current = [25251.0]
+    active = ["NFO:NIFTY26NOVFUT"]
+
+    def cached(symbol, *, max_age_seconds, require_ws):
+        assert symbol == "NFO:NIFTY26NOVFUT"
+        assert max_age_seconds == 2.0
+        assert require_ws is False
+        return current[0]
+
+    manager._market_data = SimpleNamespace(
+        get_active_nifty_future_symbol_cached=lambda: active[0],
+        get_cached_ltp=cached,
+    )
+    target = manager._evaluate_exit_fast(bracket, 105.0)
+    assert target is not None
+    assert target["type"] == "FINAL_TP"
+    assert target["reason"] == "RANGE_VWAP_FUTURES_TARGET"
+
+    current[0] = 25229.0
+    stop = manager._evaluate_exit_fast(bracket, 95.0)
+    assert stop is not None
+    assert stop["type"] == "SL"
+    assert "HARD_SL_BREACH" in stop["reason"]
+
+    # Stale or rotated underlying cannot authorize an exit. Protective
+    # option-price SL/TP and time-stop decisions remain available.
+    current[0] = None
+    assert manager._evaluate_exit_fast(bracket, 105.0) is None
+    current[0] = 25251.0
+    active[0] = "NFO:NIFTY26DECFUT"
+    assert manager._evaluate_exit_fast(bracket, 105.0) is None
+
+    active[0] = "NFO:NIFTY26NOVFUT"
+    bracket.trade_provenance.update(
+        range_futures_side="PE",
+        range_futures_target=25230.0,
+        range_futures_invalidation=25250.0,
+    )
+    current[0] = 25228.0
+    assert manager._evaluate_exit_fast(bracket, 105.0)["type"] == "FINAL_TP"
+    current[0] = 25251.0
+    assert manager._evaluate_exit_fast(bracket, 105.0)["type"] == "SL"
