@@ -17442,7 +17442,11 @@ class StrategyRunner:
         )
         final_md["bracket_anchor_mode"] = (
             "absolute_level"
-            if final_md["option_trade_plan_source"] == "explicit_premium_stop"
+            if (
+                metadata.get("bracket_anchor_mode") == "absolute_level"
+                and metadata.get("range_option_flow_verified") is True
+            )
+            or final_md["option_trade_plan_source"] == "explicit_premium_stop"
             else "distance"
         )
         self._logger.info(
@@ -20228,6 +20232,11 @@ class StrategyRunner:
                         or strategy_name
                     ),
                     "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
+                    "range_option_hold_minutes": metadata.get("range_option_hold_minutes"),
+                    "range_futures_contract": metadata.get("range_futures_contract"),
+                    "range_futures_side": metadata.get("range_futures_side"),
+                    "range_futures_target": metadata.get("range_futures_target"),
+                    "range_futures_invalidation": metadata.get("range_futures_invalidation"),
                     "signal_id": signal.deterministic_id,
                     "trace_id": trace_id,
                     "strategy_profile_version": getattr(self, "_build_info", {}).get(

@@ -12,6 +12,11 @@ Position in the pipeline:
 Owns / does NOT own:
 - Owns: convenience read/derive helpers (e.g. quote bid/ask/spread, greeks) and
   a thin store for non-history state.
+- get_option_model_snapshot: return same-quote NIFTY option expiry, lot and
+  spot-referenced model Greeks using the broker instrument resolver and the
+  existing options_math Black-Scholes/IV functions; fail closed on absent data.
+- _price_option_model: shared internal pricing helper for lazy cached Greeks
+  and the VWAP live snapshot; correct canonical pricing keyword conventions.
 - Does NOT own: price history (MDM is the sole owner — DataHub stores none), and
   does NOT select contracts or infer active futures/options independently.
 
@@ -1202,6 +1207,30 @@ class DataHub:
             exc,
         )
 
+    @staticmethod
+    def _price_option_model(
+        *, spot: float, strike: float, ttm: float, premium: float, is_call: bool
+    ) -> tuple[float, dict[str, float]]:
+        """Reuse canonical Black-Scholes and IV conventions for both consumers."""
+        iv = implied_volatility(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            option_price=premium,
+            is_call=is_call,
+        )
+        if not isfinite(iv) or iv <= 0:
+            raise ValueError("unpriceable_option_iv")
+        return iv, black_scholes_greeks(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            vol=iv,
+            is_call=is_call,
+        )
+
     def _capture_option_metrics(
         self, symbol: str, tick: Tick, *, derive_missing: bool = True
     ) -> None:
@@ -1245,30 +1274,17 @@ class DataHub:
         if ttm_years <= 0:
             return
         try:
-            iv = implied_volatility(
-                price=float(ltp),
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                flag="c" if is_call else "p",
+            iv, greeks = self._price_option_model(
+                spot=float(spot),
+                strike=float(strike),
+                ttm=float(ttm_years),
+                premium=float(ltp),
+                is_call=is_call,
             )
-        except Exception:  # noqa: BLE001
-            return
-        if iv is None or iv <= 0:
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
             return
         self._iv_cache[symbol] = float(iv)
-        try:
-            self._greeks_cache[symbol] = black_scholes_greeks(
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                sigma=float(iv),
-                flag="c" if is_call else "p",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        self._greeks_cache[symbol] = dict(greeks)
 
     def _parse_option_symbol(
         self, symbol: str
@@ -2415,6 +2431,95 @@ class DataHub:
             except (TypeError, ValueError):
                 continue
         return None
+
+    def get_option_model_snapshot(
+        self,
+        symbol: str,
+        *,
+        spot_price: float | None,
+        bid: float | None,
+        ask: float | None,
+    ) -> dict[str, Any]:
+        """Price the *current* quote against broker-owned contract metadata.
+
+        Reuse the existing instrument resolver and options_math implementation.
+        Cached Greeks have no guaranteed quote/spot provenance, so a live
+        range-reversion decision must not silently reuse that cache. This
+        method never fetches a quote or changes the active contract basket.
+        """
+        parsed = self._parse_option_symbol(symbol)
+        if parsed is None:
+            return {}
+        base, expiry, strike, is_call = parsed
+        if base != "NIFTY":
+            return {}
+        owner = self._resolver
+        lookup = getattr(owner, "lookup", None)
+        if not callable(lookup):
+            owner = getattr(owner, "_instrument_manager", None)
+            lookup = getattr(owner, "lookup", None)
+        if not callable(lookup):
+            return {}
+        if spot_price is None or bid is None or ask is None:
+            return {}
+        try:
+            row = lookup(symbol)
+            if not isinstance(row, Mapping):
+                return {}
+            lot_size = int(row["lot_size"])
+            spot, best_bid, best_ask = float(spot_price), float(bid), float(ask)
+            if (
+                lot_size <= 0
+                or any(not isfinite(x) for x in (spot, best_bid, best_ask))
+                or spot <= 0
+                or best_bid <= 0
+                or best_ask <= best_bid
+            ):
+                return {}
+            now_ts = float(self._now())
+            ttm = (expiry.timestamp() - now_ts) / 31557600.0
+            ist = timezone(timedelta(hours=5, minutes=30))
+            remaining_days = (
+                expiry.date() - datetime.fromtimestamp(now_ts, tz=ist).date()
+            ).days
+            if remaining_days <= 0 or ttm <= 0:
+                return {}
+            iv, model = self._price_option_model(
+                spot=spot,
+                strike=strike,
+                ttm=ttm,
+                premium=(best_bid + best_ask) / 2.0,
+                is_call=is_call,
+            )
+            if iv >= 5:
+                return {}
+            if any(
+                not isfinite(float(model[key])) for key in ("delta", "theta", "vega")
+            ):
+                return {}
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            ZeroDivisionError,
+        ):
+            return {}
+        return {
+            "days_to_expiry": remaining_days,
+            "lot_size": lot_size,
+            "delta": float(model["delta"]),
+            "delta_underlying": "NIFTY_SPOT",
+            # options_math reports annual theta and vega per *unit* IV.
+            "theta": float(model["theta"]) / 365.0,
+            "theta_period": "calendar_day",
+            "vega_per_iv_point": float(model["vega"]) / 100.0,
+            "vega_convention": "per_iv_percentage_point",
+            "range_option_model_source": "live_spot_bid_ask_black_scholes",
+            "range_option_model_iv": iv,
+            "range_option_contract_expiry": expiry.date().isoformat(),
+        }
 
     def get_greeks(self, symbol: str) -> dict[str, float] | None:
         normalized = self._canonical_quote_symbol(symbol)

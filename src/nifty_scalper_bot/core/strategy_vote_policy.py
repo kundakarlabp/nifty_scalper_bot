@@ -138,7 +138,16 @@ def verified_range_vwap_final_order_risk(
     try:
         modeled_lot_size = int(model["observed_contract_lot_size"])
         slippage = float(model["slippage_each_side_bps"]) / 10000.0
-        values = (entry_price, ask_price, stop_price, target_price)
+        expected_stop = float(model["stop_price_model"])
+        expected_target = float(model["vwap_limited_target_price_model"])
+        values = (
+            entry_price,
+            ask_price,
+            stop_price,
+            target_price,
+            expected_stop,
+            expected_target,
+        )
         prices_valid = all(isfinite(float(value)) for value in values)
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
@@ -150,6 +159,11 @@ def verified_range_vwap_final_order_risk(
         or modeled_lot_size <= 0
         or not 0 <= slippage <= 0.01
         or not 0 < stop_price < max(entry_price, ask_price) < target_price
+        # Never let generic premium geometry silently replace the reachable
+        # session-VWAP stop/target with a synthetic wider target.
+        or abs(stop_price - expected_stop) > 0.051
+        or abs(target_price - expected_target) > 0.051
+        or metadata.get("bracket_anchor_mode") != "absolute_level"
     ):
         return False
     stressed_entry = max(entry_price, ask_price) * (1.0 + slippage)
@@ -160,7 +174,18 @@ def verified_range_vwap_final_order_risk(
         quantity=broker_quantity,
     ).total
     final_cash_risk = (stressed_entry - stressed_stop) * broker_quantity + fees
-    return bool(isfinite(final_cash_risk) and 0 < final_cash_risk <= 773.0)
+    target_fees = estimate_round_trip_cost(
+        entry_price=stressed_entry,
+        exit_price=target_price,
+        quantity=broker_quantity,
+    ).total
+    net_target_reward = (target_price - stressed_entry) * broker_quantity - target_fees
+    return bool(
+        isfinite(final_cash_risk)
+        and isfinite(net_target_reward)
+        and 0 < final_cash_risk <= 773.0
+        and net_target_reward / final_cash_risk >= 1.5
+    )
 
 
 def is_permanent_context_only(evidence: Any) -> bool:

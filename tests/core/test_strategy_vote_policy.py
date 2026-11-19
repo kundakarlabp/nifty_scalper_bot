@@ -256,6 +256,7 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
         "role": "trigger",
         "setup_pass": True,
         "range_option_flow_verified": True,
+        "bracket_anchor_mode": "absolute_level",
         "range_structure": {
             "qualified": True,
             "side": "CE",
@@ -268,6 +269,8 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
             "net_reward_risk": 1.6,
             "observed_contract_lot_size": 65,
             "slippage_each_side_bps": 25.0,
+            "stop_price_model": 91.0,
+            "vwap_limited_target_price_model": 120.0,
         },
     }
     args = {
@@ -293,4 +296,13 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
     )
     assert not verified_range_vwap_final_order_risk(
         base, **{**args, "final_symbol": "NFO:NIFTY26NOV25300CE"}
+    )
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "target_price": 122.0}
+    )
+    assert not verified_range_vwap_final_order_risk(
+        {**base, "bracket_anchor_mode": "distance"}, **args
+    )
+    assert not verified_range_vwap_final_order_risk(
+        base, **{**args, "entry_price": 106.0}
     )
