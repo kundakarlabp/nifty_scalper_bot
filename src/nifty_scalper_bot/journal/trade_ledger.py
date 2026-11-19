@@ -5,6 +5,7 @@ one query-friendly row per trade_id from events already accepted by TradeJournal
 and writes that row in the same SQLite transaction. A bracket's validated
 decision_ts anchors signal time when approval journaling arrives after fill;
 broker order/fill timestamps remain independent authorities.
+Safety: the read model never authorizes orders or claims broker protection.
 """
 
 from __future__ import annotations
