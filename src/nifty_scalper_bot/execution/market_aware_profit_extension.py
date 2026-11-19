@@ -1314,7 +1314,8 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         return "WEAK"
     # Keep a VWAP trade's original reversion target; do not widen its trail
     # merely because the option premium and the index both show momentum.
-    if strategy in {"MEAN_REVERSION", "VWAP_RECLAIM"}:
+    # Unknown entry provenance must not earn a wider trend-continuation trail.
+    if strategy in {"MEAN_REVERSION", "VWAP_RECLAIM", "UNCLASSIFIED"}:
         return "NORMAL"
     if (
         regime is MarketRegime.TREND
