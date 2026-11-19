@@ -488,8 +488,7 @@ def range_vwap_transition_economics(
         sample = [trade for trade, _, _ in observations]
         summary = summarize_completed_trades(sample)
         sessions = {
-            datetime.fromtimestamp(t.closed_at, IST).date().isoformat()
-            for t in sample
+            datetime.fromtimestamp(t.closed_at, IST).date().isoformat() for t in sample
         }
         results.append(
             {
@@ -669,10 +668,8 @@ def main(argv: list[str] | None = None) -> int:
                     rows, allow_estimated_costs=args.allow_estimated_costs
                 )
             )
-            report["range_vwap_transition_economics"] = (
-                range_vwap_transition_economics(
-                    rows, allow_estimated_costs=args.allow_estimated_costs
-                )
+            report["range_vwap_transition_economics"] = range_vwap_transition_economics(
+                rows, allow_estimated_costs=args.allow_estimated_costs
             )
         report["selected_strategy_note"] = (
             "Closed-trade metrics and candidate decisions are strategy-filtered; "
