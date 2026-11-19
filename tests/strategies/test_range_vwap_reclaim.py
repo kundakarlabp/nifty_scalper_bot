@@ -744,6 +744,7 @@ def test_unarmed_range_pilot_does_not_consume_setup(monkeypatch) -> None:
     assert not strategy._seen
     assert not strategy._consumed_excursions
 
+
 def test_session_open_anchor_supports_utc_and_rejects_stale_or_naive() -> None:
     observed = [{"timestamp": "2026-11-19T03:45:00Z", "is_complete": True}]
     decision = datetime(2026, 11, 19, 10, 0, tzinfo=IST)
