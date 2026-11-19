@@ -5236,6 +5236,14 @@ class StrategyManager(_BaseStrategyManager):
         if key in self._observability_counters:
             self._observability_counters[key] += 1
 
+    def get_regime_gate_counters(self) -> dict[str, int]:
+        """Expose cumulative hard blocks separately from adaptive gate denials."""
+        counters = self._observability_counters
+        return {
+            "hard_blocks": int(counters.get("signals_blocked_by_regime", 0)),
+            "gate_denials": int(counters.get("regime_gate_rejections_observed", 0)),
+        }
+
     def _extract_regime_scale(self, adjustments: t.Mapping[str, t.Any]) -> float:
         """Args: adjustments. Returns: float. Raises: Exception."""
 
