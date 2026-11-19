@@ -864,3 +864,58 @@ def test_futures_optional_deep_history_is_backed_off_and_revision_repaired() -> 
     assert len(requests) == 1
     assert requests[0]["target_bars"] == 400
     assert requests[0]["required_bars"] == 50
+
+
+async def test_recent_history_parity_matches_after_canonical_reseed() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    result = runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    assert result.success
+    report = runner.inspect_recent_canonical_history(symbol, last_n=5)
+    assert report["status"] == "match"
+    assert report["checked_bars"] == 5
+    assert report["first_mismatch"] is None
+
+
+async def test_parity_detects_runner_close_drift_with_equal_counts() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    # The fixture's reseed reuses input dicts; detach the projection before
+    # corrupting it so the canonical MDM fixture remains authoritative.
+    runner._symbol_history[symbol][-1] = dict(runner._symbol_history[symbol][-1])
+    runner._symbol_history[symbol][-1]["close"] += 3.5
+
+    report = runner.inspect_recent_canonical_history(symbol)
+    assert report["status"] == "mismatch"
+    assert report["first_mismatch"]["projection"] == "runner"
+    assert report["first_mismatch"]["field"] == "close"
+
+
+async def test_recent_history_parity_does_not_assume_missing_history_matches() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    runner._symbol_history[symbol].pop()
+
+    report = runner.inspect_recent_canonical_history(symbol)
+    assert report["status"] == "mismatch"
+    assert report["first_mismatch"]["field"] == "missing_completed_candle"

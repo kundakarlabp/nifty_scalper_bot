@@ -105,3 +105,14 @@ def test_previous_trading_day_cap_is_not_reused() -> None:
     RiskManager._restore_risk_circuit_from_persisted_state(restarted)
     assert restarted._switches.max_day_loss == pytest.approx(510.0)
     assert restarted._completed_trade_costs_today == 0.0
+
+
+def test_explicit_rupee_ceiling_limits_five_percent_of_growing_balance() -> None:
+    """An absolute operator ceiling wins over 5% of a larger cash balance."""
+    evidence = PositionEvidence()
+    manager = _owner(evidence)
+    manager.settings.max_daily_loss_absolute = 773.0
+
+    assert manager._configured_daily_loss_cap(15_699.0) == pytest.approx(773.0)
+    RiskManager._sync_daily_cap_from_verified_balance(manager, 15_699.0)
+    assert manager._switches.max_day_loss == pytest.approx(773.0)

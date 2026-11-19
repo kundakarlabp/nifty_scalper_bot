@@ -306,6 +306,11 @@ class WebSocketManager:
         """Args: none; Returns: none; Raises: RuntimeError."""
 
         try:
+            # Mark intent synchronously: KiteTicker may deliver a late 1006
+            # before the asynchronously scheduled disconnect() begins.
+            self._manual_disconnect = True
+            self._shutdown = True
+            self._running = False
             if self._loop is None:
                 return
             safe_task(self.disconnect())
@@ -935,6 +940,17 @@ class WebSocketManager:
         try:
             if self._ticker is not None and _ws is not self._ticker:
                 return
+            if self._shutdown or self._manual_disconnect:
+                self._connected.clear()
+                self._state = ConnectionState.DISCONNECTED
+                self._stream_health = "idle"
+                self._logger.info(
+                    "WEBSOCKET_SHUTDOWN_ERROR_IGNORED code=%s reason=%s",
+                    code,
+                    reason,
+                    extra={"event": "WEBSOCKET_SHUTDOWN_ERROR_IGNORED", "code": code},
+                )
+                return
             self._logger.error("Failure in websocket: code=%s reason=%s", code, reason)
             self._connected.clear()
             self._state = ConnectionState.DISCONNECTED
@@ -962,6 +978,17 @@ class WebSocketManager:
 
         try:
             if self._ticker is not None and _ws is not self._ticker:
+                return
+            if self._shutdown or self._manual_disconnect:
+                self._connected.clear()
+                self._state = ConnectionState.DISCONNECTED
+                self._stream_health = "idle"
+                self._logger.info(
+                    "WEBSOCKET_SHUTDOWN_CLOSE_IGNORED code=%s reason=%s",
+                    code,
+                    reason,
+                    extra={"event": "WEBSOCKET_SHUTDOWN_CLOSE_IGNORED", "code": code},
+                )
                 return
             self._logger.info(
                 "Condition met: websocket_closed code=%s reason=%s", code, reason

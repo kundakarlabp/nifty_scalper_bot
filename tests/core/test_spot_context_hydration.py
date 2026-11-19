@@ -14,12 +14,12 @@ def test_spot_context_hydration_log_present():
     assert "SPOT_CONTEXT_HYDRATION_RESULT symbol=NSE:NIFTY" in src
 
 
-def test_runner_history_consistency_is_readiness_based():
+def test_runner_history_consistency_verifies_ohlcv_not_only_bar_counts():
     src = open("src/nifty_scalper_bot/core/app.py", encoding="utf-8").read()
-    assert (
-        "runner_history_count >= required_bars and mdm_history_count >= required_bars"
-        in src
-    )
+    assert "inspect_recent_canonical_history" in src
+    assert 'parity_status == "match"' in src
+    assert '"ready": history_ready' in src
+    assert '"first_mismatch": parity_report.get("first_mismatch")' in src
 
 
 def test_spot_required_falls_back_to_required_candles():
