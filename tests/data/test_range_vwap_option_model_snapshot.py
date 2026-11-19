@@ -44,27 +44,41 @@ def test_fresh_model_reuses_broker_contract_and_underlying_spot() -> None:
     assert risk["vega_per_iv_point"] > 0
     # The risk snapshot must not use a Greeks cache with unknown age/source.
     hub._greeks_cache = {SYMBOL: {"delta": -0.99}}
-    assert hub.get_option_model_snapshot(
-        SYMBOL, spot_price=25230.0, bid=99.8, ask=100.0
-    )["delta"] == risk["delta"]
+    assert (
+        hub.get_option_model_snapshot(SYMBOL, spot_price=25230.0, bid=99.8, ask=100.0)[
+            "delta"
+        ]
+        == risk["delta"]
+    )
 
 
 def test_missing_invalid_expiring_or_wrong_contract_fails_closed() -> None:
-    assert _hub().get_option_model_snapshot(
-        SYMBOL, spot_price=None, bid=99.8, ask=100.0
-    ) == {}
-    assert _hub().get_option_model_snapshot(
-        SYMBOL, spot_price=25230, bid=100.0, ask=99.8
-    ) == {}
-    assert _hub(expiry=date(2026, 11, 18)).get_option_model_snapshot(
-        SYMBOL, spot_price=25230, bid=99.8, ask=100
-    ) == {}
-    assert _hub(base="BANKNIFTY").get_option_model_snapshot(
-        SYMBOL, spot_price=25230, bid=99.8, ask=100
-    ) == {}
-    assert _hub().get_option_model_snapshot(
-        "NFO:UNKNOWN", spot_price=25230, bid=99.8, ask=100
-    ) == {}
+    assert (
+        _hub().get_option_model_snapshot(SYMBOL, spot_price=None, bid=99.8, ask=100.0)
+        == {}
+    )
+    assert (
+        _hub().get_option_model_snapshot(SYMBOL, spot_price=25230, bid=100.0, ask=99.8)
+        == {}
+    )
+    assert (
+        _hub(expiry=date(2026, 11, 18)).get_option_model_snapshot(
+            SYMBOL, spot_price=25230, bid=99.8, ask=100
+        )
+        == {}
+    )
+    assert (
+        _hub(base="BANKNIFTY").get_option_model_snapshot(
+            SYMBOL, spot_price=25230, bid=99.8, ask=100
+        )
+        == {}
+    )
+    assert (
+        _hub().get_option_model_snapshot(
+            "NFO:UNKNOWN", spot_price=25230, bid=99.8, ask=100
+        )
+        == {}
+    )
 
 
 def test_existing_lazy_datahub_greeks_use_canonical_pricing_signature() -> None:
