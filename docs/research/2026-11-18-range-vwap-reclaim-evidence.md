@@ -307,3 +307,57 @@ after broker-state and deployment safety validation.
   registry is not a durable cross-restart event store; creating a second
   persistent ownership path before confirming canonical journal coverage
   would increase duplicate-order risk.
+
+## 19 November follow-up: same-session durability and measured-execution audit
+
+**Live correctness changes (risk-preserving):**
+
+- `RangeVWAPReclaimStrategy` binds to the existing `PositionManager` through
+  `StrategyManager`. Emitted setup IDs, consumed futures-side-session
+  excursions and still-pending broker outcomes use the same existing daily
+  `risk_circuit` snapshot as other restart-safe entry controls.
+- The write is verified by re-reading the canonical position state file after
+  `persist_risk_circuit_state`. A failure or invalid same-day payload **blocks**
+  the new RangeVWAP signal before the runner/broker sees it. No new SQLite
+  store, Redis dependency or broker order path exists.
+- A risk-circuit snapshot from yesterday does not seed today's idempotency.
+  Unknown broker submissions remain reserved; only a proven
+  `no_affordable_execution_candidate` pre-broker callback releases a
+  reservation. Touching VWAP never resets a still-pending order. Concurrent
+  eligible evaluations use one in-strategy reservation lock; broker dedup
+  and existing active-position gates remain authoritative.
+- This change does not independently reconstruct abandoned orders created
+  **before** this new version was deployed; such historical uncertainty
+  must continue to be handled by existing broker-state reconciliation.
+
+**Execution calibration and exit-policy research (no LIVE retuning):**
+
+- The existing `analyze_completed_trades.py --strategy range_vwap_reclaim`
+  now reports measured *paired* entry/exit slippage only for broker-costed
+  canonical completed trades with observed entry ask, observed exit bid and
+  a <=2-second exit cached-quote age. It reports median and 95th-percentile
+  **adverse** bps by side; experimental sample minimum is 30 such trades
+  across 10 independent sessions with >=90% completed-trade coverage.
+  Passing these thresholds **never** automatically authorizes new live
+  settings, because broker fill reconciliation and external holdout are
+  separate requirements.
+- The pre-existing `exit_policy_research.py` compares 10-, 15- and
+  20-minute optional time-stop quote-level overlays in addition to its
+  existing target/trailing variants. It evaluates only full-size observed
+  option bids captured within the *real* position's lifetime. Scenarios
+  needing an observation after the actual exit or before an unresolved
+  protective stop are reported UNRESOLVED, never a hypothetical profit.
+- The live 15-minute time-stop, current session-VWAP targets, 25-bps
+  initial stress, 1.5 after-cost R:R minimum, 773 INR modeled cash risk,
+  expiry controls and broker-owned protective exits remain unchanged.
+- Actual Range VWAP option fill-to-fill profitability remains **unproven**.
+  The limited 17-18 November futures-only proxy does not validate option
+  mean reversion after Zerodha/NSE fees, spread and adverse IV/theta.
+
+**Research-practice implications:** VWAP is an execution benchmark, not
+intrinsic equilibrium evidence. Compare reversal *vs continuation* after
+pre-specified regime/volatility, option liquidity and event-period filters.
+Exclude look-ahead, non-independent overlapping evaluations, wide quotes
+and survivorship effects. Use a locked chronological holdout with
+strategy-only net P&L, zero-trade abstention and actual broker fills before
+claiming profitability or moving any exploratory threshold into production.
