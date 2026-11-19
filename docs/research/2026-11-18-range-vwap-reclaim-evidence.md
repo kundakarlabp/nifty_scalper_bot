@@ -361,3 +361,47 @@ Exclude look-ahead, non-independent overlapping evaluations, wide quotes
 and survivorship effects. Use a locked chronological holdout with
 strategy-only net P&L, zero-trade abstention and actual broker fills before
 claiming profitability or moving any exploratory threshold into production.
+
+## 19 November: volatility-conditioned transition and option-payoff audit
+
+The published literature supports testing *conditional* intraday behavior, not
+assuming VWAP excursions must reverse. The Nasdaq VXN-breach preprint reports
+non-monotone profitability across volatility regimes despite a high eventual
+touch rate; prior and subsequent samples diverge. Broad futures studies report
+intraday momentum during hedging-driven flow. Neither result directly validates
+a 1–15-minute long NIFTY option entry: price touch, timely price touch, full-size
+option bid at exit, and profitable realized after-cost fills are separate events.
+
+This revision makes three focused changes using the existing strategy and
+canonical report (no parallel signal engine or new model):
+
+1. A *prior-completed-bar* volatility-pressure diagnostic records the last-5
+   to last-14 average true range ratio and last-5-minute directional efficiency.
+   It is not a new LIVE regime threshold or a probability.
+2. A fresh, verified futures quote must still be inside the frozen reclaim band
+   and must not have already reached exchange session VWAP. Expected futures
+   travel entering the existing option delta/theta/IV/basis and post-cost
+   admission model is reduced to the *smaller* of confirmation-close and latest
+   futures-quote remaining travel. Invalidation risk uses the larger of the
+   original and current distance to the structural stop. This prevents
+   mechanically overestimating option profit from an already-progressed reversal.
+3. The canonical completed-trade analysis now separates pre-entry realized
+   volatility expansion (>1 versus <=1 relative to the causal 14-bar baseline),
+   direction-persistence pressure, modeled **target-scenario** net reward and
+   actual verified broker-costed net P&L. It explicitly reports provenance
+   coverage. Target-scenario reward is **not** probability-weighted expectancy;
+   selected-trade cohorts cannot label missed/rejected opportunities.
+
+No numeric RANGE band, slope, OFI, ATR, spread, delta, cash-risk or
+15-minute stop threshold is altered. The generic `TradeCandidateSelector`
+already orders viable contracts by post-cost net R:R and liquidity evidence;
+it is deliberately not replaced by a second, incompatible ranker. Strategy-
+specific actual contract winner comparisons need *paired contemporaneous*
+bid/ask, greeks, broker affordability and validated quote/OFI evidence before
+additional candidate-ranking changes are justified.
+
+Research-only next checks: out-of-sample grouped net expectancy by volatility
+state and short-term directional efficiency; percentage of complete option
+quote/fill evidence; forward 5/10/15-minute markouts for non-overlapping
+rejected opportunities; model-to-broker spread/IV/theta and fill shortfall.
+No new live threshold should be promoted on the limited futures-only proxy.

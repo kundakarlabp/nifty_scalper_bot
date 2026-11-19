@@ -1,7 +1,8 @@
 """Analyze canonical completed trades without modifying live strategy parameters.
 
 Responsibilities: Isolate canonical Range VWAP trade outcomes, observed
-paired bid/ask execution-quality coverage and 10/25/50-bps stress scenarios.
+paired bid/ask execution-quality coverage, pre-entry volatility/payoff
+cohorts and 10/25/50-bps stress scenarios.
 Safety: No missing premium/quantity, broker-cost identity or independent-trade
 sample may be inferred as zero loss. Calibration is read-only and cannot
 automatically promote any parameter. Sensitivities are not fill-path replays;
@@ -426,6 +427,102 @@ def range_vwap_execution_calibration(
     }
 
 
+def range_vwap_transition_economics(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Compare causal entry volatility and modeled target with realized option P&L.
+
+    This is a selected-trade diagnostic, NOT proof of reversals or a
+    counterfactual assessment of vetoed/missed candidates.
+    """
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    cohorts: dict[str, list[tuple[Any, float, bool]]] = {}
+    for trade in trades:
+        structure = trade.outcome.get("range_structure")
+        economics = trade.outcome.get("option_cost_risk")
+        if (
+            trade.cost_source != "broker_virtual_contract_note"
+            or not isinstance(structure, dict)
+            or not isinstance(economics, dict)
+        ):
+            continue
+        try:
+            vol_ratio = float(structure["prior_5m_to_14m_true_range_ratio"])
+            short_eff = float(structure["prior_5m_directional_efficiency"])
+            long_eff = float(structure["directional_efficiency"])
+            target_reward = float(economics["target_net_reward_after_costs"])
+            cash_risk = float(economics["worst_stop_loss_including_costs"])
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if not (
+            all(
+                math.isfinite(v)
+                for v in (vol_ratio, short_eff, long_eff, target_reward, cash_risk)
+            )
+            and vol_ratio >= 0
+            and 0 <= short_eff <= 1
+            and 0 <= long_eff <= 1
+            and target_reward > 0
+            and 0 < cash_risk <= 773
+        ):
+            continue
+        label = (
+            "recent_true_range_expansion"
+            if vol_ratio > 1.0
+            else "recent_true_range_not_expanding"
+        )
+        cohorts.setdefault(label, []).append(
+            (trade, target_reward, short_eff > long_eff)
+        )
+
+    results = []
+    for label, observations in sorted(cohorts.items()):
+        sample = [trade for trade, _, _ in observations]
+        summary = summarize_completed_trades(sample)
+        sessions = {
+            datetime.fromtimestamp(t.closed_at, IST).date().isoformat() for t in sample
+        }
+        results.append(
+            {
+                "preentry_volatility_cohort": label,
+                "completed_trades": len(sample),
+                "independent_sessions": len(sessions),
+                "recent_directional_pressure_rising_fraction": round(
+                    sum(rising for _, _, rising in observations) / len(sample), 4
+                ),
+                "modeled_target_net_reward_mean": round(
+                    sum(reward for _, reward, _ in observations) / len(sample), 2
+                ),
+                "realized_net_expectancy": summary.expectancy,
+                "realized_win_rate": summary.win_rate,
+                "realized_net_pnl": summary.net_pnl,
+                "research_sample_sufficient": (
+                    len(sample) >= 20 and len(sessions) >= 10
+                ),
+            }
+        )
+    return {
+        "completed_range_trades": len(trades),
+        "trades_with_causal_volatility_and_economic_provenance": sum(
+            len(items) for items in cohorts.values()
+        ),
+        "cohorts": results,
+        "live_filter_or_parameter_promotion_allowed": False,
+        "interpretation": (
+            "descriptive_selected_trades_only; modeled_target_is_not_expectancy;"
+            " no_assessment_of_blocked_setup_profitability"
+        ),
+    }
+
+
 def load_candidate_returns(path: Path) -> dict[str, list[float]]:
     """Load aligned candidate post-cost return/R series from JSON."""
 
@@ -570,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
                 range_vwap_execution_calibration(
                     rows, allow_estimated_costs=args.allow_estimated_costs
                 )
+            )
+            report["range_vwap_transition_economics"] = range_vwap_transition_economics(
+                rows, allow_estimated_costs=args.allow_estimated_costs
             )
         report["selected_strategy_note"] = (
             "Closed-trade metrics and candidate decisions are strategy-filtered; "
