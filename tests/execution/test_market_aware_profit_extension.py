@@ -1038,6 +1038,8 @@ def test_live_adaptive_refuses_unconfirmed_or_undersized_broker_stop(monkeypatch
     bracket.exchange_stop_quantity = 65
     assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
     evidence = bracket.trade_provenance["adaptive_profit_lock"]
-    assert evidence["broker_acknowledged_stop"] == 94.0
+    assert evidence["broker_recorded_stop"] == 94.0
+    assert evidence["broker_orderbook_confirmed_stop"] is None
     assert evidence["estimated_net_at_virtual_trigger_points"] > 0
-    assert evidence["estimated_net_at_acknowledged_trigger_points"] < 0
+    assert evidence["estimated_net_at_recorded_trigger_points"] < 0
+    assert evidence["estimated_net_at_confirmed_trigger_points"] is None
