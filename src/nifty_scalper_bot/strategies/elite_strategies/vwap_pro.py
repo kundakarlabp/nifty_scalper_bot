@@ -735,7 +735,7 @@ class VWAPProStrategy(EliteStrategy):
                 log_throttled(
                     LOGGER,
                     f"vwap_distance_outside_band:{symbol_scope}",
-                    "VWAP_DISTANCE_REJECTED symbol=%s premium=%.4f vwap=%.4f distance_fraction=%.4f allowed_fraction=%.4f distance_atr=%.3f allowed_atr=%.3f fraction_failed=%s atr_failed=%s trend_confirmed=%s",
+                    "VWAP_DISTANCE_REJECTED symbol=%s premium=%.4f vwap=%.4f distance_fraction=%.4f allowed_fraction=%.4f distance_atr=%.3f allowed_atr=%.3f fraction_failed=%s atr_failed=%s trend_confirmed=%s futures_volume_source=%s completed_ratio=%s quote_counter_ratio=%s",
                     symbol_scope,
                     current_price,
                     vwap,
@@ -746,6 +746,9 @@ class VWAPProStrategy(EliteStrategy):
                     distance_pct > allowed_distance,
                     distance_atr > effective_quality_max_distance_atr,
                     strong_fresh_trend_context,
+                    futures_volume_source,
+                    _fmt_optional(futures_volume_ratio, 4),
+                    _fmt_optional(quote_counter_volume_ratio, 4),
                     interval_sec=60.0,
                     extra={
                         "event": "VWAP_DISTANCE_REJECTED",
@@ -760,6 +763,10 @@ class VWAPProStrategy(EliteStrategy):
                         "fraction_failed": distance_pct > allowed_distance,
                         "atr_failed": distance_atr > effective_quality_max_distance_atr,
                         "underlying_trend_confirmed": strong_fresh_trend_context,
+                        "futures_volume_source": futures_volume_source,
+                        "futures_completed_bar_ratio": futures_volume_ratio,
+                        "futures_completed_bar_age_s": futures_completed_bar_age_s,
+                        "futures_quote_counter_ratio": quote_counter_volume_ratio,
                         "retest_extension_enabled": self._trend_retest_extension_enabled,
                     },
                 )

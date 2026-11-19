@@ -1046,3 +1046,45 @@ def test_stale_future_or_wrong_contract_cannot_confirm_vwap_volume(
     assert signal is not None  # independent option volume remains sufficient
     assert signal.metadata["futures_volume_ratio"] is None
     assert signal.metadata["volume_confirmation_source"] == "option"
+
+
+def test_vwap_distance_rejection_reports_causal_futures_volume(
+    monkeypatch,
+) -> None:
+    """A distance veto must still expose completed futures volume provenance."""
+    import nifty_scalper_bot.strategies.elite_strategies.vwap_pro as vwap_module
+
+    observed = []
+
+    def _capture_log(_logger, _key, message, *args, **_kwargs):
+        observed.append(message % args)
+
+    monkeypatch.setattr(vwap_module, "log_throttled", _capture_log)
+    provenance = {
+        "source": "completed_futures_1m_bars",
+        "ready": True,
+        "reason": "verified",
+        "ratio": 1.8,
+        "baseline_count": 20,
+        "bar_timestamp": "2026-09-10T09:59:00+05:30",
+    }
+    _, signal = _evaluate(
+        monkeypatch,
+        current_price=135.0,
+        open=131.0,
+        high=138.0,
+        low=130.0,
+        close=135.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance=provenance,
+        futures_completed_bar_volume_symbol="NFO:NIFTY26SEPFUT",
+        active_futures_symbol="NFO:NIFTY26SEPFUT",
+        futures_volume_ratio=0.0,
+    )
+    assert signal is None
+    assert any(
+        "VWAP_DISTANCE_REJECTED" in event
+        and "futures_volume_source=verified_completed_futures_1m" in event
+        and "completed_ratio=1.8000" in event
+        for event in observed
+    )

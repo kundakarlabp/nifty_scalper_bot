@@ -714,13 +714,20 @@ class MarketRegimeManager:
                 )
                 return
 
+            stable_snapshot = self.get_latest_snapshot()
+            history_momentum = (
+                (price_series[-1] - price_series[0]) / abs(price_series[0])
+                if len(price_series) >= 2 and price_series[0] != 0
+                else None
+            )
             log_throttled(
                 logger,
                 f"regime_input_verification:{self._indicator_symbol}",
                 (
                     "REGIME_INPUT_VERIFICATION symbol=%s regime=%s reason=%s "
                     "adx_available=%s ema_pair_available=%s atr_available=%s "
-                    "completed_history_bars=%s volume_available=%s confidence=%.3f"
+                    "completed_history_bars=%s volume_available=%s confidence=%.3f "
+                    "stable_regime=%s adx_value=%s history_momentum=%s"
                 ),
                 self._indicator_symbol,
                 snapshot.regime,
@@ -731,6 +738,13 @@ class MarketRegimeManager:
                 len(price_series),
                 enrichment.get("volume_ratio") is not None,
                 snapshot.confidence,
+                getattr(stable_snapshot, "regime", None),
+                data.get("adx"),
+                (
+                    f"{history_momentum:.6f}"
+                    if history_momentum is not None
+                    else "unavailable"
+                ),
                 interval_sec=60.0,
                 extra={
                     "event": "REGIME_INPUT_VERIFICATION",
@@ -738,6 +752,9 @@ class MarketRegimeManager:
                     "regime": snapshot.regime,
                     "regime_reason": snapshot.reason,
                     "verified_completed_history_bars": len(price_series),
+                    "stable_regime": getattr(stable_snapshot, "regime", None),
+                    "adx_value": data.get("adx"),
+                    "history_momentum": history_momentum,
                 },
             )
             logger.debug(
