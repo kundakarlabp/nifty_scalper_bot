@@ -252,9 +252,7 @@ def test_unknown_raw_observation_retains_stable_trend_but_filter_denies() -> Non
 
 def test_raw_low_activity_does_not_silently_replace_stable_trend() -> None:
     """The accepted trend remains visible until transition confirmation."""
-    manager = MarketRegimeManager(
-        MarketRegimeDetector(), transition_confirmations=3
-    )
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
     manager.ingest_snapshot(
         RegimeSnapshot(
             symbol="NIFTY",
