@@ -826,9 +826,7 @@ def test_adaptive_owner_never_runs_canonical_optional_tiers(monkeypatch):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
-    bracket = SimpleNamespace(
-        symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0
-    )
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
     calls = []
     monkeypatch.setattr(
         RuntimeBracketManager,
@@ -864,9 +862,7 @@ def test_adaptive_missing_quote_does_not_revert_to_ltponly_trailing(monkeypatch)
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
-    bracket = SimpleNamespace(
-        symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0
-    )
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
     calls = []
     monkeypatch.setattr(
         RuntimeBracketManager,
@@ -886,6 +882,7 @@ def test_adaptive_missing_quote_does_not_revert_to_ltponly_trailing(monkeypatch)
     assert not manager._apply_trailing_math(bracket)
     assert bracket.sl_trigger_price == 101.0
     assert not calls
+
 
 def test_exchange_sync_coalescer_is_thread_scoped(monkeypatch):
     manager = object.__new__(BoundBracketManager)
@@ -1123,9 +1120,10 @@ def test_vwappro_continuation_is_not_misclassified_as_mean_reversion():
     )
     assert profit_extension._adaptive_continuation_state(decision, bracket) == "STRONG"
     manager = FakeManager(strong=True)
-    assert extend_final_target_if_supported(
+    extension = extend_final_target_if_supported(
         manager, bracket, 120.0, _final_tp_action()
-    ) is None
+    )
+    assert extension is None
     assert bracket.tp_trigger_price > 118.0
 
 
