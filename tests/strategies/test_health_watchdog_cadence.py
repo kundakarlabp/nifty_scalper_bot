@@ -149,9 +149,7 @@ def test_skipped_tick_count_is_reported_for_slow_scans(monkeypatch) -> None:
     reported = threading.Event()
     events: list[dict[str, object]] = []
 
-    def _record(
-        _logger, _key, _message, *, extra=None, level=None, **_kwargs
-    ) -> None:
+    def _record(_logger, _key, _message, *, extra=None, level=None, **_kwargs) -> None:
         if extra and extra.get("event") == "HEALTH_WATCHDOG_SLOW":
             assert level == logging.WARNING
             events.append(dict(extra))
