@@ -1213,8 +1213,10 @@ def _build_risk_settings() -> RiskSettings:
         default=float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT),
         minimum=0.0,
     )
+    # A percentage allowance must not silently grow beyond the operator's
+    # existing INR ceiling as balance recovers after a profitable trade.
     abs_loss_cap = _env_float(
-        "RISK__MAX_DAY_LOSS", "RISK_MAX_DAY_LOSS", default=0.0, minimum=0.0
+        "RISK__MAX_DAY_LOSS", "RISK_MAX_DAY_LOSS", default=773.0, minimum=0.0
     )
     max_losses = _env_int(
         "RISK__MAX_CONSEC_LOSSES", "RISK_MAX_CONSEC_LOSSES", default=3, minimum=1
