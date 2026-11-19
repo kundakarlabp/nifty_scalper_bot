@@ -77,6 +77,7 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     )
     current = [25251.0]
     active = ["NFO:NIFTY26NOVFUT"]
+    tick_age = [0.1]
 
     def cached(symbol, *, max_age_seconds, require_ws):
         assert symbol == "NFO:NIFTY26NOVFUT"
@@ -87,6 +88,7 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     manager._market_data = SimpleNamespace(
         get_active_nifty_future_symbol_cached=lambda: active[0],
         get_cached_ltp=cached,
+        time_since_last_tick=lambda _symbol: tick_age[0],
     )
     target = manager._evaluate_exit_fast(bracket, 105.0)
     assert target is not None
@@ -108,6 +110,9 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     assert manager._evaluate_exit_fast(bracket, 105.0) is None
 
     active[0] = "NFO:NIFTY26NOVFUT"
+    tick_age[0] = 4.0
+    assert manager._evaluate_exit_fast(bracket, 105.0) is None
+    tick_age[0] = 0.1
     bracket.trade_provenance.update(
         range_futures_side="PE",
         range_futures_target=25230.0,
