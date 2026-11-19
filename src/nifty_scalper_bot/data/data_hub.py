@@ -1202,6 +1202,30 @@ class DataHub:
             exc,
         )
 
+    @staticmethod
+    def _price_option_model(
+        *, spot: float, strike: float, ttm: float, premium: float, is_call: bool
+    ) -> tuple[float, dict[str, float]]:
+        """Reuse canonical Black-Scholes and IV conventions for both consumers."""
+        iv = implied_volatility(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            option_price=premium,
+            is_call=is_call,
+        )
+        if not isfinite(iv) or iv <= 0:
+            raise ValueError("unpriceable_option_iv")
+        return iv, black_scholes_greeks(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            vol=iv,
+            is_call=is_call,
+        )
+
     def _capture_option_metrics(
         self, symbol: str, tick: Tick, *, derive_missing: bool = True
     ) -> None:
@@ -1245,30 +1269,17 @@ class DataHub:
         if ttm_years <= 0:
             return
         try:
-            iv = implied_volatility(
-                price=float(ltp),
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                flag="c" if is_call else "p",
+            iv, greeks = self._price_option_model(
+                spot=float(spot),
+                strike=float(strike),
+                ttm=float(ttm_years),
+                premium=float(ltp),
+                is_call=is_call,
             )
-        except Exception:  # noqa: BLE001
-            return
-        if iv is None or iv <= 0:
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
             return
         self._iv_cache[symbol] = float(iv)
-        try:
-            self._greeks_cache[symbol] = black_scholes_greeks(
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                sigma=float(iv),
-                flag="c" if is_call else "p",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        self._greeks_cache[symbol] = dict(greeks)
 
     def _parse_option_symbol(
         self, symbol: str
@@ -2466,15 +2477,15 @@ class DataHub:
             ).days
             if remaining_days <= 0 or ttm <= 0:
                 return {}
-            iv = implied_volatility(
-                spot, strike, ttm, 0.06, (best_bid + best_ask) / 2.0,
+            iv, model = self._price_option_model(
+                spot=spot,
+                strike=strike,
+                ttm=ttm,
+                premium=(best_bid + best_ask) / 2.0,
                 is_call=is_call,
             )
-            if not isfinite(iv) or not 0 < iv < 5:
+            if iv >= 5:
                 return {}
-            model = black_scholes_greeks(
-                spot, strike, ttm, 0.06, iv, is_call=is_call
-            )
             if any(not isfinite(float(model[key])) for key in ("delta", "theta", "vega")):
                 return {}
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
