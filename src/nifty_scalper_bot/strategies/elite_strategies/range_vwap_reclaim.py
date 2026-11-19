@@ -287,20 +287,24 @@ def assess_range_vwap_reclaim(
                 (
                     min(float(latest["open"]), float(latest["close"]))
                     - float(latest["low"])
-                ) / bar_range,
+                )
+                / bar_range,
                 4,
             )
-            if bar_range > 0 else 0.0
+            if bar_range > 0
+            else 0.0
         ),
         "reclaim_upper_wick_fraction": (
             round(
                 (
                     float(latest["high"])
                     - max(float(latest["open"]), float(latest["close"]))
-                ) / bar_range,
+                )
+                / bar_range,
                 4,
             )
-            if bar_range > 0 else 0.0
+            if bar_range > 0
+            else 0.0
         ),
     }
     if slope_bps > config.max_vwap_slope_bps_per_min:
