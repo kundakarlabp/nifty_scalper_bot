@@ -2460,6 +2460,8 @@ class DataHub:
             lookup = getattr(owner, "lookup", None)
         if not callable(lookup):
             return {}
+        if spot_price is None or bid is None or ask is None:
+            return {}
         try:
             row = lookup(symbol)
             if not isinstance(row, Mapping):
