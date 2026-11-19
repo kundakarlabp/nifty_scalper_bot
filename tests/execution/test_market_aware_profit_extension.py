@@ -964,6 +964,7 @@ def test_strategy_aware_adaptive_classification_preserves_vwap_thesis():
     )
     vwap = _bracket()
     vwap.trade_provenance["strategy_name"] = "VWAPPro"
+    vwap.trade_provenance["setup_name"] = "session_vwap_reentry_live"
     smc = _bracket()
     smc.trade_provenance["strategy_name"] = "SMC"
     reversal = _bracket()
@@ -1024,6 +1025,7 @@ def test_vwap_reversion_keeps_original_final_target():
     manager = FakeManager(strong=True)
     bracket = _bracket()
     bracket.trade_provenance["strategy_name"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "session_vwap_reentry_live"
     before = bracket.tp_trigger_price
     action = extend_final_target_if_supported(
         manager, bracket, 120.0, _final_tp_action()
@@ -1099,3 +1101,43 @@ def test_old_completed_futures_bar_does_not_authorize_strong_continuation():
     assessment = assess_continuation(manager, _bracket(), 120.0)
     assert assessment.snapshot["futures_volume_verified"] is False
     assert "futures_volume_confirmation" not in assessment.positive
+
+
+def test_vwappro_continuation_is_not_misclassified_as_mean_reversion():
+    bracket = _bracket()
+    bracket.trade_provenance["strategy_name"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "vwap_continuation"
+    assert profit_extension._exit_strategy_family(bracket) == "TREND_CONTINUATION"
+    positive = (
+        "premium_momentum",
+        "underlying_vwap_alignment",
+        "futures_volume_confirmation",
+    )
+    decision = ContinuationDecision(
+        extend=True,
+        evidence_count=5,
+        positive=positive,
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._adaptive_continuation_state(decision, bracket) == "STRONG"
+    manager = FakeManager(strong=True)
+    assert extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    ) is None
+    assert bracket.tp_trigger_price > 118.0
+
+
+def test_simple_vwap_reclaim_keeps_reversion_target_without_trend_proof():
+    bracket = _bracket()
+    bracket.trade_provenance["strategy"] = "VWAPPro"
+    bracket.trade_provenance["setup_name"] = "vwap_reclaim"
+    assert profit_extension._exit_strategy_family(bracket) == "VWAP_RECLAIM"
+    manager = FakeManager(strong=True)
+    original_target = bracket.tp_trigger_price
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+    assert action is not None and action["type"] == "FINAL_TP"
+    assert bracket.tp_trigger_price == original_target
