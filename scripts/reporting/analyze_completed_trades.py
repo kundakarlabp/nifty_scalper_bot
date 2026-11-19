@@ -1,7 +1,10 @@
 """Analyze canonical completed trades without modifying live strategy parameters.
 
-Safety: Selection diagnostics require complete finite R-multiple coverage;
-missing outcomes never silently disappear from a validated Sharpe sample.
+Responsibilities: Optionally isolate one canonical strategy and apply extra
+10/25/50-bps per-side liquidation stress using verified completed-ledger prices.
+Safety: No missing premium/quantity, broker-cost identity or independent-trade
+sample may be inferred as zero loss. Sensitivities are not fill-path replays;
+selection diagnostics require complete finite R-multiple coverage.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +50,9 @@ from nifty_scalper_bot.backtesting.broker_tradebook_reconciliation import (  # n
 from nifty_scalper_bot.backtesting.ledger_integrity import (  # noqa: E402
     summarize_ledger_integrity,
 )
+from nifty_scalper_bot.config.strategy_taxonomy import (  # noqa: E402
+    normalize_strategy_name,
+)
 from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
     load_candidate_decision_rows,
     load_trade_ledger_rows as load_canonical_trade_ledger_rows,
@@ -76,11 +82,22 @@ def build_analysis(
     walk_forward_min_train: int = 20,
     walk_forward_test_trades: int = 10,
     walk_forward_min_folds: int = 2,
+    strategy: str | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable evidence report from canonical ledger rows."""
 
+    selected_rows = (
+        [
+            row
+            for row in rows
+            if normalize_strategy_name(str(row.get("strategy") or ""))
+            == normalize_strategy_name(strategy)
+        ]
+        if strategy
+        else rows
+    )
     trades = canonicalize_completed_trades(
-        rows,
+        selected_rows,
         allow_estimated_costs=allow_estimated_costs,
     )
     overall = summarize_completed_trades(trades)
@@ -143,6 +160,8 @@ def build_analysis(
     return {
         "dataset": {
             "canonical_completed_trades": len(trades),
+            "strategy_filter": normalize_strategy_name(strategy) if strategy else None,
+            "input_closed_trade_rows": len(selected_rows),
             "first_closed_at": trades[0].closed_at if trades else None,
             "last_closed_at": trades[-1].closed_at if trades else None,
         },
@@ -231,6 +250,94 @@ def build_analysis(
     }
 
 
+def range_vwap_slippage_stress(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Extra per-side fill slippage stress; never an executable counterfactual."""
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    evidence = {
+        "policy": "extra_slippage_per_side_on_observed_fills",
+        "executable_quote_path_verified": False,
+        "option_profitability_proven": False,
+        "minimum_trades_for_parameter_promotion_met": False,
+    }
+    if not trades:
+        return {
+            **evidence,
+            "ready": False,
+            "reason": "no_verified_closed_range_trades",
+            "scenarios": [],
+        }
+    raw = {
+        str(row["trade_id"]): row
+        for row in selected
+        if str(row.get("state") or row.get("status") or "").upper() == "CLOSED"
+        and row.get("ledger_complete") in (True, 1, "true", "1")
+    }
+    premiums: dict[str, float] = {}
+    for trade in trades:
+        row = raw[trade.trade_id]
+        try:
+            entry = float(row["entry_price"])
+            exit_price = float(row["exit_price"])
+            quantity = float(row["quantity"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_quantity_missing",
+                "scenarios": [],
+            }
+        if (
+            not all(math.isfinite(v) and v > 0 for v in (entry, exit_price, quantity))
+            or not quantity.is_integer()
+            or trade.cost_source != "broker_virtual_contract_note"
+        ):
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_broker_cost_unverified",
+                "scenarios": [],
+            }
+        premiums[trade.trade_id] = (entry + exit_price) * quantity
+
+    scenarios = []
+    for bps in (10, 25, 50):
+        stressed = [
+            replace(
+                trade,
+                gross_pnl=trade.gross_pnl - premiums[trade.trade_id] * bps / 10000.0,
+                net_pnl=trade.net_pnl - premiums[trade.trade_id] * bps / 10000.0,
+            )
+            for trade in trades
+        ]
+        summary = summarize_completed_trades(stressed)
+        scenarios.append(
+            {
+                "extra_slippage_bps_each_side": bps,
+                "net_pnl": summary.net_pnl,
+                "net_expectancy": summary.expectancy,
+                "profit_factor": summary.profit_factor,
+                "max_drawdown": summary.max_drawdown,
+            }
+        )
+    return {
+        **evidence,
+        "ready": True,
+        "reason": "descriptive_stress_only_not_fill_replay",
+        "completed_trades": len(trades),
+        "scenarios": scenarios,
+    }
+
+
 def load_candidate_returns(path: Path) -> dict[str, list[float]]:
     """Load aligned candidate post-cost return/R series from JSON."""
 
@@ -292,6 +399,11 @@ def build_candidate_validation(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trades-db", type=Path, required=True)
+    parser.add_argument(
+        "--strategy",
+        help="Optional canonical strategy (e.g. range_vwap_reclaim). Other "
+        "strategies are excluded from the completed-trade analysis.",
+    )
     parser.add_argument(
         "--broker-trades-csv",
         type=Path,
@@ -359,6 +471,18 @@ def main(argv: list[str] | None = None) -> int:
             walk_forward_min_train=args.walk_forward_min_train,
             walk_forward_test_trades=args.walk_forward_test_trades,
             walk_forward_min_folds=args.walk_forward_min_folds,
+            strategy=args.strategy,
+        )
+        if normalize_strategy_name(args.strategy) == "range_vwap_reclaim":
+            report["range_vwap_slippage_stress"] = range_vwap_slippage_stress(
+                rows,
+                allow_estimated_costs=args.allow_estimated_costs,
+            )
+        report["selected_strategy_note"] = (
+            "Closed-trade metrics and candidate decisions are strategy-filtered; "
+            "historical journal integrity and broker reconciliation are global."
+            if args.strategy
+            else None
         )
         report["ledger_integrity"] = summarize_ledger_integrity(all_ledger_rows)
         report["broker_tradebook_reconciliation"] = (
@@ -375,6 +499,13 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         candidate_decisions = load_candidate_decision_rows(args.trades_db)
+        if args.strategy:
+            candidate_decisions = [
+                row
+                for row in candidate_decisions
+                if normalize_strategy_name(str(row.get("strategy") or ""))
+                == normalize_strategy_name(args.strategy)
+            ]
         decision_funnel = summarize_candidate_decisions(candidate_decisions)
         report["candidate_decision_funnel"] = asdict(decision_funnel)
         setup_opportunities = canonicalize_setup_opportunities(candidate_decisions)

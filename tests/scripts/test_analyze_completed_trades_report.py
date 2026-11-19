@@ -248,3 +248,101 @@ def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> N
     assert evidence["completed_ledger_rows"] == 0
     assert evidence["unreferenced_broker_order_count"] == 1
     assert evidence["final_net_pnl_broker_reconciled"] is False
+
+
+def test_range_vwap_completed_analysis_filters_other_strategies() -> None:
+    def row(trade_id: str, strategy: str, amount: float) -> dict:
+        return {
+            "trade_id": trade_id,
+            "closed_at": 100.0 if trade_id == "range" else 200.0,
+            "strategy": strategy,
+            "gross_pnl": amount + 20.0,
+            "estimated_costs": 20.0,
+            "net_pnl": amount,
+            "ledger_complete": True,
+            "state": "CLOSED",
+            "exit_reason": "TARGET",
+            "entry_price": 100.0,
+            "exit_price": 110.0,
+            "quantity": 65,
+            "outcome": {
+                "cost_source": "broker_virtual_contract_note",
+                "effective_costs": {"total": 20.0},
+            },
+        }
+
+    rows = [
+        row("range", "RangeVWAPReclaim", 630.0),
+        row("orb", "ORBPro", -80.0),
+    ]
+    selected = module.build_analysis(
+        rows,
+        block_size=20,
+        components=(),
+        strategy="range_vwap_reclaim",
+    )
+    assert selected["dataset"]["strategy_filter"] == "range_vwap_reclaim"
+    assert selected["dataset"]["canonical_completed_trades"] == 1
+    assert selected["overall_post_cost"]["net_pnl"] == 630.0
+    stress = module.range_vwap_slippage_stress(rows)
+    assert stress["ready"] is True
+    assert stress["option_profitability_proven"] is False
+    assert [row["extra_slippage_bps_each_side"] for row in stress["scenarios"]] == [
+        10,
+        25,
+        50,
+    ]
+    assert stress["scenarios"][0]["net_pnl"] == 616.35
+    assert stress["scenarios"][2]["net_pnl"] < stress["scenarios"][0]["net_pnl"]
+
+
+def test_range_stress_abstains_on_missing_or_estimated_evidence() -> None:
+    assert module.range_vwap_slippage_stress([])["ready"] is False
+    row = {
+        "trade_id": "r1",
+        "closed_at": 1.0,
+        "strategy": "RangeVWAPReclaim",
+        "gross_pnl": 60.0,
+        "estimated_costs": 20.0,
+        "net_pnl": 40.0,
+        "state": "CLOSED",
+        "ledger_complete": True,
+        "outcome": {
+            "cost_source": "broker_virtual_contract_note",
+            "effective_costs": {"total": 20.0},
+        },
+    }
+    assert (
+        module.range_vwap_slippage_stress([row])["reason"]
+        == "premium_or_quantity_missing"
+    )
+    row.update(entry_price=100.0, exit_price=102.0, quantity=65)
+    row["outcome"] = {"cost_source": "estimated_model"}
+    assert (
+        module.range_vwap_slippage_stress([row], allow_estimated_costs=True)["reason"]
+        == "premium_or_broker_cost_unverified"
+    )
+
+
+def test_strategy_cli_with_no_range_trades_does_not_infer_returns(
+    tmp_path, capsys
+) -> None:
+    database = tmp_path / "empty.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+    assert (
+        module.main(
+            [
+                "--trades-db",
+                str(database),
+                "--strategy",
+                "range_vwap_reclaim",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["overall_post_cost"]["trade_count"] == 0
+    assert report["range_vwap_slippage_stress"]["ready"] is False
+    assert report["range_vwap_slippage_stress"]["scenarios"] == []
+    assert report["parameter_change"]["allowed"] is False
