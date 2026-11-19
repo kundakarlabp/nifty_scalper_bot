@@ -7,6 +7,10 @@ assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
 OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
+Entry lifecycle: notify_entry_accepted and notify_entry_rejected use the existing
+StrategyManager callbacks to reconcile exact setup IDs; only a proven pre-broker
+capacity rejection releases a reserved excursion. assess_option_cost_risk models
+the bid-price stop trigger separately from the adverse stop liquidation fill.
 Safety: LIVE requires an explicit pilot opt-in, attested reversal and quote
 provenance; broker-stop, order affordability and capital gates remain authoritative.
 """
