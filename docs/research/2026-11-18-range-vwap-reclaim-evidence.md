@@ -275,3 +275,35 @@ after broker-state and deployment safety validation.
   history recovery, historical option bid/ask calibration, contract-rotation
   replay, alternate exit policies and caching require distinct verified
   source data or benchmarks before being promoted into live decisions.
+
+## 19 November follow-up: reuse historical evidence and time-zone provenance
+
+- The existing `analyze_completed_trades.py` script accepts
+  `--strategy range_vwap_reclaim` and isolates canonical closed Range VWAP
+  trades and strategy-tagged candidate decisions without creating a second
+  journal, backtester, risk model, or order path.
+- A new **descriptive** `range_vwap_slippage_stress` section applies 10, 25
+  and 50 basis points of *additional* adverse movement to **each** already
+  observed entry/exit premium. It requires verified closed ledger, positive
+  entry/exit premiums, integer quantity and broker virtual-contract-note cost
+  provenance for **every** selected trade. An absent field, unverified cost
+  source or zero trades produces `ready=false` and no synthetic P&L.
+  This is not exchange tradebook fill parity or counterfactual bracket replay.
+- The existing range futures-history recovery now uses the strategy's
+  timezone-aware 09:15 anchor parser: `03:45Z` and `09:15+05:30` on the
+  same date are equivalent. Stale, naive and off-minute timestamps cannot
+  suppress needed recovery. The strict candle publication/continuity checks
+  remain authoritative; no missing futures history is synthesized.
+- Example (authorized local canonical journal export):
+  `python scripts/reporting/analyze_completed_trades.py --trades-db
+  /path/to/journal.sqlite --strategy range_vwap_reclaim --component
+  RangeVWAPReclaim`
+- As of the read-only Supabase check on 19 November, recent indexed ledger
+  records contain no RangeVWAPReclaim completed trades. There is therefore
+  **no basis for live threshold tuning or profitability assertions**.
+- Outstanding: observed matched option order-book paths, real fill/slippage
+  reconciliation and independent futures/option replay before changing entry,
+  15-minute time-stop or protective exit policy. The in-memory excursion
+  registry is not a durable cross-restart event store; creating a second
+  persistent ownership path before confirming canonical journal coverage
+  would increase duplicate-order risk.
