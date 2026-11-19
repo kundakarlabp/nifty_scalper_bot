@@ -11,8 +11,9 @@ OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
 Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
 StrategyManager callbacks; exact setup/consumption state is restored and
 write-verified through PositionManager's same-day risk circuit before LIVE
-emission, and only proven pre-broker rejection releases a reservation. assess_option_cost_risk models
-the bid-price stop trigger separately from the adverse stop liquidation fill.
+emission; only a proven pre-broker rejection releases a reservation.
+assess_option_cost_risk models the bid-price stop trigger separately from
+an adverse stop liquidation fill.
 Safety: LIVE requires an explicit pilot opt-in, attested reversal and quote
 provenance; broker-stop, order affordability and capital gates remain authoritative.
 """
