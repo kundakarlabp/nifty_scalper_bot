@@ -870,8 +870,11 @@ async def test_recent_history_parity_matches_after_canonical_reseed() -> None:
     symbol = "NSE:NIFTY"
     runner = _runner(_bars(30))
     result = runner.sync_history_from_mdm(
-        symbol, required_bars=30, reason="test",
-        role="spot_context", request_if_short=False,
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
     )
     assert result.success
     report = runner.inspect_recent_canonical_history(symbol, last_n=5)
@@ -884,8 +887,11 @@ async def test_parity_detects_runner_close_drift_with_equal_counts() -> None:
     symbol = "NSE:NIFTY"
     runner = _runner(_bars(30))
     runner.sync_history_from_mdm(
-        symbol, required_bars=30, reason="test",
-        role="spot_context", request_if_short=False,
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
     )
     # The fixture's reseed reuses input dicts; detach the projection before
     # corrupting it so the canonical MDM fixture remains authoritative.
@@ -902,8 +908,11 @@ async def test_recent_history_parity_does_not_assume_missing_history_matches() -
     symbol = "NSE:NIFTY"
     runner = _runner(_bars(30))
     runner.sync_history_from_mdm(
-        symbol, required_bars=30, reason="test",
-        role="spot_context", request_if_short=False,
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
     )
     runner._symbol_history[symbol].pop()
 
