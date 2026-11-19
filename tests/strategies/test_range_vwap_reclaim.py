@@ -505,6 +505,26 @@ def test_same_excursion_requires_real_vwap_reset():
     assert key not in strategy._consumed_excursions
 
 
+def test_unresolved_broker_reservation_cannot_rearm_on_vwap_touch() -> None:
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    key = (FUTURE, "CE", "2026-11-18")
+    setup_id = "range_session_vwap:unknown-order"
+    strategy._seen.add(setup_id)
+    strategy._consumed_excursions.add(key)
+    strategy._pending_excursions[setup_id] = key
+    strategy._maybe_reset_excursions(
+        FUTURE,
+        {
+            "underlying_latest_close": 25249.0,
+            "session_vwap_before_confirmation": 25250.0,
+            "futures_atr": 6.0,
+        },
+    )
+    assert key in strategy._consumed_excursions
+
+
 def test_reclaim_does_not_require_redundant_remaining_gap() -> None:
     cfg = RangeVWAPReclaimStrategyConfig(min_remaining_center_gap_atr=999.0)
     proof = assess_range_vwap_reclaim(bars(), decision_at=decision_at(), config=cfg)
