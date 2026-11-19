@@ -583,7 +583,8 @@ class MarketRegimeManager:
         # tradeable stable label while entry gates evaluate the raw state.
         state = normalize_regime(raw.regime)
         if (
-            state in {
+            state
+            in {
                 MarketRegime.UNKNOWN,
                 MarketRegime.LOW_ACTIVITY,
                 MarketRegime.VOLATILE,
