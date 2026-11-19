@@ -2416,6 +2416,84 @@ class DataHub:
                 continue
         return None
 
+    def get_option_model_snapshot(
+        self,
+        symbol: str,
+        *,
+        spot_price: float | None,
+        bid: float | None,
+        ask: float | None,
+    ) -> dict[str, Any]:
+        """Price the *current* quote against broker-owned contract metadata.
+
+        Reuse the existing instrument resolver and options_math implementation.
+        Cached Greeks have no guaranteed quote/spot provenance, so a live
+        range-reversion decision must not silently reuse that cache. This
+        method never fetches a quote or changes the active contract basket.
+        """
+        parsed = self._parse_option_symbol(symbol)
+        if parsed is None:
+            return {}
+        base, expiry, strike, is_call = parsed
+        if base != "NIFTY":
+            return {}
+        owner = self._resolver
+        lookup = getattr(owner, "lookup", None)
+        if not callable(lookup):
+            owner = getattr(owner, "_instrument_manager", None)
+            lookup = getattr(owner, "lookup", None)
+        if not callable(lookup):
+            return {}
+        try:
+            row = lookup(symbol)
+            if not isinstance(row, Mapping):
+                return {}
+            lot_size = int(row["lot_size"])
+            spot, best_bid, best_ask = float(spot_price), float(bid), float(ask)
+            if (
+                lot_size <= 0
+                or any(not isfinite(x) for x in (spot, best_bid, best_ask))
+                or spot <= 0
+                or best_bid <= 0
+                or best_ask <= best_bid
+            ):
+                return {}
+            now_ts = float(self._now())
+            ttm = (expiry.timestamp() - now_ts) / 31557600.0
+            ist = timezone(timedelta(hours=5, minutes=30))
+            remaining_days = (
+                expiry.date() - datetime.fromtimestamp(now_ts, tz=ist).date()
+            ).days
+            if remaining_days <= 0 or ttm <= 0:
+                return {}
+            iv = implied_volatility(
+                spot, strike, ttm, 0.06, (best_bid + best_ask) / 2.0,
+                is_call=is_call,
+            )
+            if not isfinite(iv) or not 0 < iv < 5:
+                return {}
+            model = black_scholes_greeks(
+                spot, strike, ttm, 0.06, iv, is_call=is_call
+            )
+            if any(not isfinite(float(model[key])) for key in ("delta", "theta", "vega")):
+                return {}
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return {}
+        return {
+            "days_to_expiry": remaining_days,
+            "lot_size": lot_size,
+            "delta": float(model["delta"]),
+            "delta_underlying": "NIFTY_SPOT",
+            # options_math reports annual theta and vega per *unit* IV.
+            "theta": float(model["theta"]) / 365.0,
+            "theta_period": "calendar_day",
+            "vega_per_iv_point": float(model["vega"]) / 100.0,
+            "vega_convention": "per_iv_percentage_point",
+            "range_option_model_source": "live_spot_bid_ask_black_scholes",
+            "range_option_model_iv": iv,
+            "range_option_contract_expiry": expiry.date().isoformat(),
+        }
+
     def get_greeks(self, symbol: str) -> dict[str, float] | None:
         normalized = self._canonical_quote_symbol(symbol)
         if normalized in self._greeks_cache:
