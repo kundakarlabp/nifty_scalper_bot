@@ -1067,24 +1067,23 @@ def test_vwap_distance_rejection_reports_causal_futures_volume(
         "baseline_count": 20,
         "bar_timestamp": "2026-09-10T09:59:00+05:30",
     }
-    with caplog.at_level(logging.INFO):
-        _, signal = _evaluate(
-            monkeypatch,
-            current_price=135.0,
-            open=131.0,
-            high=138.0,
-            low=130.0,
-            close=135.0,
-            futures_completed_bar_volume_ready=True,
-            futures_completed_bar_volume_provenance=provenance,
-            futures_completed_bar_volume_symbol="NFO:NIFTY26SEPFUT",
-            active_futures_symbol="NFO:NIFTY26SEPFUT",
-            futures_volume_ratio=0.0,
-        )
+    _, signal = _evaluate(
+        monkeypatch,
+        current_price=135.0,
+        open=131.0,
+        high=138.0,
+        low=130.0,
+        close=135.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance=provenance,
+        futures_completed_bar_volume_symbol="NFO:NIFTY26SEPFUT",
+        active_futures_symbol="NFO:NIFTY26SEPFUT",
+        futures_volume_ratio=0.0,
+    )
     assert signal is None
     assert any(
-        "VWAP_DISTANCE_REJECTED" in record.message
-        and "futures_volume_source=verified_completed_futures_1m" in record.message
-        and "completed_ratio=1.8000" in record.message
-        for record in caplog.records
+        "VWAP_DISTANCE_REJECTED" in event
+        and "futures_volume_source=verified_completed_futures_1m" in event
+        and "completed_ratio=1.8000" in event
+        for event in observed
     )
