@@ -290,7 +290,12 @@ def run_exit_comparison(
             r["outcomes"][policy]
             for r in results
             if r["outcomes"][policy]["status"]
-            in {"MODELED_TARGET", "MODELED_STOP", "MODELED_TIME_STOP", "UNCHANGED_ACTUAL"}
+            in {
+                "MODELED_TARGET",
+                "MODELED_STOP",
+                "MODELED_TIME_STOP",
+                "UNCHANGED_ACTUAL",
+            }
         ]
         unresolved = len(results) - len(resolved)
         scenarios[policy] = {
