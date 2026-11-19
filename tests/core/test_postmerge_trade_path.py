@@ -101,7 +101,6 @@ def _manager() -> StrategyManager:
     return manager
 
 
-
 def test_only_verified_range_reversal_may_use_neutral_context(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
