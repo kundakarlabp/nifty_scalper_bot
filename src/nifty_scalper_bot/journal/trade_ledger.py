@@ -544,6 +544,17 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
     elif "ledger_complete" in meta:
         ledger_complete = int(bool(meta.get("ledger_complete")))
 
+    # A candidate.approved journal event is sometimes emitted after the order
+    # fills. Bracket registration already carries the causal decision timestamp;
+    # anchor signal_at there rather than falsely dating the signal after fill.
+    decision_timestamp = _number(meta.get("decision_ts"))
+    if (
+        event_name != "bracket.registered"
+        or decision_timestamp is None
+        or not 0.0 <= timestamp - decision_timestamp <= 300.0
+    ):
+        decision_timestamp = None
+
     return {
         "trade_id": trade_id,
         "signal_id": _first_text(event.get("signal_id"), outcome.get("signal_id")),
@@ -580,7 +591,9 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         ),
         "ledger_complete": ledger_complete,
         "decision_at": (
-            timestamp
+            decision_timestamp
+            if decision_timestamp is not None
+            else timestamp
             if event_name in {"signal.evaluated", "candidate.approved"}
             else None
         ),
