@@ -2,7 +2,9 @@
 
 This module is deliberately not an execution or accounting authority. It derives
 one query-friendly row per trade_id from events already accepted by TradeJournal
-and writes that row in the same SQLite transaction.
+and writes that row in the same SQLite transaction. A bracket's validated
+decision_ts anchors signal time when approval journaling arrives after fill;
+broker order/fill timestamps remain independent authorities.
 """
 
 from __future__ import annotations
