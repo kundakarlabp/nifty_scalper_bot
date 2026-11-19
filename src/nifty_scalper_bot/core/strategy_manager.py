@@ -19,7 +19,17 @@ Direction-authority invariant:
 - The final option combiner gate independently revalidates direction alignment.
 - SMC-only independent confirmation cannot veto a separately confirmed VWAP
   trigger on the same underlying side; opposing context still fails closed.
-- Bounded research parity and sampled no-vote telemetry never authorize entry."""
+- Bounded research parity and sampled no-vote telemetry never authorize entry.
+
+Regime-authority and admission accounting invariant:
+- _record_regime_filter_outcome distinguishes raw detector filter rejections,
+  allowed adaptive continuations and effective trade-entry blocks.
+- The detector's newest raw observation may be UNKNOWN while the stable
+  hysteresis regime remains TREND. The retained stable state remains the
+  existing strategy routing input; both states and their verification status
+  are published, without converting UNKNOWN into proof of a new trend.
+- REGIME_POLICY_RECONCILED reports the effective adaptive sizing request,
+  not a purported broker quantity or final order admission decision."""
 
 from __future__ import annotations
 
