@@ -270,7 +270,12 @@ def range_vwap_slippage_stress(
         "minimum_trades_for_parameter_promotion_met": False,
     }
     if not trades:
-        return {**evidence, "ready": False, "reason": "no_verified_closed_range_trades", "scenarios": []}
+        return {
+            **evidence,
+            "ready": False,
+            "reason": "no_verified_closed_range_trades",
+            "scenarios": [],
+        }
     raw = {str(row["trade_id"]): row for row in selected}
     premiums: dict[str, float] = {}
     for trade in trades:
@@ -280,13 +285,23 @@ def range_vwap_slippage_stress(
             exit_price = float(row["exit_price"])
             quantity = float(row["quantity"])
         except (KeyError, TypeError, ValueError, OverflowError):
-            return {**evidence, "ready": False, "reason": "premium_or_quantity_missing", "scenarios": []}
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_quantity_missing",
+                "scenarios": [],
+            }
         if (
             not all(math.isfinite(v) and v > 0 for v in (entry, exit_price, quantity))
             or not quantity.is_integer()
             or trade.cost_source != "broker_virtual_contract_note"
         ):
-            return {**evidence, "ready": False, "reason": "premium_or_broker_cost_unverified", "scenarios": []}
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_broker_cost_unverified",
+                "scenarios": [],
+            }
         premiums[trade.trade_id] = (entry + exit_price) * quantity
 
     scenarios = []
@@ -459,8 +474,8 @@ def main(argv: list[str] | None = None) -> int:
                 allow_estimated_costs=args.allow_estimated_costs,
             )
         report["selected_strategy_note"] = (
-            "Completed-trade metrics are strategy-filtered; historical journal "
-            "integrity and broker reconciliation remain all-strategy."
+            "Closed-trade metrics and candidate decisions are strategy-filtered; "
+            "historical journal integrity and broker reconciliation are global."
             if args.strategy
             else None
         )
@@ -479,6 +494,13 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         candidate_decisions = load_candidate_decision_rows(args.trades_db)
+        if args.strategy:
+            candidate_decisions = [
+                row
+                for row in candidate_decisions
+                if normalize_strategy_name(str(row.get("strategy") or ""))
+                == normalize_strategy_name(args.strategy)
+            ]
         decision_funnel = summarize_candidate_decisions(candidate_decisions)
         report["candidate_decision_funnel"] = asdict(decision_funnel)
         setup_opportunities = canonicalize_setup_opportunities(candidate_decisions)
