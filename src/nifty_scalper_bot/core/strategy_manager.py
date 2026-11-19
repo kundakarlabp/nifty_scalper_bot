@@ -37,6 +37,7 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
+from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
@@ -2554,9 +2555,11 @@ class StrategyManager(_BaseStrategyManager):
         underlying_atr = _f("atr")
         # Normalise price-space comparisons only; VWAP/EMA slope input units
         # are not interchangeable with underlying price units.
-        noise_floor_atr = max(
-            0.0,
-            min(0.20, self._env_float("STRATEGY_CONTEXT_PRICE_NOISE_FLOOR_ATR", 0.05)),
+        noise_setting = parse_float_env(
+            os.getenv("STRATEGY_CONTEXT_PRICE_NOISE_FLOOR_ATR"), 0.05
+        )
+        noise_floor_atr = (
+            min(0.20, max(0.0, noise_setting)) if isfinite(noise_setting) else 0.05
         )
         noise_points = (
             noise_floor_atr * underlying_atr
