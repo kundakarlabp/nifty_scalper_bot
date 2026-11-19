@@ -653,7 +653,9 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     engine = History(bars()[:-1])
     strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), engine)
     monkeypatch.setattr(
-        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+        PositionManager,
+        "_trading_date_ist",
+        staticmethod(lambda now=None: "2026-11-18"),
     )
     strategy.attach_persistent_guard(PositionManager(str(tmp_path / "positions.json")))
     strategy._evaluate_signal(
@@ -804,7 +806,9 @@ def test_live_range_durable_guard_survives_restart_and_preserves_unknown_order(
     monkeypatch.setenv("PAPER_MODE", "false")
     monkeypatch.setenv("SHADOW_MODE", "false")
     monkeypatch.setattr(
-        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+        PositionManager,
+        "_trading_date_ist",
+        staticmethod(lambda now=None: "2026-11-18"),
     )
     file = tmp_path / "positions.json"
     owner = PositionManager(str(file))
@@ -872,7 +876,9 @@ def test_range_guard_does_not_authorize_memory_only_write(
     monkeypatch.setenv("PAPER_MODE", "false")
     monkeypatch.setenv("SHADOW_MODE", "false")
     monkeypatch.setattr(
-        PositionManager, "_trading_date_ist", staticmethod(lambda now=None: "2026-11-18")
+        PositionManager,
+        "_trading_date_ist",
+        staticmethod(lambda now=None: "2026-11-18"),
     )
     owner = PositionManager(str(tmp_path / "positions.json"))
     strategy = RangeVWAPReclaimStrategy(
