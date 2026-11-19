@@ -466,3 +466,32 @@ def test_futures_vwap_provenance_reports_actual_consumed_quote(monkeypatch) -> N
     assert provenance[0][4] is not None
     assert output["futures_vwap"] == 24102.25
     assert hub.calls.count("NFO:NIFTY26JUNFUT") == 1
+
+
+def test_futures_completed_bar_source_carries_contract_identity() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+
+    class CompletedBarIndicatorEngine(_IE):
+        def get_history(self, sym, count=None, *, field="close"):
+            assert sym == symbol and count == 25 and field == "bars"
+            return [
+                {
+                    "timestamp": f"2026-11-19T10:{i:02d}:00+05:30",
+                    "volume": 250.0 if i == 20 else 100.0,
+                    "is_complete": True,
+                    "is_provisional": False,
+                }
+                for i in range(21)
+            ]
+
+    manager = _manager(
+        futures_symbol=symbol,
+        hub=_VolumeHub([{"volume_traded_today": 1000}], active=symbol),
+    )
+    manager._indicator_engine = CompletedBarIndicatorEngine()
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+    assert indicators["futures_completed_bar_volume_ready"] is True
+    assert indicators["futures_completed_bar_volume_symbol"] == symbol
+    assert indicators["futures_completed_bar_volume_ratio"] == 2.5
+    assert indicators["futures_volume_ratio"] is None
