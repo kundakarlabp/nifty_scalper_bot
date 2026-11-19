@@ -1151,10 +1151,13 @@ def _exit_strategy_family(bracket: Any) -> str:
     provenance = getattr(bracket, "trade_provenance", {})
     proof = provenance if isinstance(provenance, Mapping) else {}
     setup = str(proof.get("setup_name") or "").strip().lower()
-    strategy = str(
-        proof.get("strategy_name") or proof.get("strategy")
-        or getattr(bracket, "tag", None) or ""
-    ).strip().lower()
+    strategy_raw = (
+        proof.get("strategy_name")
+        or proof.get("strategy")
+        or getattr(bracket, "tag", None)
+        or ""
+    )
+    strategy = str(strategy_raw).strip().lower()
     if "failed_breakout" in setup or "failed-breakout" in setup:
         return "REVERSAL"
     if (
@@ -1174,11 +1177,12 @@ def _exit_strategy_family(bracket: Any) -> str:
         # A simple premium VWAP reclaim/penetration is not automatically a
         # confirmed trend breakout, nor is it a return-to-value exit.
         return "VWAP_RECLAIM"
-    if any(token in strategy for token in ("smc", "orb")) or (
-        "liquidity_sweep" in setup
+    if "liquidity_sweep" in setup or any(
+        token in strategy for token in ("smc", "orb")
     ):
         return "TREND_CONTINUATION"
     return "UNCLASSIFIED"
+
 
 def _adaptive_cost_per_unit(manager: Any, bracket: Any, bid: float) -> float | None:
     """Conservative full round-trip fee model; never use a capped fee as net P&L."""
@@ -1256,7 +1260,8 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         positives & {"premium_momentum", "premium_vwap_hold", "premium_ema_support"}
     )
     underlying_support = bool(
-        positives & {
+        positives
+        & {
             "underlying_vwap_alignment",
             "underlying_ema_alignment",
             "underlying_direction_context",
@@ -1267,7 +1272,8 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
     futures_verified = decision.snapshot.get("futures_volume_verified") is True
     activity_support = futures_verified and "futures_volume_confirmation" in positives
     premium_conflict = bool(
-        negatives & {
+        negatives
+        & {
             "premium_momentum_reversal",
             "premium_vwap_lost",
             "premium_ema_weak",
@@ -1276,7 +1282,8 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         }
     )
     underlying_conflict = bool(
-        negatives & {
+        negatives
+        & {
             "underlying_vwap_conflict",
             "underlying_ema_conflict",
             "underlying_direction_conflict",
@@ -1293,10 +1300,10 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
     regime = normalize_regime(decision.snapshot.get("regime"))
     # RANGE is not evidence of a failed mean-reversion or failed-breakout
     # thesis. It *is* adverse to an explicitly trend-continuation setup.
-    invalid_regime = (
-        regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
-        and strategy in {"TREND_CONTINUATION", "UNCLASSIFIED"}
-    )
+    invalid_regime = regime in {
+        MarketRegime.RANGE,
+        MarketRegime.LOW_ACTIVITY,
+    } and strategy in {"TREND_CONTINUATION", "UNCLASSIFIED"}
     if (
         entry_invalid
         or underlying_conflict
@@ -1318,6 +1325,7 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
         return "STRONG"
     return "NORMAL"
 
+
 def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool:
     """Propose one cost-aware, quality-scaled giveback stop from executable bids.
 
@@ -1338,9 +1346,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     live_mode = getattr(manager, "_is_live_execution", None)
     if callable(live_mode) and live_mode():
-        acknowledged = _positive(
-            getattr(bracket, "exchange_stop_trigger_price", None)
-        )
+        acknowledged = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
         protected_qty = int(getattr(bracket, "exchange_stop_quantity", 0) or 0)
         remaining_qty = int(getattr(bracket, "remaining_quantity", 0) or 0)
         if (
@@ -1514,13 +1520,11 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         # only an orderbook-reconciled trail revision proves exchange geometry.
         # A virtual ratchet, recorded broker trigger, and confirmed broker stop
         # must NEVER be conflated with an actual exit fill.
-        recorded = _positive(
-            getattr(bracket, "exchange_stop_trigger_price", None)
-        )
+        recorded = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
         confirmed_stop = None
-        config_history = (
-            getattr(bracket, "trailing_config", {}) or {}
-        ).get("trail_history", [])
+        config_history = (getattr(bracket, "trailing_config", {}) or {}).get(
+            "trail_history", []
+        )
         if recorded is not None and isinstance(config_history, list):
             for record in reversed(config_history):
                 if not isinstance(record, Mapping):
@@ -1555,11 +1559,13 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             ),
             "estimated_net_at_recorded_trigger_points": (
                 round(recorded - entry - cost - slippage, 4)
-                if recorded is not None else None
+                if recorded is not None
+                else None
             ),
             "estimated_net_at_confirmed_trigger_points": (
                 round(confirmed_stop - entry - cost - slippage, 4)
-                if confirmed_stop is not None else None
+                if confirmed_stop is not None
+                else None
             ),
         }
     saver = getattr(manager, "save_state", None)
