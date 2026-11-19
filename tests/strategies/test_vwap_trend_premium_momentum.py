@@ -1047,8 +1047,9 @@ def test_stale_future_or_wrong_contract_cannot_confirm_vwap_volume(
     assert signal.metadata["futures_volume_ratio"] is None
     assert signal.metadata["volume_confirmation_source"] == "option"
 
+
 def test_vwap_distance_rejection_reports_causal_futures_volume(
-    monkeypatch, caplog
+    monkeypatch,
 ) -> None:
     """A distance veto must still expose completed futures volume provenance."""
     import nifty_scalper_bot.strategies.elite_strategies.vwap_pro as vwap_module
