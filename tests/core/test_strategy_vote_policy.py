@@ -332,6 +332,16 @@ def test_regime_dispatch_preserves_structural_strategy_ownership() -> None:
     assert strategy_regime_eligible("VWAPPro", "TREND")
     assert not strategy_regime_eligible("VWAPPro", "RANGE")
     assert strategy_regime_eligible("SMC", "RANGE")
-    assert strategy_regime_eligible("ORBPro", "RANGE")
+    assert not strategy_regime_eligible("ORBPro", "RANGE")
     assert not strategy_regime_eligible("SMC", "UNKNOWN")
     assert strategy_regime_eligible("OrderFlow", "RANGE")
+
+
+def test_orb_range_transition_remains_shadow_research_only(monkeypatch) -> None:
+    from nifty_scalper_bot.config.strategy_taxonomy import strategy_regime_eligible
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION", "true")
+    assert strategy_regime_eligible("ORBPro", "RANGE")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    assert not strategy_regime_eligible("ORBPro", "RANGE")
