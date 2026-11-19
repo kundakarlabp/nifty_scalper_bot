@@ -2,12 +2,14 @@
 
 Responsibilities: Assess continuation by independent premium/underlying/fresh
 futures-volume evidence; classify original entry strategy from provenance;
-calculate cost-adjusted, monotonic stop candidates from fresh full-size bids
-and spread; preserve the original FINAL_TP for VWAP mean-reversion entries.
+calculate cost-adjusted, monotonic stops from fresh full-size bids, spread,
+fresh futures quotes and timestamped completed futures-volume candles; preserve
+the original FINAL_TP for VWAP mean-reversion entries.
 Interface: assess_continuation and tighten_adaptive_profit_lock provide
 read-only quality evidence and optional virtual ratchets; the private
-_exit_strategy_family and _adaptive_cost_per_unit helpers resolve the
-entry thesis and an uncapped full round-trip fee estimate.
+_exit_strategy_family, _verified_futures_volume_ratio and
+_adaptive_cost_per_unit helpers resolve the entry thesis, independent completed
+futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
 tick. The canonical BracketManager alone modifies exchange stop orders and
 owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
@@ -656,23 +658,14 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
             )
 
     future_quote_age = _quote_age_seconds(future_quote)
-    future_indicator_age = _as_float(future.get("context_age_seconds"))
-    futures_volume_verified = bool(
-        future_symbol
-        and future_quote_age is not None
-        and future_quote_age <= 3.0
-        and future_indicator_age is not None
-        and 0 <= future_indicator_age <= 60.0
+    futures_volume_ratio, futures_bar_age = _verified_futures_volume_ratio(
+        manager, future_symbol, future_quote
     )
-    futures_volume_ratio = _raw_float(future, "futures_volume_ratio", "volume_ratio")
-    if futures_volume_ratio is None:
-        fut_volume = _field(future, "volume")
-        fut_avg = _field(future, "avg_volume")
-        if fut_volume is not None and fut_avg is not None and fut_avg > 0:
-            futures_volume_ratio = fut_volume / fut_avg
-    # Stale or undated futures candles cannot authorize a STRONG state or
-    # count as independent deterioration. A fresh option tick is insufficient.
-    if futures_volume_verified and futures_volume_ratio is not None:
+    futures_volume_verified = futures_volume_ratio is not None
+    # The ratio is based on a completed, timestamped futures bar and *earlier*
+    # completed bars from the current active contract. Repeated option ticks,
+    # premium volume, or stale futures candles cannot synthesize confirmation.
+    if futures_volume_verified:
         evidence_count += 1
         if futures_volume_ratio >= 1.10:
             _record_evidence(
@@ -688,7 +681,6 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
                 positive=positive,
                 negative=negative,
             )
-
     direction_bias = str(
         future.get("direction_bias")
         or future.get("underlying_direction_bias")
@@ -807,7 +799,7 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         "futures_volume_ratio": futures_volume_ratio,
         "futures_volume_verified": futures_volume_verified,
         "future_quote_age_s": future_quote_age,
-        "future_indicator_age_s": future_indicator_age,
+        "futures_bar_age_s": futures_bar_age,
         "regime": regime or None,
         "direction_bias": direction_bias or None,
         "direction_confidence": direction_conf,
@@ -1191,6 +1183,54 @@ def _adaptive_cost_per_unit(manager: Any, bracket: Any, bid: float) -> float | N
     except Exception:  # noqa: BLE001 - missing fees must block net-profit claims
         return None
     return max(existing, actual_model) if actual_model is not None else None
+
+
+def _verified_futures_volume_ratio(
+    manager: Any, symbol: str, quote: Mapping[str, Any]
+) -> tuple[float | None, float | None]:
+    """Return volume from a recent completed futures bar, never provisional data.
+
+    An independently fresh WS futures quote proves the contract is active; an
+    unambiguous completed historical bar supplies the volume numerator and
+    earlier completed bars supply the denominator. Generic runtime direction
+    context ages do NOT certify the volume source's candle time.
+    """
+    quote_age = _quote_age_seconds(quote)
+    if not symbol or quote_age is None or quote_age > 3.0:
+        return None, None
+    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
+    if not callable(getter):
+        return None, None
+    try:
+        bars = getter(symbol, count=22, field="bars")
+    except Exception:  # noqa: BLE001 - no inference from absent history
+        return None, None
+    if not isinstance(bars, (list, tuple)):
+        return None, None
+    completed: list[tuple[float, float]] = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        if bar.get("is_complete") is not True or bar.get("is_provisional") is True:
+            continue
+        volume = _as_float(bar.get("volume"))
+        age = _quote_age_seconds({"timestamp": bar.get("timestamp")})
+        if volume is not None and volume >= 0 and age is not None:
+            completed.append((age, volume))
+    if len(completed) < 6:
+        return None, None
+    bar_age, current_volume = completed[-1]
+    # Candle timestamps may be the minute OPEN; last completed one-minute
+    # candle can legitimately be 60-120 seconds old at the next observation.
+    if bar_age > 150.0 or current_volume <= 0:
+        return None, bar_age
+    earlier = [v for _, v in completed[-21:-1]]
+    if len(earlier) < 5:
+        return None, bar_age
+    average = sum(earlier) / len(earlier)
+    if average <= 0:
+        return None, bar_age
+    return current_volume / average, bar_age
 
 
 def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -> str:
