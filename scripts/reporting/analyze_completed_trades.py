@@ -276,7 +276,12 @@ def range_vwap_slippage_stress(
             "reason": "no_verified_closed_range_trades",
             "scenarios": [],
         }
-    raw = {str(row["trade_id"]): row for row in selected}
+    raw = {
+        str(row["trade_id"]): row
+        for row in selected
+        if str(row.get("state") or row.get("status") or "").upper() == "CLOSED"
+        and row.get("ledger_complete") in (True, 1, "true", "1")
+    }
     premiums: dict[str, float] = {}
     for trade in trades:
         row = raw[trade.trade_id]
