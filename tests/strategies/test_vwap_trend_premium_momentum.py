@@ -1051,8 +1051,14 @@ def test_vwap_distance_rejection_reports_causal_futures_volume(
     monkeypatch, caplog
 ) -> None:
     """A distance veto must still expose completed futures volume provenance."""
-    import logging
+    import nifty_scalper_bot.strategies.elite_strategies.vwap_pro as vwap_module
 
+    observed = []
+
+    def _capture_log(_logger, _key, message, *args, **_kwargs):
+        observed.append(message % args)
+
+    monkeypatch.setattr(vwap_module, "log_throttled", _capture_log)
     provenance = {
         "source": "completed_futures_1m_bars",
         "ready": True,
