@@ -3729,7 +3729,8 @@ class BracketManager:
         source = self._market_data
         active = getattr(source, "get_active_nifty_future_symbol_cached", None)
         cached_ltp = getattr(source, "get_cached_ltp", None)
-        if not callable(active) or not callable(cached_ltp):
+        age_getter = getattr(source, "time_since_last_tick", None)
+        if not all(callable(method) for method in (active, cached_ltp, age_getter)):
             return None
         symbol = str(proof.get("range_futures_contract") or "")
         side = str(proof.get("range_futures_side") or "").upper()
@@ -3740,6 +3741,9 @@ class BracketManager:
                 return None
             target = float(proof["range_futures_target"])
             invalidation = float(proof["range_futures_invalidation"])
+            age = float(age_getter(symbol))
+            if not math.isfinite(age) or not 0 <= age <= 2.0:
+                return None
             future_price = cached_ltp(
                 symbol, max_age_seconds=2.0, require_ws=False
             )
