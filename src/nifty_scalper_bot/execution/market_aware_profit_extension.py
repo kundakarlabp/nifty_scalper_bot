@@ -1240,7 +1240,14 @@ def _verified_futures_volume_ratio(
     # candle can legitimately be 60-120 seconds old at the next observation.
     if bar_age > 150.0 or current_volume <= 0:
         return None, bar_age
-    earlier = [v for _, v in completed[-21:-1]]
+    # The first bars after the open must not borrow yesterday's volumes as
+    # today's baseline. Previous completed bars must precede this bar and be
+    # recent enough to belong to the same active intraday observation window.
+    earlier = [
+        volume
+        for age, volume in completed[-21:-1]
+        if bar_age < age <= 1800.0
+    ]
     if len(earlier) < 5:
         return None, bar_age
     average = sum(earlier) / len(earlier)
