@@ -20,7 +20,9 @@ def _hub(*, expiry: date = date(2026, 11, 26), base: str = "NIFTY") -> DataHub:
         "lot_size": 65,
     }
     hub = object.__new__(DataHub)
-    hub._resolver = SimpleNamespace(lookup=lambda symbol: row if symbol == SYMBOL else None)
+    hub._resolver = SimpleNamespace(
+        lookup=lambda symbol: row if symbol == SYMBOL else None
+    )
     hub._now = lambda: datetime(2026, 11, 18, 10, 1, tzinfo=IST).timestamp()
     return hub
 
