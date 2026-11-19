@@ -162,6 +162,85 @@ def test_true_session_anchor_and_rolling_secondary_agree() -> None:
     assert report["session_vwap_before_confirmation"] > 25245.3
 
 
+def test_volatility_pressure_uses_only_preconfirmation_futures_history() -> None:
+    baseline = assess_range_vwap_reclaim(
+        bars(), decision_at=decision_at(), config=RangeVWAPReclaimStrategyConfig()
+    )
+    other = bars()
+    other[-1]["open"] += 0.1
+    other[-1]["high"] += 0.1
+    other[-1]["low"] += 0.1
+    other[-1]["close"] += 0.1
+    changed = assess_range_vwap_reclaim(
+        other, decision_at=decision_at(), config=RangeVWAPReclaimStrategyConfig()
+    )
+    for key in (
+        "prior_5m_to_14m_true_range_ratio",
+        "prior_5m_directional_efficiency",
+    ):
+        assert baseline[key] == changed[key]
+        assert math.isfinite(baseline[key])
+    assert baseline["prior_5m_to_14m_true_range_ratio"] > 0.0
+    assert 0 <= baseline["prior_5m_directional_efficiency"] <= 1
+
+
+def test_live_quote_rebreak_of_frozen_futures_band_is_not_traded(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    proof = assess_range_vwap_reclaim(
+        bars(), decision_at=decision_at(), config=RangeVWAPReclaimStrategyConfig()
+    )
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+    strategy._evaluate_signal(
+        OPTION,
+        indicators(futures_ltp=proof["lower_band_before_confirmation"] - 0.01),
+        100.0,
+    )
+    assert strategy.last_no_vote_reason == "range_futures_rebroke_outer_band"
+
+
+def test_option_reward_repriced_to_current_futures_not_completed_candle(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    observed = {}
+
+    def option_model(_quote, **kwargs):
+        observed.update(kwargs)
+        return {
+            "qualified": True,
+            "worst_stop_loss_including_costs": 650.0,
+            "net_reward_risk": 1.6,
+            "stop_price_model": 94.0,
+            "vwap_limited_target_price_model": 112.0,
+        }
+
+    monkeypatch.setattr(range_module, "assess_option_cost_risk", option_model)
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+    current_future = 25247.0
+    signal = strategy._evaluate_signal(
+        OPTION, indicators(futures_ltp=current_future), 100.0
+    )
+    assert signal is not None, strategy.last_no_vote_reason
+    vwap = signal.metadata["exchange_session_vwap_at_decision"]
+    completed_close = signal.metadata["range_structure"]["underlying_entry_close"]
+    assert observed["futures_target_distance"] == min(
+        abs(vwap - completed_close), abs(vwap - current_future)
+    )
+    assert observed["futures_stop_distance"] == max(
+        abs(completed_close - signal.metadata["range_futures_invalidation"]),
+        abs(current_future - signal.metadata["range_futures_invalidation"]),
+    )
+    assert signal.metadata["option_cost_risk"][
+        "target_points_removed_due_to_quote_drift"
+    ] > 0
+
+
 def test_partial_intraday_history_cannot_impersonate_session_vwap() -> None:
     data = bars()[5:]
     proof = assess_range_vwap_reclaim(
