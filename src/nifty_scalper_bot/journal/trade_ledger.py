@@ -596,9 +596,11 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         "decision_at": (
             decision_timestamp
             if decision_timestamp is not None
-            else timestamp
-            if event_name in {"signal.evaluated", "candidate.approved"}
-            else None
+            else (
+                timestamp
+                if event_name in {"signal.evaluated", "candidate.approved"}
+                else None
+            )
         ),
         "entry_submitted_at": (
             timestamp if event_name == "order.acknowledged" else None
