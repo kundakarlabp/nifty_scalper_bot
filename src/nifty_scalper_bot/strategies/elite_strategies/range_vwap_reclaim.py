@@ -82,8 +82,7 @@ def has_ist_session_anchor(observed: Any, *, decision_at: Any) -> bool:
         stamp is not None
         and decision is not None
         and stamp.date() == decision.date()
-        and (stamp.hour, stamp.minute, stamp.second, stamp.microsecond)
-        == (9, 15, 0, 0)
+        and (stamp.hour, stamp.minute, stamp.second, stamp.microsecond) == (9, 15, 0, 0)
     )
 
 
