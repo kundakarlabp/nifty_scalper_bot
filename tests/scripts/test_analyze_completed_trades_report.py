@@ -448,9 +448,7 @@ def test_range_transition_economics_requires_causal_broker_costed_evidence() -> 
     assert cohort["research_sample_sufficient"] is True
     assert not report["live_filter_or_parameter_promotion_allowed"]
 
-    rows[0]["outcome"]["range_structure"].pop(
-        "prior_5m_to_14m_true_range_ratio"
-    )
+    rows[0]["outcome"]["range_structure"].pop("prior_5m_to_14m_true_range_ratio")
     incomplete = module.range_vwap_transition_economics(rows)
     assert incomplete["completed_range_trades"] == 20
     assert incomplete["trades_with_causal_volatility_and_economic_provenance"] == 19
