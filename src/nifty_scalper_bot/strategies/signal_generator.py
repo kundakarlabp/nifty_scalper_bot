@@ -1691,6 +1691,7 @@ class StrategyManager:
         indicators.setdefault("futures_completed_bar_volume_ratio", None)
         indicators.setdefault("futures_completed_bar_volume_ready", False)
         indicators.setdefault("futures_completed_bar_volume_provenance", None)
+        indicators.setdefault("futures_completed_bar_volume_symbol", None)
         indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
         indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
 
@@ -1710,6 +1711,7 @@ class StrategyManager:
                 completed_bars = history_getter(active_future, count=25, field="bars")
                 volume_quality = analyze_completed_futures_volume(completed_bars)
                 indicators["futures_completed_bar_volume_provenance"] = volume_quality
+                indicators["futures_completed_bar_volume_symbol"] = active_future
                 indicators["futures_completed_bar_volume_ready"] = bool(
                     volume_quality["ready"]
                 )

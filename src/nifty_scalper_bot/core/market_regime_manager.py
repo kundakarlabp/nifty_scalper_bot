@@ -1,13 +1,25 @@
-"""Central market regime coordinator with gating and diagnostics."""
+"""Central market regime coordinator with gating and diagnostics.
+
+Responsibilities: refresh timestamped underlying indicators and completed
+in-memory price history, stabilise regime transitions, and explain the accepted
+regime evidence in throttled runtime diagnostics.
+
+Safety: Missing or stale history must not be invented, a low ATR alone cannot
+license mean-reversion entries, and existing risk and broker gates remain owned
+by their execution components.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Deque, Mapping, MutableMapping
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.market_regime import (
@@ -16,7 +28,7 @@ from nifty_scalper_bot.core.market_regime import (
 )
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.utils.env import coalesce_bool, coalesce_float, coalesce_int
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
 
@@ -629,15 +641,66 @@ class MarketRegimeManager:
                 )
                 return
 
-            # 3. Map to detector schema
+            # 3. Use only timestamped, completed in-memory underlying bars.
+            # Price-only snapshots cannot prove flat momentum or low activity.
+            price_series: list[float] = []
+            history = getattr(self.indicators, "get_history", None)
+            if callable(history):
+                try:
+                    bars = history(self._indicator_symbol, count=16, field="bars")
+                    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+                    completed: list[tuple[datetime, float]] = []
+                    for bar in bars or []:
+                        if not isinstance(bar, Mapping):
+                            continue
+                        if (
+                            bar.get("is_complete") is not True
+                            or bar.get("is_provisional") is True
+                        ):
+                            continue
+                        stamp = bar.get("timestamp")
+                        ts = (
+                            stamp
+                            if isinstance(stamp, datetime)
+                            else datetime.fromisoformat(
+                                str(stamp).replace("Z", "+00:00")
+                            )
+                        )
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=now_ist.tzinfo)
+                        ts = ts.astimezone(now_ist.tzinfo)
+                        age = (now_ist - ts).total_seconds()
+                        close_raw = bar.get("close")
+                        if close_raw is None:
+                            continue
+                        value = float(close_raw)
+                        if (
+                            ts.date() == now_ist.date()
+                            and 0 <= age <= 1200
+                            and math.isfinite(value)
+                            and value > 0
+                        ):
+                            completed.append((ts, value))
+                    completed = sorted(dict(completed).items())
+                    if (
+                        len(completed) >= 6
+                        and (now_ist - completed[-1][0]).total_seconds() <= 180
+                    ):
+                        price_series = [close for _, close in completed]
+                except (TypeError, ValueError, OverflowError, AttributeError):
+                    price_series = []
+
+            # 4. Map to detector schema without replacing explicit indicators.
             enrichment = {
                 "trend_score": data.get("adx"),
                 "volume_ratio": data.get("volume_spike_ratio"),
                 "price": data.get("close"),
                 **{k: v for k, v in data.items() if v is not None},
             }
+            if price_series and not enrichment.get("price_series"):
+                enrichment["price_series"] = price_series
 
-            # 4. Evaluate regime
+            # 5. Evaluate regime
             snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
 
             # 🔴 CRITICAL VALIDATION
@@ -651,7 +714,32 @@ class MarketRegimeManager:
                 )
                 return
 
-            # ✅ PROOF OF LIFE LOG
+            log_throttled(
+                logger,
+                f"regime_input_verification:{self._indicator_symbol}",
+                (
+                    "REGIME_INPUT_VERIFICATION symbol=%s regime=%s reason=%s "
+                    "adx_available=%s ema_pair_available=%s atr_available=%s "
+                    "completed_history_bars=%s volume_available=%s confidence=%.3f"
+                ),
+                self._indicator_symbol,
+                snapshot.regime,
+                snapshot.reason,
+                data.get("adx") is not None,
+                data.get("ema_fast") is not None and data.get("ema_slow") is not None,
+                data.get("atr") is not None,
+                len(price_series),
+                enrichment.get("volume_ratio") is not None,
+                snapshot.confidence,
+                interval_sec=60.0,
+                extra={
+                    "event": "REGIME_INPUT_VERIFICATION",
+                    "symbol": self._indicator_symbol,
+                    "regime": snapshot.regime,
+                    "regime_reason": snapshot.reason,
+                    "verified_completed_history_bars": len(price_series),
+                },
+            )
             logger.debug(
                 "Regime snapshot refreshed from indicators",
                 extra={

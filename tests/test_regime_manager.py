@@ -151,3 +151,63 @@ async def test_refresh_ignores_price_only_inputs_instead_of_fabricating_range() 
 
     assert manager.get_latest_snapshot() is None
     assert manager.get_raw_snapshot() is None
+
+
+@pytest.mark.asyncio
+async def test_verified_completed_session_history_feeds_range_momentum() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    class HistoryIndicators:
+        def get_indicators(self, symbol, names=None):
+            return {"adx": 10.0, "atr": 4.0, "volume_spike_ratio": 1.0}
+
+        def get_history(self, symbol, count=None, *, field="close"):
+            assert field == "bars" and count == 16
+            last = datetime.now(ZoneInfo("Asia/Kolkata")).replace(
+                second=0, microsecond=0
+            ) - timedelta(minutes=1)
+            return [
+                {
+                    "timestamp": last - timedelta(minutes=idx),
+                    "close": 25000.0 + (idx % 2) * 0.1,
+                    "is_complete": True,
+                    "is_provisional": False,
+                }
+                for idx in reversed(range(8))
+            ]
+
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(), indicators=HistoryIndicators()
+    )
+    await manager.refresh_from_indicators()
+    assert manager.get_raw_snapshot().regime == "range"
+
+
+@pytest.mark.asyncio
+async def test_stale_or_unfinished_history_never_proves_range() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    class StaleHistoryIndicators:
+        def get_indicators(self, symbol, names=None):
+            return {"adx": 10.0, "atr": 4.0}
+
+        def get_history(self, symbol, count=None, *, field="close"):
+            stamp = datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(minutes=15)
+            return [
+                {
+                    "timestamp": stamp - timedelta(minutes=i),
+                    "close": 25000.0,
+                    "is_complete": i > 0,
+                    "is_provisional": i == 0,
+                }
+                for i in range(8)
+            ]
+
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(), indicators=StaleHistoryIndicators()
+    )
+    await manager.refresh_from_indicators()
+    assert manager.get_raw_snapshot().regime == "unknown"
+    assert manager.get_raw_snapshot().reason == "range_evidence_unverified"

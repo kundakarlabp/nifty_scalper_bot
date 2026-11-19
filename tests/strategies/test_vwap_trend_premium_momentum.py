@@ -986,3 +986,63 @@ def test_retest_rebreak_ablation_fails_closed_without_strict_proof(monkeypatch):
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_research_retest_rebreak_required"
+
+
+def test_verified_completed_future_volume_replaces_zero_tick_counter(monkeypatch):
+    future = "NFO:NIFTY26SEPFUT"
+    provenance = {
+        "source": "completed_futures_1m_bars",
+        "ready": True,
+        "reason": "verified",
+        "baseline_count": 20,
+        "ratio": 1.6,
+        "bar_timestamp": "2026-09-10T09:59:00+05:30",
+    }
+    _, signal = _evaluate(
+        monkeypatch,
+        futures_volume_ratio=0.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance=provenance,
+        futures_completed_bar_volume_symbol=future,
+        active_futures_symbol=future,
+    )
+    assert signal is not None
+    assert signal.metadata["futures_volume_ratio"] == 1.6
+    assert (
+        signal.metadata["futures_volume_ratio_source"]
+        == "verified_completed_futures_1m"
+    )
+    assert signal.metadata["futures_quote_counter_ratio"] == 0.0
+    assert signal.metadata["volume_confirmation_source"] == "option_and_futures"
+
+
+@pytest.mark.parametrize(
+    ("bar_timestamp", "future_symbol"),
+    [
+        ("2026-09-10T09:56:00+05:30", "NFO:NIFTY26SEPFUT"),
+        ("2026-09-10T10:01:00+05:30", "NFO:NIFTY26SEPFUT"),
+        ("2026-09-10T09:59:00+05:30", "NFO:NIFTY26OCTFUT"),
+    ],
+)
+def test_stale_future_or_wrong_contract_cannot_confirm_vwap_volume(
+    monkeypatch, bar_timestamp, future_symbol
+):
+    future = "NFO:NIFTY26SEPFUT"
+    _, signal = _evaluate(
+        monkeypatch,
+        futures_volume_ratio=4.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance={
+            "source": "completed_futures_1m_bars",
+            "ready": True,
+            "reason": "verified",
+            "baseline_count": 20,
+            "ratio": 2.1,
+            "bar_timestamp": bar_timestamp,
+        },
+        futures_completed_bar_volume_symbol=future_symbol,
+        active_futures_symbol=future,
+    )
+    assert signal is not None  # independent option volume remains sufficient
+    assert signal.metadata["futures_volume_ratio"] is None
+    assert signal.metadata["volume_confirmation_source"] == "option"

@@ -545,7 +545,12 @@ class VWAPProStrategy(EliteStrategy):
                     return None
 
             futures_vwap_slope = _optional_float(indicators.get("futures_vwap_slope"))
-            futures_volume_ratio = _optional_float(indicators.get("futures_volume_ratio"))
+            # Keep quote-counter deltas for diagnostics, never silently treat
+            # them as a verified completed-minute volume confirmation.
+            quote_counter_volume_ratio = _optional_float(indicators.get("futures_volume_ratio"))
+            futures_volume_ratio = quote_counter_volume_ratio
+            futures_volume_source = "legacy_quote_counter" if futures_volume_ratio is not None else "unavailable"
+            futures_completed_bar_age_s: float | None = None
             vwap_stddev = _optional_float(indicators.get("vwap_stddev"))
             if vwap_stddev is None:
                 vwap_stddev = _optional_float(indicators.get("vwap_std"))
@@ -624,6 +629,52 @@ class VWAPProStrategy(EliteStrategy):
                 None,
             )
             symbol_scope = str(symbol or "").strip().upper()
+            if "futures_completed_bar_volume_ready" in indicators:
+                # This production contract supersedes the per-callback quote
+                # delta only when the futures identity, source, completed bar
+                # and its causal relationship to the option bar are verified.
+                futures_volume_ratio = None
+                futures_volume_source = "completed_bar_unavailable"
+                provenance = indicators.get("futures_completed_bar_volume_provenance")
+                volume_future = str(
+                    indicators.get("futures_completed_bar_volume_symbol") or ""
+                ).strip().upper()
+                active_future = str(
+                    indicators.get("active_futures_symbol") or ""
+                ).strip().upper()
+                if (
+                    indicators.get("futures_completed_bar_volume_ready") is True
+                    and isinstance(provenance, Mapping)
+                    and provenance.get("ready") is True
+                    and provenance.get("reason") == "verified"
+                    and provenance.get("source") == "completed_futures_1m_bars"
+                    and (provenance.get("baseline_count") or 0) >= 5
+                    and volume_future
+                    and (not active_future or volume_future == active_future)
+                    and bar_anchor is not None
+                ):
+                    try:
+                        future_bar_ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(provenance.get("bar_timestamp"))
+                        )
+                        option_bar_ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(bar_anchor)
+                        )
+                        futures_completed_bar_age_s = (
+                            option_bar_ts - future_bar_ts
+                        ).total_seconds()
+                        verified_ratio = _optional_float(provenance.get("ratio"))
+                        if (
+                            verified_ratio is not None
+                            and verified_ratio >= 0
+                            and 0 <= futures_completed_bar_age_s <= 120
+                        ):
+                            futures_volume_ratio = verified_ratio
+                            futures_volume_source = "verified_completed_futures_1m"
+                        else:
+                            futures_volume_source = "completed_bar_stale_or_future"
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        futures_volume_source = "completed_bar_timestamp_invalid"
             session_scope = _resolve_session_token(indicators, bar_anchor)
             thesis_scope = (symbol_scope, session_scope)
             thesis_recovered_from_history = False
@@ -798,6 +849,26 @@ class VWAPProStrategy(EliteStrategy):
             fut_vol_support = bool(
                 futures_volume_ratio is not None
                 and futures_volume_ratio >= self._futures_volume_min_ratio
+            )
+            log_throttled(
+                LOGGER,
+                f"vwap_futures_volume_evidence:{symbol_scope}",
+                "VWAP_FUTURES_VOLUME_EVIDENCE symbol=%s source=%s completed_ratio=%s quote_counter_ratio=%s completed_bar_age_s=%s option_volume_support=%s futures_volume_support=%s",
+                symbol_scope,
+                futures_volume_source,
+                _fmt_optional(futures_volume_ratio, 4),
+                _fmt_optional(quote_counter_volume_ratio, 4),
+                _fmt_optional(futures_completed_bar_age_s, 1),
+                vol_support,
+                fut_vol_support,
+                interval_sec=60.0,
+                extra={
+                    "event": "VWAP_FUTURES_VOLUME_EVIDENCE",
+                    "symbol": symbol_scope,
+                    "volume_source": futures_volume_source,
+                    "volume_confirmation_stage": "completed_bar_corroboration",
+                    "volume_confirmation_eligible": fut_vol_support,
+                },
             )
             if vol_support and fut_vol_support:
                 volume_confirmation_source = "option_and_futures"
@@ -1445,6 +1516,9 @@ class VWAPProStrategy(EliteStrategy):
                 "underlying_alignment": trend_alignment,
                 "futures_alignment": slope_support,
                 "futures_volume_ratio": futures_volume_ratio,
+                "futures_volume_ratio_source": futures_volume_source,
+                "futures_quote_counter_ratio": quote_counter_volume_ratio,
+                "futures_completed_bar_age_s": futures_completed_bar_age_s,
                 "futures_volume_min_ratio": self._futures_volume_min_ratio,
                 "option_volume_ratio": option_volume_ratio,
                 "option_volume_min_ratio": self._option_volume_min_ratio,

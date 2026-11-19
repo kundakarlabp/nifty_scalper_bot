@@ -13,12 +13,34 @@ def test_market_regime_detector_identifies_trend() -> None:
     assert snapshot.adjustments["display_regime"] == "trending"
 
 
-def test_market_regime_detector_range_on_low_atr() -> None:
+def test_low_atr_alone_cannot_authorize_a_tradeable_range() -> None:
     detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
-    snapshot = detector.evaluate("NIFTY", {"atr": 4.0}, {"atr": 4.0})
+    snapshot = detector.evaluate("NIFTY", {"atr": 4.0})
+    assert snapshot.regime == "unknown"
+    assert snapshot.reason == "range_evidence_unverified"
+    assert snapshot.confidence == 0.0
+
+    adx_only = detector.evaluate("NIFTY", {"atr": 4.0, "adx": 10.0})
+    assert adx_only.regime == "unknown"
+
+
+def test_low_adx_with_independent_flat_price_history_proves_range() -> None:
+    detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
+    snapshot = detector.evaluate(
+        "NIFTY",
+        {"atr": 4.0, "adx": 10.0, "price_series": [100.0, 100.02, 100.01, 100.0]},
+    )
     assert snapshot.regime == "range"
     assert snapshot.adjustments["bias"] == "neutral"
     assert snapshot.adjustments["display_regime"] == "ranging"
+
+
+def test_low_adx_with_converged_emas_proves_range_without_history() -> None:
+    detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
+    snapshot = detector.evaluate(
+        "NIFTY", {"atr": 4.0, "adx": 10.0, "ema_fast": 100.01, "ema_slow": 100.0}
+    )
+    assert snapshot.regime == "range"
 
 
 def test_market_regime_detector_broadcasts_events() -> None:
