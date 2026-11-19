@@ -1277,6 +1277,7 @@ class StrategyRunner:
         self._candidate_total_count = 0
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
+        self._last_regime_gate_totals = {"hard_blocks": 0, "gate_denials": 0}
         self._capital_block_counter = 0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
@@ -8620,17 +8621,47 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
             if now - self._last_summary_log >= 60.0:
+                # This interval counts actual strategy hard vetoes, not every
+                # low-confidence regime warning or adaptive-size adjustment.
+                regime_gate_denials = 0
+                regime_counters = getattr(
+                    self._strategy_manager, "get_regime_gate_counters", None
+                )
+                if callable(regime_counters):
+                    try:
+                        totals = regime_counters()
+                        previous = self._last_regime_gate_totals
+                        self._regime_block_counter += max(
+                            0,
+                            int(totals.get("hard_blocks", 0))
+                            - int(previous.get("hard_blocks", 0)),
+                        )
+                        regime_gate_denials = max(
+                            0,
+                            int(totals.get("gate_denials", 0))
+                            - int(previous.get("gate_denials", 0)),
+                        )
+                        self._last_regime_gate_totals = {
+                            "hard_blocks": int(totals.get("hard_blocks", 0)),
+                            "gate_denials": int(totals.get("gate_denials", 0)),
+                        }
+                    except (AttributeError, TypeError, ValueError):
+                        self._logger.warning(
+                            "ENGINE_REGIME_COUNTER_UNAVAILABLE",
+                            extra={"event": "ENGINE_REGIME_COUNTER_UNAVAILABLE"},
+                        )
                 self._logger.info(
                     "ENGINE_SUMMARY evals=%d evals_semantics=legacy_activity "
                     "runner_ticks=%d phase9_evals=%d candidate_generated=%d "
-                    "approved_candidates=%d regime_blocks=%d capital_blocks=%d "
-                    "runner_state=%s",
+                    "approved_candidates=%d regime_blocks=%d regime_gate_denials=%d "
+                    "capital_blocks=%d runner_state=%s",
                     self._eval_counter,
                     getattr(self, "_runner_tick_counter", 0),
                     getattr(self, "_phase9_eval_counter", 0),
                     self._candidate_counter,
                     self._structural_approved_counter,
                     self._regime_block_counter,
+                    regime_gate_denials,
                     self._capital_block_counter,
                     str(self._runner_state),
                     extra={
@@ -8641,6 +8672,8 @@ class StrategyRunner:
                         "candidate_generated": self._candidate_counter,
                         "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
+                        "regime_gate_denials": regime_gate_denials,
+                        "regime_blocks_semantics": "strategy_hard_vetoes_per_interval",
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
                     },
