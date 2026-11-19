@@ -12,6 +12,11 @@ Position in the pipeline:
 Owns / does NOT own:
 - Owns: convenience read/derive helpers (e.g. quote bid/ask/spread, greeks) and
   a thin store for non-history state.
+- get_option_model_snapshot: return same-quote NIFTY option expiry, lot and
+  spot-referenced model Greeks using the broker instrument resolver and the
+  existing options_math Black-Scholes/IV functions; fail closed on absent data.
+- _price_option_model: shared internal pricing helper for lazy cached Greeks
+  and the VWAP live snapshot; correct canonical pricing keyword conventions.
 - Does NOT own: price history (MDM is the sole owner — DataHub stores none), and
   does NOT select contracts or infer active futures/options independently.
 
