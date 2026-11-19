@@ -1,7 +1,8 @@
 """Purpose: Guarded LIVE pilot and research NIFTY futures session-VWAP reclaim.
 
 Responsibilities: Verify or strictly recover authenticated completed futures
-minutes from 09:15; has_ist_session_anchor verifies UTC/IST session-open
+minutes, pre-confirmation volatility pressure and live-quote target proximity;
+has_ist_session_anchor verifies UTC/IST session-open
 identity for bounded local recovery. Frozen ATR/sigma and session-anchored
 bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
@@ -274,6 +275,18 @@ def assess_range_vwap_reclaim(
     bar_range = float(latest["high"]) - float(latest["low"])
     candle_body = abs(float(latest["close"]) - float(latest["open"]))
     body_fraction = candle_body / bar_range if bar_range > 0 else 0.0
+    # Descriptive transition diagnostics use ONLY completed futures bars
+    # before the reclaim candle. No untested volatility threshold gates LIVE.
+    recent_closes = [float(row["close"]) for row in history[-6:]]
+    recent_travel = sum(
+        abs(b - a) for a, b in zip(recent_closes, recent_closes[1:])
+    )
+    recent_efficiency = (
+        abs(recent_closes[-1] - recent_closes[0]) / recent_travel
+        if recent_travel > 0
+        else 1.0
+    )
+    recent_tr_ratio = statistics.mean(true_ranges[-5:]) / atr
     # Shadow comparator only: full-session dispersion, not a replacement
     # for the frozen 20-bar ATR/sigma entry band.
     session_sigma = statistics.pstdev(float(r["close"]) for r in history)
@@ -301,6 +314,9 @@ def assess_range_vwap_reclaim(
         "upper_band_before_confirmation": round(upper, 4),
         "session_vwap_slope_bps_per_min": round(slope_bps, 4),
         "directional_efficiency": round(efficiency, 4),
+        "prior_5m_directional_efficiency": round(recent_efficiency, 4),
+        "prior_5m_to_14m_true_range_ratio": round(recent_tr_ratio, 4),
+        "reclaim_bar_range_atr": round(bar_range / atr, 4),
         "range_width_atr": round(width, 4),
         "volume_ratio": round(rvol, 4),
         "underlying_latest_close": float(latest["close"]),
@@ -1029,6 +1045,25 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_exchange_session_vwap_unverified_or_divergent")
             return None
 
+        # The confirmed two-bar reversal is no longer tradeable if the
+        # freshest futures quote has re-breached its frozen outer band, or
+        # already reached the independent exchange VWAP target.
+        lower = _value(structural.get("lower_band_before_confirmation"))
+        upper = _value(structural.get("upper_band_before_confirmation"))
+        if lower is None or upper is None:
+            self._no_vote("range_frozen_outer_band_missing")
+            return None
+        if (side == "CE" and fut_tick <= lower) or (
+            side == "PE" and fut_tick >= upper
+        ):
+            self._no_vote("range_futures_rebroke_outer_band")
+            return None
+        if (side == "CE" and fut_tick >= exchange_vwap) or (
+            side == "PE" and fut_tick <= exchange_vwap
+        ):
+            self._no_vote("range_futures_target_already_reached")
+            return None
+
         # The option is a long-premium purchase for CE *and* PE. Require
         # positive option-book pressure; CE/PE signed futures directions must
         # not be incorrectly applied to the premium order book.
@@ -1133,12 +1168,28 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         ):
             self._no_vote("range_structural_stop_target_order_invalid")
             return None
+        # Rank economic feasibility against the freshest verified futures
+        # quote, not the older confirmation-bar close. Never CREATE extra
+        # expected reward from an adverse post-confirmation retracement.
+        original_distance = abs(target - entry)
+        quote_distance = abs(target - fut_tick)
+        remaining_distance = min(original_distance, quote_distance)
+        stop_distance = max(
+            abs(entry - invalidation), abs(fut_tick - invalidation)
+        )
         budget = assess_option_cost_risk(
             quote,
             config=self._cfg,
             side=side,
-            futures_target_distance=abs(target - entry),
-            futures_stop_distance=abs(entry - invalidation),
+            futures_target_distance=remaining_distance,
+            futures_stop_distance=stop_distance,
+        )
+        budget["original_completed_bar_target_points"] = round(
+            original_distance, 4
+        )
+        budget["fresh_futures_target_points"] = round(quote_distance, 4)
+        budget["target_points_removed_due_to_quote_drift"] = round(
+            original_distance - remaining_distance, 4
         )
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
