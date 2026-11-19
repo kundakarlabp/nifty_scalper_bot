@@ -2,7 +2,9 @@
 
 Responsibilities: refresh timestamped underlying indicators and completed
 in-memory price history, stabilise regime transitions, and explain the accepted
-regime evidence in throttled runtime diagnostics.
+regime evidence in throttled runtime diagnostics. Execution readers use
+get_execution_snapshot(), which preserves TREND/RANGE transition confirmation
+but immediately honours unsafe raw observations.
 
 Safety: Missing or stale history must not be invented, a low ATR alone cannot
 license mean-reversion entries, and existing risk and broker gates remain owned
