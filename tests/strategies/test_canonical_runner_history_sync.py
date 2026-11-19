@@ -887,6 +887,9 @@ async def test_parity_detects_runner_close_drift_with_equal_counts() -> None:
         symbol, required_bars=30, reason="test",
         role="spot_context", request_if_short=False,
     )
+    # The fixture's reseed reuses input dicts; detach the projection before
+    # corrupting it so the canonical MDM fixture remains authoritative.
+    runner._symbol_history[symbol][-1] = dict(runner._symbol_history[symbol][-1])
     runner._symbol_history[symbol][-1]["close"] += 3.5
 
     report = runner.inspect_recent_canonical_history(symbol)
