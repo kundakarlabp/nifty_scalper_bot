@@ -270,6 +270,8 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
             "observed_contract_lot_size": 65,
             "slippage_each_side_bps": 25.0,
             "stop_price_model": 91.0,
+            "modeled_stressed_stop_fill_price": 90.5,
+            "modeled_extra_exit_spread_points": 0.2,
             "vwap_limited_target_price_model": 120.0,
         },
     }
@@ -306,3 +308,17 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
     assert not verified_range_vwap_final_order_risk(
         base, **{**args, "entry_price": 106.0}
     )
+    # A modeled liquidation fill must be below the stop trigger; missing or
+    # optimistic fill proof cannot silently pass the final broker risk gate.
+    for modeled_fill in (91.0, 95.0, -1.0):
+        corrupted = {
+            **base,
+            "option_cost_risk": {
+                **base["option_cost_risk"],
+                "modeled_stressed_stop_fill_price": modeled_fill,
+            },
+        }
+        assert not verified_range_vwap_final_order_risk(corrupted, **args)
+    unproven = {**base, "option_cost_risk": {**base["option_cost_risk"]}}
+    del unproven["option_cost_risk"]["modeled_stressed_stop_fill_price"]
+    assert not verified_range_vwap_final_order_risk(unproven, **args)
