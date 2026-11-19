@@ -3721,6 +3721,24 @@ class BracketManager:
         held = time.time() - opened_at
         if held < self._time_stop_seconds:
             return None
+        # A VWAP mean-reversion trade is a time-limited thesis. Reuse this
+        # canonical reduce-only exit path even when it briefly reached +0.5R,
+        # instead of holding past the decay window used to price its entry.
+        provenance = bracket.trade_provenance or {}
+        if provenance.get("setup_name") == "session_vwap_reentry_live":
+            try:
+                max_minutes = float(provenance["range_option_hold_minutes"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                max_minutes = 0.0
+            if math.isfinite(max_minutes) and 5.0 <= max_minutes <= 30.0:
+                if held >= max_minutes * 60.0:
+                    return {
+                        "decision": BracketTickDecision.EXIT_STOP.value,
+                        "type": "TIME_STOP",
+                        "price": ltp,
+                        "qty": bracket.remaining_quantity,
+                        "reason": f"RANGE_VWAP_MAX_HOLD held={int(held)}s",
+                    }
         entry = float(bracket.entry_price or 0.0)
         initial_sl = float(bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0)
         initial_risk = abs(entry - initial_sl)
