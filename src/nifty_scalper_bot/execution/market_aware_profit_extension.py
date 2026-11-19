@@ -1275,12 +1275,20 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         return False
     live_mode = getattr(manager, "_is_live_execution", None)
-    if (
-        callable(live_mode)
-        and live_mode()
-        and not getattr(bracket, "exchange_stop_order_id", None)
-    ):
-        return False
+    if callable(live_mode) and live_mode():
+        acknowledged = _positive(
+            getattr(bracket, "exchange_stop_trigger_price", None)
+        )
+        protected_qty = int(getattr(bracket, "exchange_stop_quantity", 0) or 0)
+        remaining_qty = int(getattr(bracket, "remaining_quantity", 0) or 0)
+        if (
+            not getattr(bracket, "exchange_stop_order_id", None)
+            or acknowledged is None
+            or protected_qty < remaining_qty
+            or remaining_qty <= 0
+        ):
+            # A broker order ID alone does not prove the resting trigger/size.
+            return False
     entry = _positive(getattr(bracket, "entry_price", None))
     initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
     if entry is None or initial_stop is None or initial_stop >= entry:
