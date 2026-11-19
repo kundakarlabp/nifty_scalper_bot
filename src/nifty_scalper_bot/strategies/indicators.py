@@ -854,6 +854,16 @@ class IndicatorEngine:
             context = self._runtime_context.get(symbol, {})
             for key, value in context.items():
                 requested.setdefault(key, value)
+            # The generic "ema" is EMA(20), not the fast/slow pair requested
+            # by regime and strategy consumers. Resolve missing named inputs
+            # from this symbol's existing history; never invent short history.
+            # Preserve any explicitly supplied runtime context values.
+            for ema_name, period in (("ema_fast", 9), ("ema_slow", 21)):
+                if ema_name not in all_names or requested.get(ema_name) is not None:
+                    continue
+                computed = self.get_ema(symbol, period=period)
+                if computed is not None and np.isfinite(computed):
+                    requested[ema_name] = float(computed)
             if "tick_direction" in all_names or "tick_direction" in requested:
                 runtime_tick = str(context.get("tick_direction") or "").upper()
                 if runtime_tick:
