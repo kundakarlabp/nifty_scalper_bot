@@ -2938,7 +2938,54 @@ class StrategyManager(_BaseStrategyManager):
                 reasons = tuple(regime_manager.get_filter_reasons())
                 regime_allowed = bool(allowed)
                 regime_reasons = tuple(reasons)
-                regime_snapshot = regime_manager.get_latest_snapshot()
+                stable_snapshot = regime_manager.get_latest_snapshot()
+                execution_snapshot = getattr(regime_manager, "get_execution_snapshot", None)
+                regime_snapshot = (
+                    execution_snapshot() if callable(execution_snapshot)
+                    else stable_snapshot
+                )
+                raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+                raw_snapshot = raw_getter() if callable(raw_getter) else None
+                unsafe_evidence = any(
+                    reason in reasons
+                    for reason in (
+                        "regime_unavailable",
+                        "regime_stale",
+                        "confidence_below_floor",
+                        "regime_unknown",
+                        "regime_fail_closed_error",
+                    )
+                )
+                hard_block = not allowed and (
+                    unsafe_evidence or not self._use_regime_adaptive
+                )
+                if not allowed or (
+                    isinstance(raw_snapshot, RegimeSnapshot)
+                    and isinstance(stable_snapshot, RegimeSnapshot)
+                    and raw_snapshot.regime != stable_snapshot.regime
+                ):
+                    log_throttled(
+                        log,
+                        f"regime_authority:{symbol}",
+                        "REGIME_AUTHORITY_DECISION symbol=%s raw=%s stable=%s effective=%s gate_allowed=%s enforcement=%s reasons=%s",
+                        symbol,
+                        getattr(raw_snapshot, "regime", None),
+                        getattr(stable_snapshot, "regime", None),
+                        getattr(regime_snapshot, "regime", None),
+                        bool(allowed),
+                        "hard_block" if hard_block else ("adaptive_scale" if not allowed else "allow"),
+                        list(reasons),
+                        interval_sec=60.0,
+                        extra={
+                            "event": "REGIME_AUTHORITY_DECISION",
+                            "symbol": symbol,
+                            "gate_allowed": bool(allowed),
+                            "hard_block": hard_block,
+                            "raw_regime": getattr(raw_snapshot, "regime", None),
+                            "stable_regime": getattr(stable_snapshot, "regime", None),
+                            "effective_regime": getattr(regime_snapshot, "regime", None),
+                        },
+                    )
                 self._log_regime_gate_decision(
                     symbol=symbol,
                     allowed=allowed,
@@ -2946,7 +2993,13 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
-                    self._observability_counters["signals_blocked_by_regime"] += 1
+                    self._observability_counters["regime_gate_rejections_observed"] = (
+                        self._observability_counters.get(
+                            "regime_gate_rejections_observed", 0
+                        ) + 1
+                    )
+                    if hard_block:
+                        self._observability_counters["signals_blocked_by_regime"] += 1
                     log_throttled(
                         log,
                         key=f"regime_scale_fallback:{symbol}",
@@ -2959,7 +3012,7 @@ class StrategyManager(_BaseStrategyManager):
                             "scale": 1.0,
                         },
                     )
-                if not allowed and not self._use_regime_adaptive:
+                if hard_block:
                     if symbol_role in {"spot_context", "futures_context"}:
                         log_throttled(
                             log,
@@ -3040,6 +3093,31 @@ class StrategyManager(_BaseStrategyManager):
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
+        if symbol_role == "tradable_option":
+            completed_evidence = indicators.get("futures_completed_bar_volume_provenance")
+            evidence = (
+                completed_evidence if isinstance(completed_evidence, t.Mapping) else {}
+            )
+            log_throttled(
+                log,
+                f"futures_volume_confirmation:{symbol}",
+                "FUTURES_VOLUME_CONFIRMATION_CONTEXT symbol=%s future=%s completed_ready=%s completed_ratio=%s quote_counter_ratio=%s reason=%s source=%s",
+                symbol,
+                indicators.get("futures_completed_bar_volume_symbol"),
+                indicators.get("futures_completed_bar_volume_ready"),
+                indicators.get("futures_completed_bar_volume_ratio"),
+                indicators.get("futures_volume_ratio"),
+                evidence.get("reason"),
+                evidence.get("source"),
+                interval_sec=60.0,
+                extra={
+                    "event": "FUTURES_VOLUME_CONFIRMATION_CONTEXT",
+                    "symbol": symbol,
+                    "completed_ready": indicators.get("futures_completed_bar_volume_ready"),
+                    "completed_ratio": indicators.get("futures_completed_bar_volume_ratio"),
+                    "quote_counter_ratio": indicators.get("futures_volume_ratio"),
+                },
+            )
         opt_quote = None
         # ✅ FIX S3: Inject exchange VWAP for options
         if self._data_hub is not None:
