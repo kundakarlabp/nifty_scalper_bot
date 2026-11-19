@@ -1,7 +1,8 @@
 """Purpose: Guarded LIVE pilot and research NIFTY futures session-VWAP reclaim.
 
 Responsibilities: Verify or strictly recover authenticated completed futures
-minutes from 09:15; compare frozen ATR/sigma and session-anchored bands without
+minutes from 09:15; has_ist_session_anchor reuses the canonical timezone
+parser for the manager's bounded local-history recovery. Compare frozen bands
 look-ahead; observe structural reclaim independently of later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
@@ -66,6 +67,24 @@ def _time(raw: Any) -> datetime | None:
         return value.astimezone(_IST) if value.tzinfo is not None else None
     except (TypeError, ValueError, OverflowError, OSError):
         return None
+
+
+def has_ist_session_anchor(observed: Any, *, decision_at: Any) -> bool:
+    """Recognize the current 09:15 anchor independent of UTC/IST encoding."""
+    if not isinstance(observed, Sequence) or not observed:
+        return False
+    first = observed[0]
+    if not isinstance(first, Mapping):
+        return False
+    stamp = _time(first.get("timestamp") or first.get("datetime"))
+    decision = _time(decision_at)
+    return bool(
+        stamp is not None
+        and decision is not None
+        and stamp.date() == decision.date()
+        and (stamp.hour, stamp.minute, stamp.second, stamp.microsecond)
+        == (9, 15, 0, 0)
+    )
 
 
 def _weighted_center(rows: Sequence[Mapping[str, Any]]) -> float | None:
