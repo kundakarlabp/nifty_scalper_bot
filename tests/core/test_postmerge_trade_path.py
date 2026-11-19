@@ -830,3 +830,42 @@ def test_unconfirmed_context_logs_parseable_reasons_without_allowing_entry(
     assert manager._last_no_signal_decision_by_symbol[_CE].blocked_at == (
         "context_contract"
     )
+
+
+def test_cost_comparison_ranks_without_changing_live_primary(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    original = _signal_evidence("VWAPPro")
+    alternative = _signal_evidence("ORBPro")
+    alternative[0].take_profit = 145.0
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[original, alternative],
+        indicators={
+            **_live_indicators(),
+            "ask": 110.0,
+            "bid": 109.0,
+            "regime": "TREND",
+        },
+    )
+    assert result is not None
+    assert result.metadata["strategy"] == "VWAPPro"
+    assert result.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert result.metadata["shadow_economic_ranking_used_for_entry"] is False
+    ranking = result.metadata["shadow_economic_comparison"]
+    assert len(ranking) == 2
+    assert ranking[0]["strategy"] == "ORBPro"
+    assert ranking[0]["net_rr_proxy"] > ranking[1]["net_rr_proxy"]
+
+
+def test_invalid_option_prices_never_create_shadow_economics() -> None:
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[trigger, context],
+        indicators={**_live_indicators(), "ask": 0, "bid": -1},
+    )
+    assert result is not None
+    assert result.metadata["shadow_economic_comparison"] == []
