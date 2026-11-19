@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta, timezone
 from time import time
 from types import SimpleNamespace
 
@@ -82,6 +83,29 @@ class FakeIndicatorEngine:
     def __init__(self, *, strong: bool = True) -> None:
         self.strong = strong
 
+    def get_history(self, symbol: str, count=None, *, field="close"):
+        if symbol != FUTURE or field != "bars":
+            return []
+        now = datetime.now(timezone.utc)
+        bars = [
+            {
+                "timestamp": now - timedelta(minutes=21 - i),
+                "volume": 500_000.0,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+            for i in range(20)
+        ]
+        bars.append(
+            {
+                "timestamp": now - timedelta(minutes=1),
+                "volume": 920_000.0 if self.strong else 310_000.0,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+        )
+        return bars[-count:] if count is not None else bars
+
     def get_indicators(self, symbol: str, names):
         del names
         if symbol == SYMBOL:
@@ -115,7 +139,6 @@ class FakeIndicatorEngine:
                 "volume": 920_000 if self.strong else 310_000,
                 "avg_volume": 500_000,
                 "futures_volume_ratio": 1.84 if self.strong else 0.62,
-                "context_age_seconds": 0.25,
                 "regime": "TREND_UP" if self.strong else "CHOPPY",
             }
         return {}
@@ -1045,3 +1068,34 @@ def test_live_adaptive_refuses_unconfirmed_or_undersized_broker_stop(monkeypatch
     assert evidence["estimated_net_at_virtual_trigger_points"] > 0
     assert evidence["estimated_net_at_recorded_trigger_points"] < 0
     assert evidence["estimated_net_at_confirmed_trigger_points"] is None
+
+
+def test_completed_futures_volume_cannot_be_replaced_by_provisional_spike():
+    manager = FakeManager(strong=True)
+    history = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    # A huge provisional tick is not a completed-volume confirmation.
+    history[-1]["volume"] = 9_000_000
+    history[-1]["is_complete"] = False
+    history[-1]["is_provisional"] = True
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: history
+    ratio, bar_age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert bar_age is not None
+    assert ratio == pytest.approx(1.0)
+
+
+def test_old_completed_futures_bar_does_not_authorize_strong_continuation():
+    manager = FakeManager(strong=True)
+    history = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
+    for bar in history:
+        bar["timestamp"] -= timedelta(minutes=10)
+    manager._indicator_engine.get_history = lambda *_args, **_kwargs: history
+    ratio, age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, manager._market_data.quotes[FUTURE]
+    )
+    assert ratio is None
+    assert age is not None and age > 150
+    assessment = assess_continuation(manager, _bracket(), 120.0)
+    assert assessment.snapshot["futures_volume_verified"] is False
+    assert "futures_volume_confirmation" not in assessment.positive
