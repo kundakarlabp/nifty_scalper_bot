@@ -1153,3 +1153,21 @@ def test_futures_volume_cannot_use_previous_sessions_as_baseline():
     )
     assert ratio is None
     assert bar_age is not None and bar_age <= 150
+
+
+def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
+    bracket = _bracket()
+    decision = ContinuationDecision(
+        extend=True,
+        evidence_count=7,
+        positive=(
+            "premium_momentum",
+            "underlying_vwap_alignment",
+            "futures_volume_confirmation",
+        ),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP", "futures_volume_verified": True},
+    )
+    assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
+    assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"
