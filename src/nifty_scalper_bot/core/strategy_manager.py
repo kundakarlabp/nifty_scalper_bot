@@ -4336,6 +4336,15 @@ class StrategyManager(_BaseStrategyManager):
                 no_vote_reason_counts=no_vote_reason_counts,
             )
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
+            # Persist the regime source distinction through the order/ledger
+            # boundary; a stable TREND label is not raw detector verification.
+            if isinstance(combined.metadata, dict):
+                combined.metadata.setdefault("regime_stable", regime_name)
+                combined.metadata.setdefault("regime_raw", raw_regime_name)
+                combined.metadata.setdefault("regime_gate_allowed", regime_allowed)
+                combined.metadata.setdefault(
+                    "regime_evidence_status", regime_decision_action
+                )
             log_throttled(
                 log,
                 f"strategy_stage_qualified:{symbol}",
