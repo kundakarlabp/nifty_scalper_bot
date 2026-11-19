@@ -7,6 +7,10 @@ Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
 - Propagates selected option/futures context to strategy code.
 - Must not select contracts or call broker instruments.
+- can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
+  actual reversal admission remains owned by the verified range vote contract.
+- _derive_context_direction applies an ATR-scaled floor to EMA spreads and
+  percentage-normalized VWAP slopes; material conflicts still fail closed.
 
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
