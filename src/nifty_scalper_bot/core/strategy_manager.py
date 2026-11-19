@@ -19,7 +19,17 @@ Direction-authority invariant:
 - The final option combiner gate independently revalidates direction alignment.
 - SMC-only independent confirmation cannot veto a separately confirmed VWAP
   trigger on the same underlying side; opposing context still fails closed.
-- Bounded research parity and sampled no-vote telemetry never authorize entry."""
+- Bounded research parity and sampled no-vote telemetry never authorize entry.
+
+Regime-authority and admission accounting invariant:
+- _record_regime_filter_outcome distinguishes raw detector filter rejections,
+  allowed adaptive continuations and effective trade-entry blocks.
+- The detector's newest raw observation may be UNKNOWN while the stable
+  hysteresis regime remains TREND. The retained stable state remains the
+  existing strategy routing input; both states and their verification status
+  are published, without converting UNKNOWN into proof of a new trend.
+- REGIME_POLICY_RECONCILED reports the effective adaptive sizing request,
+  not a purported broker quantity or final order admission decision."""
 
 from __future__ import annotations
 
@@ -1403,6 +1413,8 @@ class StrategyManager(_BaseStrategyManager):
         self._use_regime_adaptive = bool(app_settings.USE_REGIME_ADAPTIVE)
         self._observability_counters: dict[str, int] = {
             "signals_blocked_by_regime": 0,
+            "regime_filter_rejections": 0,
+            "regime_adaptive_continuations": 0,
             "signals_blocked_by_risk": 0,
             "orders_submitted": 0,
         }
@@ -2927,6 +2939,7 @@ class StrategyManager(_BaseStrategyManager):
 
         regime_manager = self._regime_manager
         regime_snapshot: RegimeSnapshot | None = None
+        raw_regime_snapshot: RegimeSnapshot | None = None
         adjustments: dict[str, t.Any] = {}
         regime_scale = 1.0
         regime_allowed: bool | None = None
@@ -2939,26 +2952,18 @@ class StrategyManager(_BaseStrategyManager):
                 regime_allowed = bool(allowed)
                 regime_reasons = tuple(reasons)
                 regime_snapshot = regime_manager.get_latest_snapshot()
+                raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+                if callable(raw_getter):
+                    raw_regime_snapshot = raw_getter()
                 self._log_regime_gate_decision(
                     symbol=symbol,
                     allowed=allowed,
                     reasons=reasons,
                     snapshot=regime_snapshot,
                 )
-                if not allowed:
-                    self._observability_counters["signals_blocked_by_regime"] += 1
-                    log_throttled(
-                        log,
-                        key=f"regime_scale_fallback:{symbol}",
-                        msg="strategy_regime_scale_fallback",
-                        interval_sec=30.0,
-                        extra={
-                            "event": "strategy_regime_scale_fallback",
-                            "symbol": symbol,
-                            "gate_reasons": list(reasons),
-                            "scale": 1.0,
-                        },
-                    )
+                self._record_regime_filter_outcome(
+                    allowed=bool(allowed), symbol_role=symbol_role
+                )
                 if not allowed and not self._use_regime_adaptive:
                     if symbol_role in {"spot_context", "futures_context"}:
                         log_throttled(
@@ -3021,6 +3026,65 @@ class StrategyManager(_BaseStrategyManager):
             if isinstance(regime_snapshot, RegimeSnapshot)
             else None
         )
+        observed_regime = (
+            raw_regime_snapshot.regime
+            if isinstance(raw_regime_snapshot, RegimeSnapshot)
+            else None
+        )
+        evidence_verified = bool(
+            regime_manager is not None
+            and isinstance(raw_regime_snapshot, RegimeSnapshot)
+            and regime_name is not None
+            and normalize_regime(raw_regime_snapshot.regime)
+            == normalize_regime(regime_name)
+            and normalize_regime(raw_regime_snapshot.regime).value != "UNKNOWN"
+            and raw_regime_snapshot.confidence
+            >= getattr(regime_manager, "min_confidence", 0.0)
+        )
+        regime_policy = (
+            "adaptive_continuation"
+            if regime_allowed is False and self._use_regime_adaptive
+            else "allowed" if regime_allowed is True else "not_evaluated"
+        )
+        if regime_allowed is False and self._use_regime_adaptive:
+            log_throttled(
+                log,
+                key=f"regime_scale_fallback:{symbol}",
+                msg="strategy_regime_scale_fallback",
+                interval_sec=30.0,
+                extra={
+                    "event": "strategy_regime_scale_fallback",
+                    "symbol": symbol,
+                    "gate_reasons": list(regime_reasons),
+                    "scale": regime_scale,
+                    "scope": "sizing_evidence_not_order_block",
+                },
+            )
+        log_throttled(
+            log,
+            f"regime_policy_reconciled:{symbol}",
+            "REGIME_POLICY_RECONCILED symbol=%s stable=%s observed=%s policy=%s evidence_verified=%s requested_scale=%.3f stable_age_s=%s raw_reason=%s",
+            symbol,
+            regime_name,
+            observed_regime,
+            regime_policy,
+            evidence_verified,
+            regime_scale,
+            round(max(0.0, time.time() - regime_snapshot.updated_at), 1)
+            if regime_snapshot is not None else None,
+            raw_regime_snapshot.reason if raw_regime_snapshot is not None else None,
+            interval_sec=60.0,
+            extra={
+                "event": "REGIME_POLICY_RECONCILED",
+                "symbol": symbol,
+                "stable_regime": regime_name,
+                "observed_regime": observed_regime,
+                "regime_evidence_verified": evidence_verified,
+                "regime_policy": regime_policy,
+                "requested_sizing_scale": regime_scale,
+                "regime_filter_allowed": regime_allowed,
+            },
+        )
         log.debug(
             "strategy_regime_scaling",
             extra={
@@ -3034,6 +3098,10 @@ class StrategyManager(_BaseStrategyManager):
         indicators = dict(indicators)
         if regime_name is not None:
             indicators["regime"] = regime_name
+        indicators["regime_observed"] = observed_regime
+        indicators["regime_stable"] = regime_name
+        indicators["regime_evidence_verified"] = evidence_verified
+        indicators["regime_policy"] = regime_policy
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
         indicators.setdefault("close", current_price)
@@ -4070,6 +4138,12 @@ class StrategyManager(_BaseStrategyManager):
             vote.metadata["regime_name"] = normalize_regime(
                 indicators.get("regime")
             ).value
+            vote.metadata["regime_observed"] = indicators.get("regime_observed")
+            vote.metadata["regime_stable"] = indicators.get("regime_stable")
+            vote.metadata["regime_evidence_verified"] = indicators.get(
+                "regime_evidence_verified"
+            )
+            vote.metadata["regime_policy"] = indicators.get("regime_policy")
             vote.metadata["regime_routing_mode"] = (
                 "eligibility_checked"
                 if indicators.get("regime") is not None
@@ -5168,6 +5242,20 @@ class StrategyManager(_BaseStrategyManager):
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
 
+    def _record_regime_filter_outcome(
+        self, *, allowed: bool, symbol_role: str
+    ) -> None:
+        """Count raw filter rejections separately from final entry blocks."""
+        if allowed:
+            return
+        self._observability_counters["regime_filter_rejections"] += 1
+        if symbol_role in {"spot_context", "futures_context"}:
+            return
+        if self._use_regime_adaptive:
+            self._observability_counters["regime_adaptive_continuations"] += 1
+        else:
+            self._observability_counters["signals_blocked_by_regime"] += 1
+
     def _log_regime_gate_decision(
         self,
         *,
@@ -5223,6 +5311,8 @@ class StrategyManager(_BaseStrategyManager):
             "regime": regime_val,
             "confidence": confidence_val,
             "reasons": list(reasons),
+            "scope": "regime_filter_not_final_order_decision",
+            "entry_blocked": bool(not allowed and not self._use_regime_adaptive),
         }
 
         if self._last_regime_gate == gate_key:

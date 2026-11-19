@@ -1833,6 +1833,33 @@ class StrategyManager:
                             },
                         )
 
+        # Report evidence even when a strategy exits before its volume stage.
+        # The legacy quote-counter delta is never substituted for a verified
+        # completed futures candle, preserving causal volume provenance.
+        volume_provenance = indicators.get("futures_completed_bar_volume_provenance")
+        provenance = volume_provenance if isinstance(volume_provenance, dict) else {}
+        completed_ready = indicators.get("futures_completed_bar_volume_ready")
+        log_throttled(
+            self._logger,
+            f"futures_volume_evidence_route:{active_future}",
+            (
+                "FUTURES_VOLUME_EVIDENCE_ROUTED symbol=%s ready=%s "
+                "completed_ratio=%s quote_counter_ratio=%s source=%s reason=%s"
+            ),
+            active_future,
+            completed_ready,
+            indicators.get("futures_completed_bar_volume_ratio"),
+            indicators.get("futures_volume_ratio"),
+            provenance.get("source"),
+            provenance.get("reason", "unavailable"),
+            interval_sec=60.0,
+            extra={
+                "event": "FUTURES_VOLUME_EVIDENCE_ROUTED",
+                "symbol": active_future,
+                "volume_evidence_ready": completed_ready,
+            },
+        )
+
         # Spot index has an LTP, but it has no exchange-traded volume.
         # Never relabel futures LTP, quote average price or a fixed-basis
         # adjustment as an index VWAP. Futures VWAP has its own domain.
