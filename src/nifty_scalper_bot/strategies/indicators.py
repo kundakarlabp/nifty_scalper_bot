@@ -1,8 +1,12 @@
 """Utility classes for calculating technical indicators.
 
-This module provides a :class:`PriceHistory` container for efficiently storing
-OHLCV (open, high, low, close, volume) data and an :class:`IndicatorEngine`
-that calculates common technical indicators from the stored price history.
+Responsibility: store canonical symbol-scoped OHLCV history in PriceHistory and
+calculate indicator snapshots through IndicatorEngine. The named EMA9/EMA21
+contract is owned here rather than duplicated in strategy or regime callers.
+
+Safety: missing or insufficient underlying bar history must never be turned
+into fabricated indicator evidence; live broker execution and risk guards live
+outside this module.
 """
 
 from __future__ import annotations
