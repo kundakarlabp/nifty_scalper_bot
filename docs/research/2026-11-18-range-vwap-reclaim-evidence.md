@@ -251,3 +251,27 @@ after broker-state and deployment safety validation.
   backtest as a prerequisite. Performance is unknown; all fills, fees, stop
   slippage, adverse excursions and session subgroup outcomes must be audited
   retrospectively before increasing exposure.
+
+## 19 November: stop-fill and broker-lifecycle correction
+
+- The option stop **trigger** is a bid-price threshold. Estimated adverse
+  liquidation after trigger is a separate, lower price, allowing both 25-bps
+  slippage stress and one additional observed spread. Both admission and the
+  final one-lot runner check price the stop loss at this adverse-fill scenario;
+  the protective trigger is **not** a guaranteed fill. Existing broker
+  exit ownership, stop order types and time-stop remain unchanged.
+- RangeVWAP now uses the existing `StrategyManager.notify_entry_accepted`
+  and `notify_entry_rejected` callbacks. Only the runner's explicitly proven
+  `no_affordable_execution_candidate` *before any broker attempt* releases
+  a generated setup. Unknown broker results or accepted orders stay consumed.
+  The existing runner cooldown and order deduplication remain authoritative.
+- The in-process research funnel distinguishes **modeled** cost-eligible
+  candidates, pre-broker capacity rejections and accepted orders. An accepted
+  order is not a proven fill or realized return; the existing persisted trade
+  journal and broker reconciliation remain the authoritative sources for
+  those events. Research counts are not durable across process restarts.
+- These are correctness and attribution fixes, not newly optimized entry
+  thresholds or an observed positive option expectancy. Session-restart
+  history recovery, historical option bid/ask calibration, contract-rotation
+  replay, alternate exit policies and caching require distinct verified
+  source data or benchmarks before being promoted into live decisions.
