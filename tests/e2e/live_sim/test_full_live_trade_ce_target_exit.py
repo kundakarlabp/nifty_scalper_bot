@@ -48,8 +48,7 @@ def test_full_live_trade_ce_target_exit(live_sim_system):
         ]
     )
     assert (
-        events.last("BRACKET_ACTIVE").sequence
-        < events.last("EXIT_COMPLETE").sequence
+        events.last("BRACKET_ACTIVE").sequence < events.last("EXIT_COMPLETE").sequence
     )
     assert events.last("CANDIDATE_EXECUTION_READINESS").payload["executable"]
     events.assert_absent("RISK_REJECTED")
