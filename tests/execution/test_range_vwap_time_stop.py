@@ -128,3 +128,42 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     assert manager._evaluate_exit_fast(bracket, 105.0)["type"] == "FINAL_TP"
     current[0] = 25251.0
     assert manager._evaluate_exit_fast(bracket, 105.0)["type"] == "SL"
+
+
+def test_futures_exit_accepts_existing_datahub_facade_not_fake_mdm_methods() -> None:
+    """Production DataHub exposes get_active_futures_symbol, not the MDM alias."""
+    manager = object.__new__(BracketManager)
+    bracket = _bracket(setup="session_vwap_reentry_live", held_seconds=30, progress=0.0)
+    bracket.trade_provenance.update(
+        range_futures_contract="NFO:NIFTY26NOVFUT",
+        range_futures_side="CE",
+        range_futures_target=25250.0,
+        range_futures_invalidation=25230.0,
+    )
+    active = ["NFO:NIFTY26NOVFUT"]
+    fresh = [True]
+    current = [25251.0]
+    observed = []
+
+    def guarded_cached_ltp(symbol, *, max_age_seconds, require_ws):
+        observed.append((symbol, max_age_seconds, require_ws))
+        return current[0] if fresh[0] else None
+
+    manager._market_data = SimpleNamespace(
+        get_active_futures_symbol=lambda: active[0],
+        get_cached_ltp=guarded_cached_ltp,
+        # No time_since_last_tick; DataHub enforces max age in get_cached_ltp.
+    )
+    target = manager._range_vwap_underlying_exit_action(bracket, 105.0)
+    assert target is not None and target["type"] == "FINAL_TP"
+    assert observed[-1] == ("NFO:NIFTY26NOVFUT", 2.0, False)
+
+    current[0] = 25229.0
+    stop = manager._range_vwap_underlying_exit_action(bracket, 105.0)
+    assert stop is not None and stop["type"] == "SL"
+
+    fresh[0] = False
+    assert manager._range_vwap_underlying_exit_action(bracket, 105.0) is None
+    fresh[0] = True
+    active[0] = "NFO:NIFTY26DECFUT"
+    assert manager._range_vwap_underlying_exit_action(bracket, 105.0) is None

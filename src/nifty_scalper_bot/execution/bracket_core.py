@@ -3727,11 +3727,27 @@ class BracketManager:
         ):
             return None
         source = self._market_data
-        active = getattr(source, "get_active_nifty_future_symbol_cached", None)
+        # DataHub is the runtime facade; its existing cached-only resolver
+        # is named get_active_futures_symbol. Keep direct-MDM compatibility.
+        active = getattr(source, "get_active_futures_symbol", None)
+        if not callable(active):
+            active = getattr(source, "get_active_nifty_future_symbol_cached", None)
+        if not callable(active):
+            active = getattr(
+                getattr(source, "_mdm", None),
+                "get_active_nifty_future_symbol_cached",
+                None,
+            )
         cached_ltp = getattr(source, "get_cached_ltp", None)
-        age_getter = getattr(source, "time_since_last_tick", None)
-        if not all(callable(method) for method in (active, cached_ltp, age_getter)):
+        if not callable(active) or not callable(cached_ltp):
             return None
+        # This independent age signal is optional; the canonical cached_ltp
+        # max_age_seconds check below is mandatory even when it is absent.
+        age_getter = getattr(source, "time_since_last_tick", None)
+        if not callable(age_getter):
+            age_getter = getattr(
+                getattr(source, "_mdm", None), "time_since_last_tick", None
+            )
         symbol = str(proof.get("range_futures_contract") or "")
         side = str(proof.get("range_futures_side") or "").upper()
         if not symbol or side not in {"CE", "PE"}:
@@ -3741,9 +3757,10 @@ class BracketManager:
                 return None
             target = float(proof["range_futures_target"])
             invalidation = float(proof["range_futures_invalidation"])
-            age = float(age_getter(symbol))
-            if not math.isfinite(age) or not 0 <= age <= 2.0:
-                return None
+            if callable(age_getter):
+                age = float(age_getter(symbol))
+                if not math.isfinite(age) or not 0 <= age <= 2.0:
+                    return None
             future_price = cached_ltp(
                 symbol, max_age_seconds=2.0, require_ws=False
             )
