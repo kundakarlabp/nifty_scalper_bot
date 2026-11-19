@@ -7,6 +7,10 @@ Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
 - Propagates selected option/futures context to strategy code.
 - Must not select contracts or call broker instruments.
+- can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
+  actual reversal admission remains owned by the verified range vote contract.
+- _derive_context_direction applies an ATR-scaled floor to EMA spreads and
+  percentage-normalized VWAP slopes; material conflicts still fail closed.
 
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
@@ -43,6 +47,7 @@ from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     canonical_strategy_role,
     normalize_strategy_name,
+    range_vwap_live_enabled,
     strategy_regime_eligible,
 )
 from nifty_scalper_bot.core.adaptive_calibration import (
@@ -2527,6 +2532,23 @@ class StrategyManager(_BaseStrategyManager):
         )
         return stable
 
+    def can_evaluate_verified_reversal(self) -> bool:
+        """Allow evaluating an enabled structural range reversal, not approving it.
+
+        The combiner must still attest completed futures structure, option flow,
+        executable economics and the absolute risk ceiling before any order.
+        Ordinary SMC/VWAP/ORB entries retain their strict direction contract.
+        """
+        if not range_vwap_live_enabled():
+            return False
+        disabled = getattr(self, "_disabled_strategies", set()) or set()
+        return any(
+            str(getattr(strategy, "name", "") or "") not in disabled
+            and normalize_strategy_name(getattr(strategy, "name", ""))
+            == "range_vwap_reclaim"
+            for strategy in (getattr(self, "_strategies", ()) or ())
+        )
+
     def _derive_context_direction(
         self, indicators: t.Mapping[str, t.Any], *, role: str
     ) -> tuple[str | None, float, list[str]]:
@@ -2621,6 +2643,8 @@ class StrategyManager(_BaseStrategyManager):
             down_reason="ltp_below_open",
             bucket=location_votes,
         )
+        # EMA crossovers within the same ATR-scaled noise floor are neutral,
+        # not reliable opposing votes against a larger price displacement.
         _vote_from_pair(
             ema_fast,
             ema_slow,
@@ -2628,8 +2652,17 @@ class StrategyManager(_BaseStrategyManager):
             down_reason="ema_fast_below_slow",
             bucket=trend_votes,
         )
+        # get_session_vwap_slope returns percentage points, not index points.
+        # Convert the ATR noise floor into percentage space before comparing.
+        vwap_slope_noise_pct = (
+            100.0 * noise_points / abs(close)
+            if close is not None and close > 0 and noise_points > 0
+            else 0.0
+        )
         if vwap_slope is not None:
-            if vwap_slope > 0:
+            if vwap_slope_noise_pct > 0 and abs(vwap_slope) <= vwap_slope_noise_pct:
+                reasons.append("vwap_slope_inside_atr_noise_floor")
+            elif vwap_slope > 0:
                 trend_votes.append("CE")
                 reasons.append("vwap_slope_positive")
             elif vwap_slope < 0:

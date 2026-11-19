@@ -16453,6 +16453,16 @@ class StrategyRunner:
                             .upper()
                             == "LIVE"
                         )
+                        reversal_capability = getattr(
+                            self._strategy_manager,
+                            "can_evaluate_verified_reversal",
+                            None,
+                        )
+                        reversal_probe_enabled = bool(
+                            live_mode
+                            and callable(reversal_capability)
+                            and reversal_capability()
+                        )
                         if live_mode and (
                             resolved_bias not in {"CE", "PE"} or not context_fresh
                         ):
@@ -16483,7 +16493,12 @@ class StrategyRunner:
                                 self._last_direction_context = runtime_indicators[
                                     symbol
                                 ]
-                            else:
+                            elif not (
+                                reversal_probe_enabled
+                                and spot_fresh
+                                and fut_fresh
+                                and context_fresh
+                            ):
                                 # Fresh price updates do not imply a conclusive
                                 # structural direction. Report the actual cause
                                 # without weakening the required direction gate.
@@ -16571,6 +16586,22 @@ class StrategyRunner:
                                     trace_id=trace_id,
                                 )
                                 return
+                        if (
+                            reversal_probe_enabled
+                            and spot_fresh
+                            and fut_fresh
+                            and context_fresh
+                            and resolved_bias not in {"CE", "PE"}
+                        ):
+                            log_throttled(
+                                self._logger,
+                                f"reversal_eval_probe:{symbol}",
+                                "REVERSAL_EVAL_PROBE symbol=%s reason=direction_unresolved "
+                                "scope=verified_range_vwap_only orders_not_preapproved=True",
+                                symbol,
+                                interval_sec=30.0,
+                                level=logging.INFO,
+                            )
                         if getattr(self, "_orchestrator", None) is not None and hasattr(
                             self._orchestrator, "reconcile_direction_bias"
                         ):
@@ -16593,7 +16624,12 @@ class StrategyRunner:
                             opposite = (
                                 resolved_bias == "PE" and upper_sym.endswith("CE")
                             ) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
-                            if opposite:
+                            if opposite and not (
+                                reversal_probe_enabled
+                                and spot_fresh
+                                and fut_fresh
+                                and context_fresh
+                            ):
                                 self._logger.debug(
                                     "TRIGGER_EVAL_SKIPPED symbol=%s reason=opposite_side_trigger_suppressed underlying_bias=%s confidence=%.2f",
                                     symbol,
@@ -16620,6 +16656,63 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        # A probe is only permission to evaluate. Never pass an
+                        # opposite/unknown-direction order unless the combiner
+                        # attested the dedicated futures/option-flow reversal.
+                        option_side = (
+                            "CE" if symbol.upper().endswith("CE") else
+                            "PE" if symbol.upper().endswith("PE") else None
+                        )
+                        if (
+                            signal is not None
+                            and reversal_probe_enabled
+                            and option_side is not None
+                            and (
+                                resolved_bias not in {"CE", "PE"}
+                                or resolved_bias != option_side
+                            )
+                        ):
+                            direction_contract = (
+                                (getattr(signal, "metadata", {}) or {}).get(
+                                    "direction_contract"
+                                ) or {}
+                            )
+                            if direction_contract.get("reversal_exemption") is not True:
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="reversal_contract_missing_after_probe",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                                signal = None
+                        if signal is None and symbol_role == "tradable_option":
+                            decision_getter = getattr(
+                                self._strategy_manager,
+                                "get_last_no_signal_decision",
+                                None,
+                            )
+                            decision = (
+                                decision_getter(symbol)
+                                if callable(decision_getter) else None
+                            )
+                            if decision is not None:
+                                log_throttled(
+                                    self._logger,
+                                    f"strategy_blocker_trace:{symbol}",
+                                    "STRATEGY_BLOCKER_TRACE symbol=%s stage=%s "
+                                    "reason=%s final_block=%s strategy_reasons=%s "
+                                    "no_vote_reasons=%s reversal_probe=%s",
+                                    symbol,
+                                    getattr(decision, "blocked_at", None),
+                                    getattr(decision, "reason", None),
+                                    getattr(decision, "final_block_reason", None),
+                                    getattr(decision, "strategy_reasons", None),
+                                    getattr(decision, "no_vote_reason_counts", None),
+                                    reversal_probe_enabled,
+                                    interval_sec=30.0,
+                                    level=logging.INFO,
+                                )
                         # Count successful StrategyManager calls separately from
                         # entry-worker completions (which can return at a pre-gate).
                         if (

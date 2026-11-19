@@ -362,3 +362,84 @@ def test_nonfinite_context_input_cannot_supply_direction() -> None:
         role="spot_context",
     )
     assert side is None and score == 0.0
+
+
+def test_atr_noise_does_not_create_a_false_ema_trend_conflict() -> None:
+    manager = _direction_manager()
+    direction, confidence, reasons = manager._derive_context_direction(
+        {
+            "close": 101.0,
+            "vwap": 100.0,
+            "ema_50": 100.0,
+            "ema_fast": 100.02,
+            "ema_slow": 100.0,
+            "vwap_slope": 0.2,
+            "atr": 2.0,
+        },
+        role="futures_context",
+    )
+    assert direction == "CE"
+    assert confidence > 0
+    assert "ema_fast_above_slow" not in reasons
+    assert "direction_price_inside_atr_noise_floor" in reasons
+
+
+def test_atr_normalized_vwap_slope_ignores_micro_conflict() -> None:
+    manager = _direction_manager()
+    direction, _confidence, reasons = manager._derive_context_direction(
+        {
+            "close": 101.0,
+            "vwap": 100.0,
+            "ema_fast": 100.8,
+            "ema_slow": 100.0,
+            "vwap_slope": -0.001,
+            "atr": 2.0,
+        },
+        role="futures_context",
+    )
+    assert direction == "CE"
+    assert "vwap_slope_negative" not in reasons
+    assert "vwap_slope_inside_atr_noise_floor" in reasons
+
+
+def test_material_atr_scaled_trend_conflict_remains_unresolved() -> None:
+    manager = _direction_manager()
+    direction, confidence, reasons = manager._derive_context_direction(
+        {
+            "close": 101.0,
+            "vwap": 100.0,
+            "ema_fast": 99.0,
+            "ema_slow": 100.0,
+            "vwap_slope": 0.25,
+            "atr": 2.0,
+        },
+        role="futures_context",
+    )
+    assert direction is None
+    assert confidence == 0.0
+    assert "trend_structure_conflict" in reasons
+
+
+def test_verified_reversal_probe_requires_explicit_live_pilot(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    manager = _direction_manager()
+    manager._strategies = [SimpleNamespace(name="RangeVWAPReclaim")]
+    manager._disabled_strategies = set()
+
+    for key in ("PAPER__ENABLED", "PAPER_MODE", "SHADOW_MODE"):
+        monkeypatch.setenv(key, "false")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "false")
+    assert not manager.can_evaluate_verified_reversal()
+
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    assert manager.can_evaluate_verified_reversal()
+
+    manager._disabled_strategies.add("RangeVWAPReclaim")
+    assert not manager.can_evaluate_verified_reversal()
+
+    manager._disabled_strategies.clear()
+    monkeypatch.setenv("PAPER_MODE", "true")
+    assert not manager.can_evaluate_verified_reversal()

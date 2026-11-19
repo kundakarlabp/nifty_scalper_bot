@@ -142,6 +142,26 @@ def test_only_verified_range_reversal_may_use_neutral_context(monkeypatch) -> No
     assert approved.metadata["direction_contract"]["underlying_state"] == "NEUTRAL"
     assert approved.metadata["direction_contract"]["reversal_exemption"] is True
 
+    # An explicitly verified futures-led range reversal may also oppose
+    # confirmed older trend direction; a normal trigger never inherits it.
+    countertrend = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(signal, evidence)],
+        indicators={**_live_indicators("PE"), "regime": "RANGE"},
+    )
+    assert countertrend is not None
+    assert countertrend.metadata["direction_contract"]["reversal_exemption"] is True
+    signal.metadata["range_option_flow_verified"] = False
+    evidence.metadata["range_option_flow_verified"] = False
+    unverified = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(signal, evidence)],
+        indicators={**_live_indicators("PE"), "regime": "RANGE"},
+    )
+    assert unverified is None
+    signal.metadata["range_option_flow_verified"] = True
+    evidence.metadata["range_option_flow_verified"] = True
+
     for changed in (
         {"range_neutral_context_verified": False},
         {"regime": "TREND"},
