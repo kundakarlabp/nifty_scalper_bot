@@ -2491,9 +2491,18 @@ class DataHub:
             )
             if iv >= 5:
                 return {}
-            if any(not isfinite(float(model[key])) for key in ("delta", "theta", "vega")):
+            if any(
+                not isfinite(float(model[key])) for key in ("delta", "theta", "vega")
+            ):
                 return {}
-        except (AttributeError, KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            ZeroDivisionError,
+        ):
             return {}
         return {
             "days_to_expiry": remaining_days,
