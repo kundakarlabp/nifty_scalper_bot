@@ -2,6 +2,8 @@
 
 Responsibilities: Normalize strategy identity; classify RangeVWAPReclaim as a
 trigger only under the explicit LIVE pilot and otherwise as research context.
+strategy_regime_eligible maps structural entry triggers to the canonical market
+regime without replacing strategy-owned setup checks or OrderFlow context.
 Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
