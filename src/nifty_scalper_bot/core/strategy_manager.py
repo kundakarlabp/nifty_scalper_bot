@@ -3735,6 +3735,22 @@ class StrategyManager(_BaseStrategyManager):
                                     self, "_range_history_recovery_rows", []
                                 )
                             )
+                if strategy_name == "RangeVWAPReclaim" and symbol_is_option:
+                    # Reuse the existing DataHub/instrument SSOT only for this
+                    # strategy. The fresh, same-evaluation spot and option bid/ask
+                    # replace unproven cached Greeks; no extra REST quote pull.
+                    model_getter = getattr(
+                        self._data_hub, "get_option_model_snapshot", None
+                    )
+                    if callable(model_getter):
+                        model = model_getter(
+                            symbol,
+                            spot_price=indicators.get("range_spot_ltp"),
+                            bid=indicators.get("bid"),
+                            ask=indicators.get("ask"),
+                        )
+                        if isinstance(model, t.Mapping) and model:
+                            indicators.update(model)
                 if strategy_name == "SMC":
                     now = time.monotonic()
                     last_diag_map = getattr(self, "_smc_history_diag_last_emitted", {})
