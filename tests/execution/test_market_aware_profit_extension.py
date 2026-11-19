@@ -1002,7 +1002,9 @@ def test_vwap_reversion_keeps_original_final_target():
     bracket = _bracket()
     bracket.trade_provenance["strategy_name"] = "VWAPPro"
     before = bracket.tp_trigger_price
-    action = extend_final_target_if_supported(manager, bracket, 120.0, _final_tp_action())
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
     assert action is not None and action["type"] == "FINAL_TP"
     assert bracket.tp_trigger_price == before
 
