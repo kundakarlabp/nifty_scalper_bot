@@ -138,29 +138,42 @@ def test_running_flag_is_cleared_even_when_the_scan_raises() -> None:
     assert calls == [1]
 
 
-def test_skipped_tick_count_is_reported_for_slow_scans(caplog) -> None:
-    """Operators need to see how many ticks a slow scan displaced."""
+def test_skipped_tick_count_is_reported_for_slow_scans(monkeypatch) -> None:
+    """Wait for the async log emission, not the earlier running-flag reset."""
     import logging
 
+    import nifty_scalper_bot.strategies.runner as runner_module
+
     r = _runner(interval=0.0)
+    started = threading.Event()
+    reported = threading.Event()
+    events: list[dict[str, object]] = []
+
+    def _record(
+        _logger, _key, _message, *, extra=None, level=None, **_kwargs
+    ) -> None:
+        if extra and extra.get("event") == "HEALTH_WATCHDOG_SLOW":
+            assert level == logging.WARNING
+            events.append(dict(extra))
+            reported.set()
+
+    monkeypatch.setattr(runner_module, "log_throttled", _record)
 
     def _slow() -> None:
+        started.set()
         time.sleep(0.12)
 
     r._health_watchdog = _slow
-    with caplog.at_level(logging.WARNING):
-        r._run_health_watchdog_on_cadence()
-        deadline = time.time() + 2.0
-        while r._health_watchdog_running and time.time() < deadline:
-            time.sleep(0.01)
+    r._run_health_watchdog_on_cadence()
+    assert started.wait(timeout=2.0)
 
-    recs = [
-        rec for rec in caplog.records
-        if getattr(rec, "event", None) == "HEALTH_WATCHDOG_SLOW"
-    ]
-    assert recs, "slow scan was not reported"
-    assert recs[-1].duration_ms >= 100.0
-    assert hasattr(recs[-1], "ticks_skipped")
+    # The second invocation must be counted as skipped while the first
+    # health scan is still running.
+    r._run_health_watchdog_on_cadence()
+    assert reported.wait(timeout=2.0), "slow scan emission was not observed"
+    assert len(events) == 1
+    assert events[0]["duration_ms"] >= 100.0
+    assert events[0]["ticks_skipped"] >= 1
 
 
 def test_slow_scan_does_not_block_tick_caller() -> None:
