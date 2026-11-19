@@ -37,11 +37,12 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
-from nifty_scalper_bot.config.regime_ontology import normalize_regime
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     canonical_strategy_role,
     normalize_strategy_name,
+    strategy_regime_eligible,
 )
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
@@ -2379,6 +2380,7 @@ class StrategyManager(_BaseStrategyManager):
             "direction_bias": derived_direction,
             "underlying_direction_bias": derived_direction,
             "underlying_direction_confidence": derived_confidence,
+            "direction_score_kind": "evidence_corroboration_not_probability",
             "direction_context_reasons": derived_reasons,
             "context_timestamp_epoch": time.time(),
             "regime": indicators.get("regime") or indicators.get("market_regime"),
@@ -2647,15 +2649,20 @@ class StrategyManager(_BaseStrategyManager):
             return None, 0.0, [*reasons, "direction_family_conflict"]
 
         side = trend_side
-        # Confidence is provenance telemetry only. Admission depends on the
-        # explicit structural agreement above, never on a numeric threshold.
-        confidence = 0.80
+        # An ordinal corroboration score, not a calibrated win probability.
+        # Both location and trend families must already agree.
+        evidence_score = min(
+            0.95,
+            0.65
+            + 0.04 * max(0, len(location_votes) - 1)
+            + 0.04 * max(0, len(trend_votes) - 1),
+        )
         if tick_side == side:
-            confidence = min(0.90, confidence + 0.05)
+            evidence_score = min(0.95, evidence_score + 0.03)
         elif tick_side is not None:
-            confidence = max(0.50, confidence - 0.05)
+            evidence_score = max(0.50, evidence_score - 0.03)
             reasons.append("tick_direction_disagrees")
-        return side, confidence, reasons
+        return side, round(evidence_score, 2), reasons
 
     @staticmethod
     def _context_direction_valid(ctx: t.Mapping[str, t.Any]) -> bool:
@@ -3498,6 +3505,7 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["direction_bias"] = observation.bias
                 indicators["underlying_direction_bias"] = observation.bias
                 indicators["underlying_direction_confidence"] = observation.confidence
+                indicators["direction_score_kind"] = "evidence_corroboration_not_probability"
                 indicators["context_age_seconds"] = observation.age_seconds
                 indicators["context_fresh"] = True
                 indicators["direction_context_source"] = observation.source
@@ -3526,6 +3534,37 @@ class StrategyManager(_BaseStrategyManager):
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
+            elif (
+                normalize_regime(indicators.get("regime")) is MarketRegime.RANGE
+                and spot_fresh
+                and fut_fresh
+                and not spot_direction_valid
+                and not fut_direction_valid
+                and all(
+                    ctx.get("close") is not None
+                    and ctx.get("vwap") is not None
+                    and ctx.get("ema_fast") is not None
+                    and ctx.get("ema_slow") is not None
+                    and not any(
+                        "conflict" in str(reason)
+                        for reason in (ctx.get("direction_context_reasons") or [])
+                    )
+                    for ctx in (spot_ctx, fut_ctx)
+                )
+                and spot_tick_age_s is not None
+                and fut_tick_age_s is not None
+                and 0 <= max(spot_tick_age_s, fut_tick_age_s) <= max_context_age
+            ):
+                # A proven fresh neutral range is distinct from transition.
+                # It carries no synthetic CE/PE directional authority.
+                indicators["underlying_direction_state"] = UnderlyingDirectionState.NEUTRAL.value
+                indicators["range_neutral_context_verified"] = True
+                indicators["context_fresh"] = True
+                indicators["context_age_seconds"] = max(spot_tick_age_s, fut_tick_age_s)
+                indicators["direction_transition"] = False
+                indicators["direction_resolution_reason"] = "fresh_range_neutral"
+                indicators["direction_context_source"] = "spot_futures_neutral"
+                context_available = True
             else:
                 indicators.pop("direction_bias", None)
                 indicators.pop("underlying_direction_bias", None)
@@ -3654,6 +3693,19 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 continue
             strategy_name = str(getattr(strategy, "name", "") or "")
+            if symbol_is_option and (
+                not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                or (
+                    indicators.get("underlying_direction_state")
+                    == UnderlyingDirectionState.NEUTRAL.value
+                    and strategy_name in {"SMC", "VWAPPro", "ORBPro"}
+                )
+            ):
+                reason = "strategy_regime_or_direction_ineligible"
+                strategy_reasons[strategy_name] = reason
+                no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
+                self._record_strategy_no_vote_observability(strategy_name, reason)
+                continue
             if strategy_name in {"VWAPPro", "OrderFlow"} and not symbol_is_option:
                 strategy_reasons[strategy_name] = "context_symbol_skipped_for_option_strategy"
                 no_vote_reason_counts["context_symbol_skipped_for_option_strategy"] = (
@@ -4491,7 +4543,13 @@ class StrategyManager(_BaseStrategyManager):
         direction_state = str(
             indicator_map.get("underlying_direction_state") or ""
         ).upper()
-        if direction not in {"CE", "PE"}:
+        neutral_range_reversal = bool(
+            range_reversal_verified
+            and direction_state == UnderlyingDirectionState.NEUTRAL.value
+            and indicator_map.get("range_neutral_context_verified") is True
+            and normalize_regime(indicator_map.get("regime")) is MarketRegime.RANGE
+        )
+        if direction not in {"CE", "PE"} and not neutral_range_reversal:
             _record_no_signal(
                 "context_direction_unavailable",
                 "underlying_direction_unavailable",
