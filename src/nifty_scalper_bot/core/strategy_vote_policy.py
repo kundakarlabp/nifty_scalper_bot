@@ -141,8 +141,12 @@ def verified_range_vwap_final_order_risk(
         expected_stop = float(model["stop_price_model"])
         expected_target = float(model["vwap_limited_target_price_model"])
         values = (
-            entry_price, ask_price, stop_price, target_price,
-            expected_stop, expected_target,
+            entry_price,
+            ask_price,
+            stop_price,
+            target_price,
+            expected_stop,
+            expected_target,
         )
         prices_valid = all(isfinite(float(value)) for value in values)
     except (KeyError, TypeError, ValueError, OverflowError):
