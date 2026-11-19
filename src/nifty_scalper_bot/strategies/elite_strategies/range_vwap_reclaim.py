@@ -826,7 +826,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if abs(last - center) > 0.25 * atr:
             return
         previous = self._consumed_excursions
-        retained = {key for key in previous if key[0] != future}
+        # An uncertain, still-pending broker outcome must not be rearmed just
+        # because underlying futures touched VWAP in the meantime.
+        unresolved = set(self._pending_excursions.values())
+        retained = {
+            key for key in previous if key[0] != future or key in unresolved
+        }
         if retained == previous:
             return
         self._consumed_excursions = retained
