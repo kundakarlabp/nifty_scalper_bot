@@ -13,8 +13,8 @@ tick. The canonical BracketManager alone modifies exchange stop orders and
 owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
 Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
 quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
-ratchets require verified broker stop trigger and position-size coverage.
-Virtual desired stops never imply an acknowledged stop or guaranteed fill.
+ratchets require a recorded broker stop trigger and position-size coverage.
+A recorded trigger is NOT an orderbook-confirmed stop or guaranteed fill.
 No broker calls or competing exchange-stop owner are introduced here.
 Evidence comes from the already-wired IndicatorEngine and market-data cache.
 """
@@ -1456,11 +1456,31 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
-        # The broker-acknowledged trigger is independently tracked by the
-        # canonical owner; never report the virtual ratchet as an actual fill.
-        acknowledged = _positive(
+        # A successful modify_order response updates the local broker record;
+        # only an orderbook-reconciled trail revision proves exchange geometry.
+        # A virtual ratchet, recorded broker trigger, and confirmed broker stop
+        # must NEVER be conflated with an actual exit fill.
+        recorded = _positive(
             getattr(bracket, "exchange_stop_trigger_price", None)
         )
+        confirmed_stop = None
+        config_history = (
+            getattr(bracket, "trailing_config", {}) or {}
+        ).get("trail_history", [])
+        if recorded is not None and isinstance(config_history, list):
+            for record in reversed(config_history):
+                if not isinstance(record, Mapping):
+                    continue
+                if not record.get("broker_confirmed"):
+                    continue
+                if str(record.get("exchange_order_id") or "") != str(
+                    getattr(bracket, "exchange_stop_order_id", None) or ""
+                ):
+                    continue
+                level = _positive(record.get("new_sl"))
+                if level is not None and abs(level - recorded) <= _TICK_SIZE / 2:
+                    confirmed_stop = recorded
+                    break
         provenance["adaptive_profit_lock"] = {
             "strategy_family": _exit_strategy_family(bracket),
             "state": state,
@@ -1473,14 +1493,19 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             "peak_age_sec": round(peak_age, 2),
             "stalled": stalled,
             "virtual_stop": round(candidate, 2),
-            "broker_acknowledged_stop": acknowledged,
+            "broker_recorded_stop": recorded,
+            "broker_orderbook_confirmed_stop": confirmed_stop,
             "modeled_cost_per_unit": round(cost, 4),
             "estimated_net_at_virtual_trigger_points": round(
                 candidate - entry - cost - slippage, 4
             ),
-            "estimated_net_at_acknowledged_trigger_points": (
-                round(acknowledged - entry - cost - slippage, 4)
-                if acknowledged is not None else None
+            "estimated_net_at_recorded_trigger_points": (
+                round(recorded - entry - cost - slippage, 4)
+                if recorded is not None else None
+            ),
+            "estimated_net_at_confirmed_trigger_points": (
+                round(confirmed_stop - entry - cost - slippage, 4)
+                if confirmed_stop is not None else None
             ),
         }
     saver = getattr(manager, "save_state", None)
