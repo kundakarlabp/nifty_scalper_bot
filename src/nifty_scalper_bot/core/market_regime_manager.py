@@ -670,7 +670,10 @@ class MarketRegimeManager:
                             ts = ts.replace(tzinfo=now_ist.tzinfo)
                         ts = ts.astimezone(now_ist.tzinfo)
                         age = (now_ist - ts).total_seconds()
-                        value = float(bar.get("close"))
+                        close_raw = bar.get("close")
+                        if close_raw is None:
+                            continue
+                        value = float(close_raw)
                         if (
                             ts.date() == now_ist.date()
                             and 0 <= age <= 1200
