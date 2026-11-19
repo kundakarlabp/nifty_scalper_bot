@@ -125,12 +125,16 @@ def strategy_regime_eligible(name: str | None, regime: object) -> bool:
         "range_vwap_reclaim": {MarketRegime.RANGE},
         "vwap_pro": {MarketRegime.TREND},
         "smc_lite": {
-            MarketRegime.TREND, MarketRegime.RANGE,
-            MarketRegime.VOLATILE, MarketRegime.EVENT,
+            MarketRegime.TREND,
+            MarketRegime.RANGE,
+            MarketRegime.VOLATILE,
+            MarketRegime.EVENT,
         },
         "orb_pro": {
-            MarketRegime.TREND, MarketRegime.RANGE,
-            MarketRegime.VOLATILE, MarketRegime.EVENT,
+            MarketRegime.TREND,
+            MarketRegime.RANGE,
+            MarketRegime.VOLATILE,
+            MarketRegime.EVENT,
         },
     }
     return state in eligible[key] if key in eligible else True
