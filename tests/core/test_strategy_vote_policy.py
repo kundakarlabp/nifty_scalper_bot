@@ -322,3 +322,16 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
     unproven = {**base, "option_cost_risk": {**base["option_cost_risk"]}}
     del unproven["option_cost_risk"]["modeled_stressed_stop_fill_price"]
     assert not verified_range_vwap_final_order_risk(unproven, **args)
+
+
+def test_regime_dispatch_preserves_structural_strategy_ownership() -> None:
+    from nifty_scalper_bot.config.strategy_taxonomy import strategy_regime_eligible
+
+    assert strategy_regime_eligible("RangeVWAPReclaim", "RANGE")
+    assert not strategy_regime_eligible("RangeVWAPReclaim", "TREND")
+    assert strategy_regime_eligible("VWAPPro", "TREND")
+    assert not strategy_regime_eligible("VWAPPro", "RANGE")
+    assert strategy_regime_eligible("SMC", "RANGE")
+    assert strategy_regime_eligible("ORBPro", "RANGE")
+    assert not strategy_regime_eligible("SMC", "UNKNOWN")
+    assert strategy_regime_eligible("OrderFlow", "RANGE")
