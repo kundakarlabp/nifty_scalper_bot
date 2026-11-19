@@ -1,4 +1,12 @@
-"""Market regime detection and fan-out utilities for trading components."""
+"""Market regime detection and fan-out utilities for trading components.
+
+Responsibilities: classify trend, range, high-volatility, event and low-activity
+conditions from corroborated market inputs; publish timestamped snapshots.
+The lightweight runner classifier is diagnostic only, not a live entry authority.
+
+Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
+mean reversion, and caller-owned entry/risk guards remain authoritative.
+"""
 
 from __future__ import annotations
 
