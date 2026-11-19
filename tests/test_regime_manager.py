@@ -211,3 +211,71 @@ async def test_stale_or_unfinished_history_never_proves_range() -> None:
     await manager.refresh_from_indicators()
     assert manager.get_raw_snapshot().regime == "unknown"
     assert manager.get_raw_snapshot().reason == "range_evidence_unverified"
+
+
+def test_unknown_raw_observation_retains_stable_trend_but_filter_denies() -> None:
+    """Retained strategy regime and the latest contradictory evidence are distinct.
+
+    A new UNKNOWN reading cannot manufacture RANGE or erase hysteresis,
+    but the manager must still expose the raw fail-closed gate result.
+    """
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.82,
+            reason="adx_trending",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="unknown",
+            confidence=0.0,
+            reason="range_evidence_unverified",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_raw_snapshot().regime == "unknown"
+    assert manager.can_trade(record_decision=False) is False
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["current"]["regime"] == "trend"
+    assert diagnostics["raw"]["regime"] == "unknown"
+    assert diagnostics["raw"]["reason"] == "range_evidence_unverified"
+
+
+def test_raw_low_activity_does_not_silently_replace_stable_trend() -> None:
+    """The accepted trend remains visible until transition confirmation."""
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(), transition_confirmations=3
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="initial",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="low_activity",
+            confidence=0.65,
+            reason="low_volume_flat_trend_confirmed",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["current"]["regime"] == "trend"
+    assert diagnostics["raw"]["regime"] == "low_activity"
+    assert diagnostics["transition"]["pending_count"] == 1
