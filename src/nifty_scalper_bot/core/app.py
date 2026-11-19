@@ -12695,25 +12695,49 @@ async def startup_sequence(ctx: BotContext) -> None:
                         mdm_history_count = len(
                             ctx.market_data_manager.get_ohlc_bars(canonical_sym) or []
                         )
-                    LOGGER.info(
-                        "RUNNER_HISTORY_CONSISTENCY symbol=%s mdm_bars=%d indicator_bars=%d consistent=%s",
+                    # Counts establish readiness, never content consistency.
+                    history_ready = bool(
+                        runner_history_count >= required_bars
+                        and mdm_history_count >= required_bars
+                        and getattr(sync_result, "success", False)
+                    )
+                    parity_reader = getattr(
+                        ctx.strategy_runner, "inspect_recent_canonical_history", None
+                    )
+                    parity_report: dict[str, Any] = {"status": "unavailable"}
+                    if callable(parity_reader):
+                        try:
+                            parity_report = parity_reader(canonical_sym, last_n=5)
+                        except Exception as exc:
+                            parity_report = {
+                                "status": "unavailable",
+                                "reason": type(exc).__name__,
+                            }
+                    parity_status = str(parity_report.get("status") or "unavailable")
+                    history_consistent = history_ready and parity_status == "match"
+                    history_log = (
+                        LOGGER.warning if parity_status == "mismatch" else LOGGER.info
+                    )
+                    history_log(
+                        "RUNNER_HISTORY_CONSISTENCY symbol=%s mdm_bars=%d "
+                        "indicator_bars=%d ready=%s parity=%s consistent=%s "
+                        "first_mismatch=%s",
                         canonical_sym,
                         mdm_history_count,
                         runner_history_count,
-                        bool(
-                            runner_history_count >= required_bars
-                            and mdm_history_count >= required_bars
-                        ),
+                        history_ready,
+                        parity_status,
+                        history_consistent,
+                        parity_report.get("first_mismatch"),
                         extra={
                             "event": "RUNNER_HISTORY_CONSISTENCY",
                             "symbol": canonical_sym,
                             "mdm_bars": mdm_history_count,
                             "indicator_bars": runner_history_count,
-                            # runner_history_count >= required_bars and mdm_history_count >= required_bars
-                            "consistent": bool(
-                                runner_history_count >= required_bars
-                                and mdm_history_count >= required_bars
-                            ),
+                            "ready": history_ready,
+                            "parity_status": parity_status,
+                            "consistent": history_consistent,
+                            "first_mismatch": parity_report.get("first_mismatch"),
                         },
                     )
                     LOGGER.info(
