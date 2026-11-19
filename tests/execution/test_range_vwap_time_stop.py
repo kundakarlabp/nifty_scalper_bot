@@ -134,9 +134,7 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
 def test_futures_exit_accepts_existing_datahub_facade_not_fake_mdm_methods() -> None:
     """Production DataHub exposes get_active_futures_symbol, not the MDM alias."""
     manager = object.__new__(BracketManager)
-    bracket = _bracket(
-        setup="session_vwap_reentry_live", held_seconds=30, progress=0.0
-    )
+    bracket = _bracket(setup="session_vwap_reentry_live", held_seconds=30, progress=0.0)
     bracket.trade_provenance.update(
         range_futures_contract="NFO:NIFTY26NOVFUT",
         range_futures_side="CE",
