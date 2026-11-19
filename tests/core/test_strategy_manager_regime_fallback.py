@@ -328,3 +328,29 @@ def test_smc_does_not_invent_event_timestamp_for_external_structure_flag() -> No
     )
     assert enriched["bos_confirmed"] is True
     assert enriched.get("bos_ts_epoch") is None
+
+
+def test_regime_filter_rejection_is_not_miscounted_as_order_block() -> None:
+    """Adaptive admission remains distinct from the detector's raw filter."""
+    manager = StrategyManager([], None, None)
+    manager._use_regime_adaptive = True
+    manager._record_regime_filter_outcome(allowed=False, symbol_role="tradable_option")
+    counters = manager._observability_counters
+    assert counters["regime_filter_rejections"] == 1
+    assert counters["regime_adaptive_continuations"] == 1
+    assert counters["signals_blocked_by_regime"] == 0
+
+    manager._record_regime_filter_outcome(allowed=False, symbol_role="spot_context")
+    assert counters["regime_filter_rejections"] == 2
+    assert counters["regime_adaptive_continuations"] == 1
+    assert counters["signals_blocked_by_regime"] == 0
+
+    manager._use_regime_adaptive = False
+    manager._record_regime_filter_outcome(allowed=False, symbol_role="tradable_option")
+    assert counters["regime_filter_rejections"] == 3
+    assert counters["regime_adaptive_continuations"] == 1
+    assert counters["signals_blocked_by_regime"] == 1
+
+    manager._record_regime_filter_outcome(allowed=True, symbol_role="tradable_option")
+    assert counters["regime_filter_rejections"] == 3
+    assert counters["signals_blocked_by_regime"] == 1
