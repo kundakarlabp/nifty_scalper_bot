@@ -278,9 +278,7 @@ def assess_range_vwap_reclaim(
     # Descriptive transition diagnostics use ONLY completed futures bars
     # before the reclaim candle. No untested volatility threshold gates LIVE.
     recent_closes = [float(row["close"]) for row in history[-6:]]
-    recent_travel = sum(
-        abs(b - a) for a, b in zip(recent_closes, recent_closes[1:])
-    )
+    recent_travel = sum(abs(b - a) for a, b in zip(recent_closes, recent_closes[1:]))
     recent_efficiency = (
         abs(recent_closes[-1] - recent_closes[0]) / recent_travel
         if recent_travel > 0
@@ -1053,9 +1051,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if lower is None or upper is None:
             self._no_vote("range_frozen_outer_band_missing")
             return None
-        if (side == "CE" and fut_tick <= lower) or (
-            side == "PE" and fut_tick >= upper
-        ):
+        if (side == "CE" and fut_tick <= lower) or (side == "PE" and fut_tick >= upper):
             self._no_vote("range_futures_rebroke_outer_band")
             return None
         if (side == "CE" and fut_tick >= exchange_vwap) or (
@@ -1174,9 +1170,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         original_distance = abs(target - entry)
         quote_distance = abs(target - fut_tick)
         remaining_distance = min(original_distance, quote_distance)
-        stop_distance = max(
-            abs(entry - invalidation), abs(fut_tick - invalidation)
-        )
+        stop_distance = max(abs(entry - invalidation), abs(fut_tick - invalidation))
         budget = assess_option_cost_risk(
             quote,
             config=self._cfg,
@@ -1184,9 +1178,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             futures_target_distance=remaining_distance,
             futures_stop_distance=stop_distance,
         )
-        budget["original_completed_bar_target_points"] = round(
-            original_distance, 4
-        )
+        budget["original_completed_bar_target_points"] = round(original_distance, 4)
         budget["fresh_futures_target_points"] = round(quote_distance, 4)
         budget["target_points_removed_due_to_quote_drift"] = round(
             original_distance - remaining_distance, 4
