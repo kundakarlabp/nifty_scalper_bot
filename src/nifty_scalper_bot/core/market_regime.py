@@ -1244,7 +1244,8 @@ class MarketRegimeDetector:
         if (
             atr is not None
             and atr <= params.atr_range_threshold
-            and (adx_norm is None or adx_norm <= params.adx_chop_threshold)
+            and adx_norm is not None
+            and adx_norm <= params.adx_chop_threshold
         ):
             range_score_value = max(range_score_value, 1.0)
             reasons["range"] = "atr_within_range"
@@ -1273,6 +1274,26 @@ class MarketRegimeDetector:
             "range": max(range_score_value, 0.3),
         }
         regime = max(scored, key=lambda name: scored.get(name, 0.0))
+        # Absolute ATR and quiet volume alone never prove a tradeable range.
+        # Demand low ADX plus independent flat price history or converged EMAs;
+        # an unproven range must not suppress trend-entry strategies.
+        ema_flat = bool(
+            ema_fast is not None
+            and ema_slow is not None
+            and ema_slow != 0
+            and abs((ema_fast - ema_slow) / abs(ema_slow))
+            < params.ema_ratio_trend
+        )
+        range_proven = bool(
+            adx_norm is not None
+            and adx_norm <= params.adx_chop_threshold
+            and (
+                (momentum is not None and momentum < params.price_momentum_range)
+                or ema_flat
+            )
+        )
+        if regime == "range" and not range_proven:
+            return "unknown", 0.0, "range_evidence_unverified"
         reason = reasons.get(regime, "insufficient_features")
 
         base_confidence = {"volatile": 0.62, "trend": 0.6, "range": 0.55}
