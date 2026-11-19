@@ -348,6 +348,10 @@ def test_strategy_cli_with_no_range_trades_does_not_infer_returns(
     calibration = report["range_vwap_execution_calibration"]
     assert calibration["ready_for_research_calibration"] is False
     assert calibration["paired_measured_quote_fill_trades"] == 0
+    transition = report["range_vwap_transition_economics"]
+    assert transition["completed_range_trades"] == 0
+    assert transition["cohorts"] == []
+    assert not transition["live_filter_or_parameter_promotion_allowed"]
     assert report["parameter_change"]["allowed"] is False
 
 
@@ -398,3 +402,56 @@ def test_range_calibration_requires_paired_quotes_and_sessions() -> None:
     incomplete = module.range_vwap_execution_calibration(rows)
     assert incomplete["paired_measured_quote_fill_trades"] == 29
     assert incomplete["ready_for_research_calibration"] is False
+
+
+def test_range_transition_economics_requires_causal_broker_costed_evidence() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    start = datetime(2026, 10, 1, 15, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rows = []
+    for i in range(20):
+        rows.append(
+            {
+                "trade_id": f"risk-{i}",
+                "closed_at": (start + timedelta(days=i)).timestamp(),
+                "strategy": "RangeVWAPReclaim",
+                "gross_pnl": 40.0,
+                "estimated_costs": 20.0,
+                "net_pnl": 20.0,
+                "state": "CLOSED",
+                "ledger_complete": True,
+                "outcome": {
+                    "cost_source": "broker_virtual_contract_note",
+                    "effective_costs": {"total": 20.0},
+                    "range_structure": {
+                        "prior_5m_to_14m_true_range_ratio": 1.25,
+                        "prior_5m_directional_efficiency": 0.3,
+                        "directional_efficiency": 0.2,
+                    },
+                    "option_cost_risk": {
+                        "target_net_reward_after_costs": 150.0,
+                        "worst_stop_loss_including_costs": 600.0,
+                    },
+                },
+            }
+        )
+    report = module.range_vwap_transition_economics(rows)
+    assert report["completed_range_trades"] == 20
+    assert report["trades_with_causal_volatility_and_economic_provenance"] == 20
+    cohort = report["cohorts"][0]
+    assert cohort["preentry_volatility_cohort"] == "recent_true_range_expansion"
+    assert cohort["recent_directional_pressure_rising_fraction"] == 1.0
+    assert cohort["modeled_target_net_reward_mean"] == 150.0
+    assert cohort["realized_net_expectancy"] == 20.0
+    assert cohort["independent_sessions"] == 20
+    assert cohort["research_sample_sufficient"] is True
+    assert not report["live_filter_or_parameter_promotion_allowed"]
+
+    rows[0]["outcome"]["range_structure"].pop(
+        "prior_5m_to_14m_true_range_ratio"
+    )
+    incomplete = module.range_vwap_transition_economics(rows)
+    assert incomplete["completed_range_trades"] == 20
+    assert incomplete["trades_with_causal_volatility_and_economic_provenance"] == 19
+    assert incomplete["cohorts"][0]["research_sample_sufficient"] is False
