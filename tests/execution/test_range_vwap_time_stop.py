@@ -130,7 +130,6 @@ def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> N
     assert manager._evaluate_exit_fast(bracket, 105.0)["type"] == "SL"
 
 
-
 def test_futures_exit_accepts_existing_datahub_facade_not_fake_mdm_methods() -> None:
     """Production DataHub exposes get_active_futures_symbol, not the MDM alias."""
     manager = object.__new__(BracketManager)
