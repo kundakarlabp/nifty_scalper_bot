@@ -1008,7 +1008,10 @@ def test_verified_completed_future_volume_replaces_zero_tick_counter(monkeypatch
     )
     assert signal is not None
     assert signal.metadata["futures_volume_ratio"] == 1.6
-    assert signal.metadata["futures_volume_ratio_source"] == "verified_completed_futures_1m"
+    assert (
+        signal.metadata["futures_volume_ratio_source"]
+        == "verified_completed_futures_1m"
+    )
     assert signal.metadata["futures_quote_counter_ratio"] == 0.0
     assert signal.metadata["volume_confirmation_source"] == "option_and_futures"
 
