@@ -259,34 +259,47 @@ class BoundBracketManager(RuntimeBracketManager):
         batch = {"bracket": bracket, "requested": False}
         local.batch = batch
         try:
-            canonical_changed = bool(super()._apply_trailing_math(bracket))
             ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
-            if ltp is None:
-                return canonical_changed
-            market_changed = False
-            if not _profit_extension.adaptive_profit_lock_enabled(self):
+            # Exactly one OPTIONAL trailing policy owns a position per tick.
+            # The canonical broker stop, hard-SL/TP exit dispatcher, emergency
+            # protection, and reconciliation remain active independently.
+            # Running tiered trailing first can irreversibly ratchet past the
+            # giveback allowance explicitly selected for a strong continuation.
+            if _profit_extension.adaptive_profit_lock_enabled(self):
+                if ltp is None:
+                    return False
                 try:
-                    market_changed = _profit_extension.tighten_market_aware_floor(
-                        self, bracket, ltp
+                    return bool(
+                        _profit_extension.tighten_adaptive_profit_lock(
+                            self, bracket, ltp
+                        )
                     )
-                except Exception as exc:  # noqa: BLE001 - preserve canonical SL
+                except Exception as exc:  # noqa: BLE001 - resting stop survives
                     _profit_extension.LOGGER.warning(
-                        "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
+                        "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
                         getattr(bracket, "symbol", ""),
                         type(exc).__name__,
                     )
+                    return False
+
+            # Explicit kill-switch / paper compatibility: preserve the legacy
+            # tiered and market-aware path. Never let either run *alongside*
+            # the active continuation-aware optional trailing policy.
+            canonical_changed = bool(super()._apply_trailing_math(bracket))
+            if ltp is None:
+                return canonical_changed
             try:
-                adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
+                market_changed = _profit_extension.tighten_market_aware_floor(
                     self, bracket, ltp
                 )
             except Exception as exc:  # noqa: BLE001 - preserve canonical SL
                 _profit_extension.LOGGER.warning(
-                    "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                    "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
                     getattr(bracket, "symbol", ""),
                     type(exc).__name__,
                 )
-                adaptive_changed = False
-            return canonical_changed or market_changed or adaptive_changed
+                market_changed = False
+            return canonical_changed or market_changed
         finally:
             local.batch = previous
             if batch["requested"]:
