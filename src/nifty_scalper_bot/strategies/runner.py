@@ -11604,6 +11604,106 @@ class StrategyRunner:
         except Exception:
             return 0
 
+    def inspect_recent_canonical_history(
+        self, symbol: str, *, last_n: int = 5
+    ) -> dict[str, Any]:
+        """Read-only completed-candle OHLCV parity across canonical/runner/indicator.
+
+        A sufficient bar count is not evidence that the prices and volumes agree.
+        Reuse the canonical MDM cache and existing timestamp normalization; never
+        fetch broker history, mutate an OHLC value, or infer a missing candle.
+        """
+        count = max(1, min(10, int(last_n)))
+        normalized = self._normalize_symbol(symbol)
+        window = max(12, 2 * count)
+        try:
+            canonical_rows = self._get_mdm_bars(normalized, window) or []
+            runner_rows = list((self._symbol_history.get(normalized) or [])[-window:])
+            indicator_rows = list(
+                self._indicator_engine.get_history(
+                    normalized, count=window, field="bars"
+                ) or []
+            )
+        except Exception as exc:
+            return {
+                "status": "unavailable",
+                "reason": type(exc).__name__,
+                "checked_bars": 0,
+                "first_mismatch": None,
+            }
+
+        def fingerprint(rows: Sequence[Any]) -> dict[datetime, tuple[float, ...]]:
+            observed: dict[datetime, tuple[float, ...]] = {}
+            for row in rows:
+                minute = self._history_row_timestamp(row)
+                if minute is None:
+                    continue
+                values = [
+                    row.get(field) if isinstance(row, Mapping)
+                    else getattr(row, field, None)
+                    for field in ("open", "high", "low", "close", "volume")
+                ]
+                try:
+                    numeric = tuple(float(value) for value in values)
+                except (TypeError, ValueError):
+                    continue
+                if all(math.isfinite(value) for value in numeric):
+                    observed[minute] = numeric
+            return observed
+
+        canonical = fingerprint(canonical_rows)
+        runner = fingerprint(runner_rows)
+        indicator = fingerprint(indicator_rows)
+        minutes = sorted(canonical)[-count:]
+        if len(minutes) < count:
+            return {
+                "status": "unavailable",
+                "reason": "insufficient_canonical_completed_bars",
+                "checked_bars": len(minutes),
+                "first_mismatch": None,
+            }
+
+        first_mismatch: dict[str, Any] | None = None
+        mismatch_count = 0
+        for projection_name, projection in (("runner", runner), ("indicator", indicator)):
+            for minute in minutes:
+                expected = canonical[minute]
+                actual = projection.get(minute)
+                if actual is None:
+                    issue = {
+                        "projection": projection_name,
+                        "minute": minute.isoformat(),
+                        "field": "missing_completed_candle",
+                    }
+                else:
+                    issue = None
+                    for field, canonical_value, observed_value in zip(
+                        ("open", "high", "low", "close", "volume"), expected, actual
+                    ):
+                        if not math.isclose(
+                            canonical_value, observed_value,
+                            rel_tol=0.0, abs_tol=0.000001
+                        ):
+                            issue = {
+                                "projection": projection_name,
+                                "minute": minute.isoformat(),
+                                "field": field,
+                                "canonical": canonical_value,
+                                "observed": observed_value,
+                            }
+                            break
+                if issue is not None:
+                    mismatch_count += 1
+                    if first_mismatch is None:
+                        first_mismatch = issue
+        return {
+            "status": "match" if mismatch_count == 0 else "mismatch",
+            "checked_bars": len(minutes),
+            "mismatch_count": mismatch_count,
+            "first_mismatch": first_mismatch,
+            "canonical_last_minute": minutes[-1].isoformat(),
+        }
+
     def history_tail_timestamps(
         self, symbol: str, *, limit: int = 12
     ) -> dict[str, list[Any]]:
