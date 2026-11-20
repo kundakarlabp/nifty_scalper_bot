@@ -612,3 +612,25 @@ def test_vwap_has_no_unreachable_early_trend_pullback_branch():
     assert "_allow_early_trend_pullback" not in init_source
     assert "early_trend_pullback" not in evaluate_source
     assert "VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK" not in init_source
+
+
+@pytest.mark.parametrize(
+    "updates,reason",
+    [
+        ({"stale_data_used": True}, "stale_or_invalid_data"),
+        ({"data_age_seconds": 46.0}, "stale_or_invalid_data"),
+        ({"context_fresh": False}, "underlying_context_stale"),
+    ],
+)
+def test_live_vwap_never_arms_thesis_from_stale_inputs(monkeypatch, updates, reason):
+    """The strategy itself must fail closed, not only downstream admission."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(**updates, futures_volume_ratio=1.2),
+        103.0,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == reason
+    assert strategy._thesis_anchor_by_scope == {}
