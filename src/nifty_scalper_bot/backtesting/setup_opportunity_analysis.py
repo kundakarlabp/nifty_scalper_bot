@@ -246,18 +246,18 @@ def canonicalize_range_excursions(
         identity = str(row.get("excursion_id") or "")
         future = str(row.get("futures_symbol") or "")
         side = str(row.get("side") or "")
-        first = str(row.get("excursion_first_bar") or "")
+        first_bar_identity = str(row.get("excursion_first_bar") or "")
         if (
             not future.startswith("NFO:")
             or not future.endswith("FUT")
             or side not in {"CE", "PE"}
-            or not first
-            or identity != f"{future}:{side}:{first}"
+            or not first_bar_identity
+            or identity != f"{future}:{side}:{first_bar_identity}"
         ):
             continue
         try:
             ts = _timestamp(row.get("decision_at"), field="excursion decision")
-            first_ts = _timestamp(first, field="first outside bar")
+            first_ts = _timestamp(first_bar_identity, field="first outside bar")
         except (TypeError, ValueError, OverflowError):
             continue
         if not first_ts < ts or ts - first_ts > 375 * 60:
