@@ -289,10 +289,11 @@ def canonicalize_range_excursions(
             for _, row in samples
         )
         stage_events = sorted(decision_rows.get(identity, ()), key=lambda it: it[0])
-        reasons = list(dict.fromkeys(
-            str(row.get("reason") or "unavailable")
-            for _, row in stage_events
-        ))
+        reasons = list(
+            dict.fromkeys(
+                str(row.get("reason") or "unavailable") for _, row in stage_events
+            )
+        )
         # A cost/approval observed five minutes later cannot be attributed to
         # the first option ask. Two seconds covers the same decision only.
         same_decision = [
@@ -336,8 +337,7 @@ def canonicalize_range_excursions(
                 "first_rejection_reason": initial_rejection,
                 "observed_decision_reasons": reasons,
                 "same_decision_signal_emitted": any(
-                    row.get("reason") == "signal_emitted"
-                    for _, row in same_decision
+                    row.get("reason") == "signal_emitted" for _, row in same_decision
                 ),
                 "modeled_stop_risk": stop_risk,
                 "modeled_net_rr": net_rr,
