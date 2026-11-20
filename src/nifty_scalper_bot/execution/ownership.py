@@ -265,7 +265,20 @@ class BoundBracketManager(RuntimeBracketManager):
             # protection, and reconciliation remain active independently.
             # Running tiered trailing first can irreversibly ratchet past the
             # giveback allowance explicitly selected for a strong continuation.
-            if _profit_extension.adaptive_profit_lock_enabled(self):
+            adaptive_selected = _profit_extension.adaptive_profit_lock_enabled(self)
+            policy_config = getattr(bracket, "trailing_config", None)
+            if isinstance(policy_config, dict):
+                selected = "adaptive" if adaptive_selected else "legacy"
+                if policy_config.get("_optional_trail_owner") != selected:
+                    policy_config["_optional_trail_owner"] = selected
+                    _profit_extension.LOGGER.info(
+                        "OPTIONAL_TRAIL_OWNER_SELECTED symbol=%s policy=%s "
+                        "activation_r=%s",
+                        getattr(bracket, "symbol", ""),
+                        selected,
+                        self._trail_activation_r(bracket),
+                    )
+            if adaptive_selected:
                 if ltp is None:
                     return False
                 try:

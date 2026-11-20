@@ -7,8 +7,10 @@ fresh futures quotes and timestamped completed futures-volume candles; preserve
 the original FINAL_TP for VWAP mean-reversion entries.
 Interface: assess_continuation and tighten_adaptive_profit_lock provide
 read-only quality evidence and optional virtual ratchets; the private
-_exit_strategy_family, _verified_futures_volume_ratio and
-_adaptive_cost_per_unit helpers resolve the entry thesis, independent completed
+_trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics only
+when the independently cached best bid has crossed 0.6R (not proof of full-size
+executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
+_adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
 tick. The canonical BracketManager alone modifies exchange stop orders and
@@ -1106,6 +1108,85 @@ def _adaptive_positive_env(name: str, default: float, cap: float) -> float:
     return min(cap, max(0.0, value))
 
 
+def _trace_adaptive_no_ratchet(
+    manager: Any, bracket: Any, reason: str, *, quote: Mapping[str, Any] | None = None
+) -> None:
+    """Bounded diagnosis of a skipped 0.6R trail; never changes exit eligibility.
+
+    The bracket's cached best bid proves only an observed price, NOT an
+    executable full-lot fill. Actual stop proposals continue to require all
+    adaptive quote, cost and broker-protection gates.
+    """
+    try:
+        entry = _positive(getattr(bracket, "entry_price", None))
+        initial = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+        symbol = str(getattr(bracket, "symbol", ""))
+        if entry is None or initial is None or initial >= entry or not symbol:
+            return
+        cached = getattr(manager, "_exit_quotes", {}).get(symbol)
+        if not isinstance(cached, (tuple, list)) or len(cached) < 3:
+            return
+        bid = _positive(cached[0])
+        seen_at = _as_float(cached[2])
+        now_wall = time.time()
+        if (
+            bid is None
+            or seen_at is None
+            or not 0 <= now_wall - seen_at <= 3.0
+            or bid < entry + 0.60 * (entry - initial)
+        ):
+            return
+        config = getattr(bracket, "trailing_config", None)
+        if not isinstance(config, dict):
+            return
+        now_mono = time.monotonic()
+        previous = _as_float(config.get("_adaptive_last_skip_trace_mono"))
+        if previous is not None and 0 <= now_mono - previous < 8.0:
+            return
+        config["_adaptive_last_skip_trace_mono"] = now_mono
+        book = _mapping(quote) if quote is not None else _quote(manager, symbol)
+        depth = book.get("depth")
+        buys = depth.get("buy") if isinstance(depth, Mapping) else None
+        first = buys[0] if isinstance(buys, list) and buys else {}
+        qty = _as_float(first.get("quantity")) if isinstance(first, Mapping) else None
+        received = book.get("received_at")
+        received_age = (
+            _quote_age_seconds({"received_at": received})
+            if received is not None
+            else None
+        )
+        LOGGER.warning(
+            "ADAPTIVE_PROFIT_LOCK_SKIP symbol=%s reason=%s "
+            "observed_bid=%.2f observed_mfe_r=%.3f "
+            "full_size_bid_proven=%s top_bid_qty=%s required_qty=%s "
+            "book_bid=%s book_age_s=%s received_age_s=%s "
+            "quote_source=%s spread_pct=%s broker_stop_trigger=%s",
+            symbol,
+            reason,
+            bid,
+            (bid - entry) / (entry - initial),
+            bool(
+                qty is not None
+                and qty >= int(getattr(bracket, "remaining_quantity", 0) or 0) > 0
+            ),
+            qty,
+            int(getattr(bracket, "remaining_quantity", 0) or 0),
+            book.get("bid"),
+            _quote_age_seconds(book),
+            received_age,
+            book.get("source"),
+            _spread_pct(book),
+            getattr(bracket, "exchange_stop_trigger_price", None),
+            extra={
+                "event": "ADAPTIVE_PROFIT_LOCK_SKIP",
+                "reason": reason,
+                "symbol": symbol,
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never affect protection
+        return
+
+
 def _adaptive_executable_bid(
     manager: Any, bracket: Any
 ) -> tuple[float, float, dict[str, Any]] | None:
@@ -1358,6 +1439,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             or remaining_qty <= 0
         ):
             # A broker order ID alone does not prove the resting trigger/size.
+            _trace_adaptive_no_ratchet(manager, bracket, "broker_stop_unverified")
             return False
     entry = _positive(getattr(bracket, "entry_price", None))
     initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
@@ -1365,6 +1447,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
+        _trace_adaptive_no_ratchet(manager, bracket, "full_size_quote_unqualified")
         return False
     bid, spread, quote = executable
     if bid <= entry:
@@ -1372,6 +1455,9 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     cost = _adaptive_cost_per_unit(manager, bracket, bid)
     if cost is None or not math.isfinite(cost) or cost <= 0:
         # Never call a capped, unavailable or zero fee estimate NET profit.
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "cost_evidence_unavailable", quote=quote
+        )
         return False
     config = getattr(bracket, "trailing_config", None)
     if not isinstance(config, dict):
@@ -1385,9 +1471,15 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         or quote.get("exchange_timestamp")
     )
     if sample is None:
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "quote_identity_missing", quote=quote
+        )
         return False
     identity = str(sample)
     if identity == config.get("_adaptive_profit_last_sample"):
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "duplicate_quote_identity", quote=quote
+        )
         return False
     config["_adaptive_profit_last_sample"] = identity
     now = time.monotonic()
@@ -1508,13 +1600,20 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     room = max(_TICK_SIZE, spread * 1.5, micro_noise * 1.5)
     candidate = _round_tick(min(candidate, bid - room))
     if candidate < floor - _TICK_SIZE:
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "insufficient_bid_room", quote=quote
+        )
         return False
     old = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     if candidate < old + max(0.50, old * 0.0025):
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "no_monotonic_improvement", quote=quote
+        )
         return False
     if not _ratchet_stop(
         manager, bracket, candidate, bid, reason="adaptive_profit_lock"
     ):
+        _trace_adaptive_no_ratchet(manager, bracket, "ratchet_rejected", quote=quote)
         return False
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
