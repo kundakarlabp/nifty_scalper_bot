@@ -528,7 +528,9 @@ def test_completed_futures_volume_cache_tracks_candle_revisions_and_contracts(
         calls.append(bars)
         return original(bars)
 
-    monkeypatch.setattr(signal_generator, "analyze_completed_futures_volume", counting_quality)
+    monkeypatch.setattr(
+        signal_generator, "analyze_completed_futures_volume", counting_quality
+    )
 
     a: dict[str, Any] = {}
     b: dict[str, Any] = {}
@@ -536,7 +538,10 @@ def test_completed_futures_volume_cache_tracks_candle_revisions_and_contracts(
     manager._augment_futures_metrics(b)
     assert len(calls) == 1
     assert a["futures_completed_bar_volume_ready"] is True
-    assert b["futures_completed_bar_volume_ratio"] == a["futures_completed_bar_volume_ratio"]
+    assert (
+        b["futures_completed_bar_volume_ratio"]
+        == a["futures_completed_bar_volume_ratio"]
+    )
 
     engine.bars[-1]["volume"] = 2.0
     corrected: dict[str, Any] = {}
