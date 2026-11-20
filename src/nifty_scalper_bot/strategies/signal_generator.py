@@ -1709,7 +1709,63 @@ class StrategyManager:
         if active_future and callable(history_getter):
             try:
                 completed_bars = history_getter(active_future, count=25, field="bars")
-                volume_quality = analyze_completed_futures_volume(completed_bars)
+                # The callback can run thousands of times per session. A full
+                # bar-window fingerprint (including revisions and trust flags)
+                # avoids reparsing the same immutable completed-bar evidence.
+                # Never use a time-only TTL: corrected candle volume must
+                # invalidate the cache even during the same minute.
+                cache_key = None
+                if isinstance(completed_bars, (list, tuple)):
+                    cache_key = (
+                        active_future,
+                        tuple(
+                            (
+                                (
+                                    bar.get("timestamp")
+                                    or bar.get("datetime")
+                                    or bar.get("time")
+                                ),
+                                bar.get("volume"),
+                                bar.get("is_complete"),
+                                bar.get("is_provisional"),
+                                bar.get("volume_delta_untrusted"),
+                            )
+                            for bar in completed_bars
+                            if isinstance(bar, Mapping)
+                        ),
+                    )
+                cached = getattr(self, "_futures_completed_bar_quality_cache", None)
+                if (
+                    cache_key is not None
+                    and cached is not None
+                    and cached[0] == cache_key
+                ):
+                    volume_quality = cached[1]
+                else:
+                    volume_quality = analyze_completed_futures_volume(completed_bars)
+                    self._futures_completed_bar_quality_cache = (
+                        (cache_key, volume_quality) if cache_key is not None else None
+                    )
+                    log_throttled(
+                        self._logger,
+                        f"futures_bar_volume_quality:{active_future}",
+                        "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s "
+                        "ready=%s ratio=%s baseline=%s last_bar=%s reason=%s "
+                        "latest_volume=%s baseline_mean=%s baseline_min=%s "
+                        "baseline_max=%s extreme_low_relative_volume=%s",
+                        active_future,
+                        volume_quality["ready"],
+                        volume_quality["ratio"],
+                        volume_quality["baseline_count"],
+                        volume_quality["bar_timestamp"],
+                        volume_quality["reason"],
+                        volume_quality.get("latest_volume"),
+                        volume_quality.get("baseline_mean"),
+                        volume_quality.get("baseline_min"),
+                        volume_quality.get("baseline_max"),
+                        volume_quality.get("extreme_low_relative_volume", False),
+                        interval_sec=60.0,
+                    )
                 indicators["futures_completed_bar_volume_provenance"] = volume_quality
                 indicators["futures_completed_bar_volume_symbol"] = active_future
                 indicators["futures_completed_bar_volume_ready"] = bool(
@@ -1718,20 +1774,8 @@ class StrategyManager:
                 indicators["futures_completed_bar_volume_ratio"] = volume_quality[
                     "ratio"
                 ]
-                log_throttled(
-                    self._logger,
-                    f"futures_bar_volume_quality:{active_future}",
-                    "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s "
-                    "ready=%s ratio=%s baseline=%s last_bar=%s reason=%s",
-                    active_future,
-                    volume_quality["ready"],
-                    volume_quality["ratio"],
-                    volume_quality["baseline_count"],
-                    volume_quality["bar_timestamp"],
-                    volume_quality["reason"],
-                    interval_sec=300.0,
-                )
             except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                self._futures_completed_bar_quality_cache = None
                 self._logger.debug(
                     "FUTURES_COMPLETED_BAR_VOLUME_UNAVAILABLE symbol=%s error=%s",
                     active_future,

@@ -46,6 +46,9 @@ def analyze_completed_futures_volume(
         "latest_volume": None,
         "baseline_mean": None,
         "baseline_count": 0,
+        "baseline_min": None,
+        "baseline_max": None,
+        "extreme_low_relative_volume": False,
         "bar_timestamp": None,
         "reason": "insufficient_verified_bars",
     }
@@ -91,13 +94,20 @@ def analyze_completed_futures_volume(
     mean = sum(baseline) / len(baseline)
     if mean <= 0:
         return missing
+    ratio = latest_vol / mean
     return {
         "source": "completed_futures_1m_bars",
         "ready": True,
-        "ratio": round(latest_vol / mean, 5),
+        "ratio": round(ratio, 5),
         "latest_volume": latest_vol,
         "baseline_mean": round(mean, 5),
         "baseline_count": len(baseline),
+        "baseline_min": min(baseline),
+        "baseline_max": max(baseline),
+        # Diagnostic only: this cannot authorize or override a trade gate.
+        # Genuine quiet trading and data-feed discontinuities require source
+        # reconciliation before classification; either may produce this flag.
+        "extreme_low_relative_volume": ratio < 0.05,
         "bar_timestamp": latest_ts.isoformat(),
         "reason": "verified",
     }

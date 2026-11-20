@@ -2981,20 +2981,11 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
-                    # A manager denial is not an executed veto in adaptive mode.
+                    # A raw detector denial is observational in adaptive mode;
+                    # the effective fallback scale is only known AFTER the
+                    # stable/raw policy is reconciled below. Do not emit a
+                    # fictitious pre-fallback scale=1.0 decision.
                     self._observability_counters["regime_gate_denials_observed"] += 1
-                    log_throttled(
-                        log,
-                        key=f"regime_scale_fallback:{symbol}",
-                        msg="strategy_regime_scale_fallback",
-                        interval_sec=30.0,
-                        extra={
-                            "event": "strategy_regime_scale_fallback",
-                            "symbol": symbol,
-                            "gate_reasons": list(reasons),
-                            "scale": 1.0,
-                        },
-                    )
                 if not allowed and not self._use_regime_adaptive:
                     if symbol_role in {"spot_context", "futures_context"}:
                         log_throttled(
