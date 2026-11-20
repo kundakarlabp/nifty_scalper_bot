@@ -1293,9 +1293,7 @@ def test_verified_tier_fallback_ratchets_only_on_full_lot_bid(monkeypatch):
         "missing_cost",
     ],
 )
-def test_live_verified_tiers_refuse_unverified_profit_protection(
-    monkeypatch, failure
-):
+def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, failure):
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, quote, syncs = _ready_verified_tier_fallback()
     if failure == "depth_small":
@@ -1319,9 +1317,7 @@ def test_live_verified_tiers_refuse_unverified_profit_protection(
     elif failure == "missing_cost":
         manager._breakeven_cost_per_unit = lambda _bracket: 0.0
 
-    assert not profit_extension.tighten_verified_tier_fallback(
-        manager, bracket, 120.0
-    )
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 120.0)
     assert bracket.sl_trigger_price == 94.0
     assert bracket.trail_revision == 0
     assert not syncs
@@ -1335,17 +1331,17 @@ def test_live_verified_tiers_reject_ltp_only_peak_even_if_tier_threshold_crossed
     bracket.last_ltp = 125.0
     bracket.highest_ltp = 125.0
     quote["ltp"] = 125.0
-    assert not profit_extension.tighten_verified_tier_fallback(
-        manager, bracket, 125.0
-    )
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 125.0)
     assert bracket.sl_trigger_price == 94.0
     assert not syncs
 
 
 def test_raised_stop_candidate_validator_must_fail_closed():
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+
     def broken_validator(*_args):
         raise RuntimeError("validation unavailable")
+
     manager._is_trail_candidate_allowed = broken_validator
     assert not profit_extension._ratchet_stop(
         manager, bracket, 102.5, 107.0, reason="validator_test"
@@ -1362,11 +1358,13 @@ def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
     # FakeManager is sufficient for exercising BoundBracketManager's override.
     calls = []
     monkeypatch.setattr(
-        profit_extension, "tighten_adaptive_profit_lock",
+        profit_extension,
+        "tighten_adaptive_profit_lock",
         lambda *_args: calls.append("adaptive") or False,
     )
     monkeypatch.setattr(
-        profit_extension, "tighten_verified_tier_fallback",
+        profit_extension,
+        "tighten_verified_tier_fallback",
         lambda *_args: calls.append("verified_tiers") or True,
     )
     owner = object.__new__(BoundBracketManager)
