@@ -294,12 +294,12 @@ def canonicalize_range_excursions(
                 str(row.get("reason") or "unavailable") for _, row in stage_events
             )
         )
-        # A cost/approval observed five minutes later cannot be attributed to
-        # the first option ask. Two seconds covers the same decision only.
+        # Only the exact original evaluation timestamp may establish its risk.
+        # Even a 1-second-later evaluation may use a different executable ask.
         same_decision = [
             (ts, row)
             for ts, row in stage_events
-            if 0 <= ts - first_ts <= 2
+            if abs(ts - first_ts) < 0.001
             and normalize_symbol(str(row.get("symbol") or "")) == symbol
         ]
         economics = [
