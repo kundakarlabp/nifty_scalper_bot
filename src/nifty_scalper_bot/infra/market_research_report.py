@@ -1,9 +1,9 @@
 """Post-session, broker-free analysis of authoritative replay plus journal samples.
 
-Responsibilities: validate existing archived tick/quote provenance, separate
-structural setup decisions from minute-sampled strategy rejections, and produce
-60/180/300/600/900-second exact-contract ask-to-bid research labels, modeled
-execution costs, adverse excursion and volume parity evidence.
+Responsibilities: validate archived quote provenance, report canonical
+first-observed RangeVWAP futures excursions with 5/10/15-minute futures and
+full-lot option bid outcomes, and preserve the existing structural decisions,
+minute-sampled rejections, cost/MAE labels and option volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -508,6 +508,167 @@ def _session_decision_rows(
         if math.isfinite(observed) and start <= observed < end:
             scoped.append(row)
     return scoped
+
+
+def _range_excursion_markouts(
+    excursions: Sequence[Mapping[str, Any]],
+    futures: Mapping[str, Sequence[tuple[float, float]]],
+    books: Mapping[str, Sequence[tuple[float, float, float, int, int]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Price the same *first-seen* setup; keep thin/unverified paths unlabelled."""
+    from scripts.reporting.rejected_setup_forward_markout import (
+        observed_futures_markout,
+        observed_markout,
+    )
+
+    outcomes: list[dict[str, Any]] = []
+    for row in excursions:
+        symbol = normalize_symbol(str(row["symbol"]))
+        future = str(row["futures_symbol"])
+        when = float(row["decision_timestamp"])
+        quote = row.get("quote")
+        evidence = quote if isinstance(quote, Mapping) else {}
+        quantity = evidence.get("lot_size")
+        lot_known = type(quantity) is int and 0 < quantity < 10000
+        original_book = books.get(symbol, ())
+        full_lot = (
+            [
+                (timestamp, bid, ask)
+                for timestamp, bid, ask, bid_qty, ask_qty in original_book
+                if bid_qty >= quantity and ask_qty >= quantity
+            ]
+            if lot_known
+            else []
+        )
+        times = [item[0] for item in full_lot]
+        stop_risk = row.get("modeled_stop_risk")
+        net_rr = row.get("modeled_net_rr")
+        risk_verified = (
+            type(stop_risk) in (float, int)
+            and type(net_rr) in (float, int)
+            and math.isfinite(stop_risk)
+            and math.isfinite(net_rr)
+            and 0 < stop_risk <= 773
+            and net_rr >= 1.5
+        )
+        first_rejection = str(row.get("first_rejection_reason") or "")
+        for horizon in (300, 600, 900):
+            fut, fut_status = observed_futures_markout(
+                futures.get(future, ()),
+                decision_ts=when, horizon_s=horizon, side=str(row["side"])
+            )
+            option, option_status = (
+                observed_markout(
+                    full_lot, decision_ts=when, horizon_s=horizon,
+                    timestamps=times,
+                )
+                if full_lot and not row.get("contract_identity_conflicted")
+                else (
+                    None,
+                    "rotated_contract_or_missing_full_lot_verified_book",
+                )
+            )
+            dense = (
+                option is not None
+                and _quote_path_dense(times, decision_ts=when, horizon_s=horizon)
+            )
+            if not dense:
+                option = None
+                if option_status == "observed_bid_path_not_broker_fill":
+                    option_status = "option_full_lot_book_path_gapped"
+            costed = (
+                _cost_model(
+                    option, quantity=quantity,
+                    adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
+                )
+                if option is not None and lot_known
+                else None
+            )
+            outcomes.append(
+                {
+                    "excursion_id": row["excursion_id"],
+                    "first_seen_ts": when,
+                    "futures_contract": future,
+                    "option_contract": symbol,
+                    "side": row["side"],
+                    "regime": row.get("regime"),
+                    "center_gap_atr": row.get("center_gap_atr"),
+                    "volatility_ratio": row.get("volatility_ratio"),
+                    "first_rejection_reason": first_rejection,
+                    "all_reasons": row.get("observed_decision_reasons", []),
+                    "baseline_signal_emitted_at_first_decision": row[
+                        "same_decision_signal_emitted"
+                    ],
+                    "counterfactual_center_gate_candidate": (
+                        first_rejection == "session_rolling_center_disagree"
+                    ),
+                    "counterfactual_range_width_candidate": (
+                        first_rejection == "range_width_unproven"
+                    ),
+                    "quantity_units_from_observed_contract": (
+                        quantity if lot_known else None
+                    ),
+                    "modeled_cash_stop_risk": stop_risk,
+                    "modeled_net_rr": net_rr,
+                    "same_decision_risk_773_and_net_rr_verified": risk_verified,
+                    "horizon_seconds": horizon,
+                    "futures_markout": fut,
+                    "futures_status": fut_status,
+                    "option_full_lot_markout": option,
+                    "option_status": option_status,
+                    "option_cost_adjusted": costed,
+                    "observed_book_and_futures_complete": (
+                        fut is not None and costed is not None
+                    ),
+                    "quote_model_not_broker_fill": True,
+                }
+            )
+
+    comparisons: list[dict[str, Any]] = []
+    for policy, predicate in (
+        ("current_admission", "baseline_signal_emitted_at_first_decision"),
+        ("ignore_center_disagreement_only", "counterfactual_center_gate_candidate"),
+        ("ignore_range_width_only", "counterfactual_range_width_candidate"),
+    ):
+        for horizon in (300, 600, 900):
+            group = [
+                row for row in outcomes
+                if row["horizon_seconds"] == horizon and row[predicate]
+            ]
+            feasible = [
+                row for row in group
+                if row["same_decision_risk_773_and_net_rr_verified"]
+                and row["observed_book_and_futures_complete"]
+            ]
+            comparisons.append(
+                {
+                    "policy": policy,
+                    "horizon_seconds": horizon,
+                    "unique_first_seen_excursions": len(group),
+                    "full_lot_bid_futures_labelled": sum(
+                        row["observed_book_and_futures_complete"] for row in group
+                    ),
+                    "same_decision_cash_risk_unverified": sum(
+                        not row["same_decision_risk_773_and_net_rr_verified"]
+                        for row in group
+                    ),
+                    "verified_risk_and_observed_horizon": len(feasible),
+                    "modeled_net_rupees_mean": (
+                        round(
+                            statistics.mean(
+                                float(row["option_cost_adjusted"]["terminal"]["net_rupees"])
+                                for row in feasible
+                            ),
+                            2,
+                        )
+                        if len(feasible) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "broker_fill_and_stop_simulated": False,
+                    "comparison_not_causal_or_promotable": True,
+                }
+            )
+    return outcomes, comparisons
 
 
 def build_session_research_report(
