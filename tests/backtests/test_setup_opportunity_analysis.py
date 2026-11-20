@@ -444,7 +444,7 @@ def test_range_excursion_canonicalizer_preserves_first_quote_across_restarts() -
         },
         {
             "excursion_id": identity,
-            "decision_at": (at + timedelta(minutes=1)).isoformat(),
+            "decision_at": (at + timedelta(seconds=1)).isoformat(),
             "symbol": other,
             "reason": "signal_emitted",
             "modeled_stop_risk": 100.0,
