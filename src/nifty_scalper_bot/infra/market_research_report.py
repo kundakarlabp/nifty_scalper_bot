@@ -547,7 +547,9 @@ def _range_excursion_markouts(
         full_lot = (
             [
                 (timestamp, bid, ask)
-                for timestamp, bid, ask, bid_qty, ask_qty, scope in books.get(symbol, ())
+                for timestamp, bid, ask, bid_qty, ask_qty, scope in books.get(
+                    symbol, ()
+                )
                 if scope == phase and bid_qty >= quantity and ask_qty >= quantity
             ]
             if phase is not None and lot_known
