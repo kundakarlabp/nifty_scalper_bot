@@ -494,11 +494,15 @@ def test_excursion_report_uses_full_lot_exact_token_books_and_futures(tmp_path) 
         row["option_cost_adjusted"]["terminal"]["fees_rupees"] > 0
         for row in report["range_excursion_horizons"]
     )
-    assert report["range_excursion_horizons"][0]["futures_markout"][
-        "signed_terminal_points"
-    ] > 0
+    assert (
+        report["range_excursion_horizons"][0]["futures_markout"][
+            "signed_terminal_points"
+        ]
+        > 0
+    )
     center = next(
-        row for row in report["range_admission_comparisons"]
+        row
+        for row in report["range_admission_comparisons"]
         if row["policy"] == "ignore_center_disagreement_only"
         and row["horizon_seconds"] == 300
     )
