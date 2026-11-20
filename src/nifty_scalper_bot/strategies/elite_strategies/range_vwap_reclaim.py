@@ -7,8 +7,9 @@ identity for bounded local recovery. Frozen ATR/sigma and session-anchored
 bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
-RangeVWAPReclaimStrategy exposes an opportunity ledger, validates same-tick
-OrderFlow handoff, and owns regime confirmation plus excursion de-duplication.
+RangeVWAPReclaimStrategy emits bounded, deduplicated futures-excursion research
+provenance before admissions; validates same-tick OrderFlow handoff and owns
+regime confirmation plus live setup de-duplication.
 Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
 StrategyManager callbacks; exact setup/consumption state is restored and
 write-verified through PositionManager's same-day risk circuit before LIVE
@@ -21,6 +22,7 @@ provenance; broker-stop, order affordability and capital gates remain authoritat
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import statistics
@@ -322,6 +324,15 @@ def assess_range_vwap_reclaim(
         "underlying_latest_close": float(latest["close"]),
         # Prospective diagnostics only: do not curve-fit new LIVE filters
         # without an independent after-cost option-execution sample.
+        # Excursion identity is observed from the previous completed bar,
+        # BEFORE any filter, without treating it as a tradeable reversal.
+        "excursion_side": (
+            "CE"
+            if float(previous["close"]) < lower and float(previous["low"]) < lower
+            else "PE"
+            if float(previous["close"]) > upper and float(previous["high"]) > upper
+            else None
+        ),
         "reclaim_body_fraction": round(body_fraction, 4),
         "reclaim_lower_wick_fraction": (
             round(
@@ -348,6 +359,19 @@ def assess_range_vwap_reclaim(
             else 0.0
         ),
     }
+    excursion_side = evidence["excursion_side"]
+    if excursion_side is not None:
+        outside = (
+            (lambda candle: float(candle["close"]) < lower)
+            if excursion_side == "CE"
+            else (lambda candle: float(candle["close"]) > upper)
+        )
+        first_excursion_bar = None
+        for bar in reversed(history):
+            if not outside(bar):
+                break
+            first_excursion_bar = bar["timestamp"]
+        evidence["excursion_first_bar_timestamp"] = first_excursion_bar
     if slope_bps > config.max_vwap_slope_bps_per_min:
         return {**evidence, "reason": "session_vwap_sloping"}
     if efficiency > config.max_directional_efficiency:
@@ -619,6 +643,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         self._guard_lock = RLock()
         self._opportunities: dict[str, dict[str, Any]] = {}
         self._active_opportunity: str | None = None
+        self._research_observed_minute: dict[tuple[str, str], str] = {}
 
     def attach_persistent_guard(self, position_manager: Any) -> None:
         """Reuse canonical position/risk persistence; never open a second store."""
@@ -727,6 +752,161 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             except (OSError, TypeError, ValueError, RuntimeError):
                 return False
 
+    def _observe_excursion(
+        self,
+        symbol: str,
+        indicators: Mapping[str, Any],
+        structural: Mapping[str, Any],
+        *,
+        decision_at: datetime,
+        reason: str | None = None,
+    ) -> None:
+        """Research-only: log one immutable first observation per futures excursion."""
+        from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+        side = symbol[-2:].upper()
+        future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
+        first = str(structural.get("excursion_first_bar_timestamp") or "")
+        if (
+            future is None
+            or structural.get("excursion_side") != side
+            or not first
+            or indicators.get("is_selected_option") is not True
+        ):
+            return
+        identity = f"{future}:{side}:{first}"
+        with self._guard_lock:
+            if identity in self._opportunities:
+                self._active_opportunity = identity
+                return
+            bid = _value(indicators.get("bid"))
+            ask = _value(indicators.get("ask"))
+            lot = indicators.get("lot_size")
+            if type(lot) is not int or lot <= 0:
+                lot = None
+            quote_ok = (
+                bid is not None
+                and ask is not None
+                and 0 < bid <= ask
+                and indicators.get("tradable_quote") is True
+            )
+            record = {
+                "v": 1,
+                "decision_at": decision_at.isoformat(),
+                "excursion_id": identity,
+                "futures_symbol": future,
+                "side": side,
+                "symbol": normalize_symbol(symbol),
+                "excursion_first_bar": first,
+                "structural_reason": str(structural.get("reason") or "unverified"),
+                "structural_qualified": structural.get("qualified") is True,
+                "regime": str(indicators.get("regime") or "UNKNOWN"),
+                "regime_transition": indicators.get("regime_transition_pending") is True,
+                "session_vwap": _value(structural.get("session_vwap_before_confirmation")),
+                "rolling_center": _value(structural.get("rolling_20m_secondary_center")),
+                "center_gap_atr": _value(structural.get("secondary_divergence_atr")),
+                "futures_atr": _value(structural.get("futures_atr")),
+                "range_width_atr": _value(structural.get("range_width_atr")),
+                "volatility_ratio": _value(
+                    structural.get("prior_5m_to_14m_true_range_ratio")
+                ),
+                "directional_efficiency": _value(
+                    structural.get("prior_5m_directional_efficiency")
+                ),
+                "quote": {
+                    "bid": bid if quote_ok else None,
+                    "ask": ask if quote_ok else None,
+                    "lot_size": lot,
+                    "tradable": quote_ok,
+                    "source": str(indicators.get("quote_source") or "")[:32],
+                    "age_seconds": _value(indicators.get("data_age_seconds")),
+                },
+                "status": "observed_not_traded",
+                "dominant_rejection": None,
+                "shadow_net_pnl": None,
+                "option_fills_verified": False,
+            }
+            self._opportunities[identity] = record
+            self._active_opportunity = identity
+            if len(self._opportunities) > 512:
+                self._opportunities.pop(next(iter(self._opportunities)))
+        LOGGER.info(
+            "RANGE_VWAP_EXCURSION_OBSERVED %s",
+            json.dumps(record, separators=(",", ":"), allow_nan=False),
+        )
+        if reason:
+            self._record_excursion_decision(reason)
+
+    def _record_excursion_decision(self, reason: str) -> None:
+        """Log only distinct decision transitions, never each tick."""
+        identity = self._active_opportunity
+        if not identity or identity not in self._opportunities:
+            return
+        record = self._opportunities[identity]
+        seen = record.setdefault("_research_logged_reasons", set())
+        if reason in seen:
+            return
+        seen.add(reason)
+        budget = record.get("option_cost_risk") or {}
+        LOGGER.info(
+            "RANGE_VWAP_EXCURSION_DECISION %s",
+            json.dumps(
+                {
+                    "v": 1,
+                    "decision_at": datetime.now(_IST).isoformat(),
+                    "excursion_id": identity,
+                    "reason": reason[:100],
+                    "symbol": record["symbol"],
+                    "modeled_stop_risk": _value(
+                        budget.get("worst_stop_loss_including_costs")
+                    ),
+                    "modeled_net_rr": _value(budget.get("net_reward_risk")),
+                },
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        )
+
+    def observe_research_excursion(
+        self,
+        symbol: str,
+        indicators: Mapping[str, Any],
+        *,
+        blocked_reason: str,
+    ) -> None:
+        """Observe manager-vetoed futures excursions without admitting a trade."""
+        if canonical_nifty_option_symbol(symbol) is None:
+            return
+        future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
+        decision = _time(indicators.get("decision_at"))
+        if future is None or decision is None:
+            return
+        minute = decision.replace(second=0, microsecond=0).isoformat()
+        key = (future, symbol[-2:])
+        with self._guard_lock:
+            if self._research_observed_minute.get(key) == minute:
+                return
+            self._research_observed_minute[key] = minute
+            if len(self._research_observed_minute) > 32:
+                self._research_observed_minute.clear()
+        getter = getattr(self._indicator_engine, "get_history", None)
+        if not callable(getter):
+            return
+        try:
+            bars = getter(future, count=400, field="bars")
+            evidence = assess_range_vwap_reclaim(
+                bars, decision_at=decision, config=self._cfg
+            )
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return
+        # This is an observation only; NEVER call live lifecycle or reserve.
+        self._active_opportunity = None
+        self._observe_excursion(
+            symbol, indicators, evidence, decision_at=decision,
+            reason=blocked_reason,
+        )
+        self._active_opportunity = None
+
     def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Finalize an emitted setup through the existing runner order callback."""
         with self._guard_lock:
@@ -773,6 +953,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         key = self._active_opportunity
         if key and key in self._opportunities:
             row = self._opportunities[key]
+            self._record_excursion_decision(reason)
             if row.get("modeled_cost_eligible"):
                 row["post_cost_rejection"] = reason
             else:
@@ -791,7 +972,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         )
         return {
             "validated_range_evaluations": len(records),
-            "completed_band_reclaims": len(records),
+            "completed_band_reclaims": sum(
+                r.get("structural_qualified") is True for r in records
+            ),
             "cost_eligible_candidates": sum(
                 r.get("modeled_cost_eligible") is True for r in records
             ),
@@ -932,6 +1115,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     structural["history_recovery"] = recovery_reason
             else:
                 structural["history_recovery"] = recovery_reason
+        self._observe_excursion(
+            symbol, indicators, structural, decision_at=decision_at
+        )
         if not self._load_persistent_guard(decision_at):
             self._no_vote("range_durable_setup_guard_unavailable")
             return None
@@ -946,40 +1132,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if structural.get("side") != side:
             self._no_vote("range_reversal_side_conflict")
             return None
-        opportunity_key = f"{future}:{structural['bar_timestamp']}:{side}"
-        self._active_opportunity = opportunity_key
-        if opportunity_key not in self._opportunities:
-            minute_of_session = decision_at.hour * 60 + decision_at.minute
-            self._opportunities[opportunity_key] = {
-                "identity": opportunity_key,
-                "underlying_bar": structural["bar_timestamp"],
-                "side": side,
-                "status": "structure_only",
-                "dominant_rejection": None,
-                "target_distance_atr": structural["remaining_vwap_distance_atr"],
-                "session_anchored_band_ratio": structural[
-                    "candidate_session_anchored_vs_primary_ratio"
-                ],
-                "time_bucket": (
-                    "morning"
-                    if minute_of_session < 11 * 60
-                    else "midday" if minute_of_session < 13 * 60 else "afternoon"
-                ),
-                "event_day": indicators.get("verified_event_day"),
-                "expiry_days": indicators.get("days_to_expiry"),
-                "shadow_net_pnl": None,
-                "mfe": None,
-                "mae": None,
-            }
-            if len(self._opportunities) > 512:
-                self._opportunities.pop(next(iter(self._opportunities)))
-            LOGGER.info(
-                "RANGE_VWAP_STRUCTURAL_OPPORTUNITY id=%s side=%s "
-                "target_distance_atr=%s",
-                opportunity_key,
-                side,
-                structural["remaining_vwap_distance_atr"],
-            )
+        opportunity_key = self._active_opportunity
+        if opportunity_key in self._opportunities:
+            self._opportunities[opportunity_key]["structural_qualified"] = True
 
         if indicators.get("underlying_direction_state") == "TRANSITION":
             self._no_vote("range_underlying_transition")
@@ -1200,6 +1355,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             row["status"] = "cost_eligible"
             row["modeled_cost_eligible"] = True
             row["option_cost_risk"] = budget
+            self._record_excursion_decision("cost_eligible")
 
         setup_id = (
             f"range_session_vwap:{future}:{side}:"
@@ -1254,6 +1410,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 self._consumed_excursions = {excursion_key}
             if len(self._pending_excursions) > 512:
                 self._pending_excursions.pop(next(iter(self._pending_excursions)))
+        self._record_excursion_decision("signal_emitted")
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
