@@ -469,6 +469,9 @@ def test_range_excursion_invalid_identity_is_never_synthesized() -> None:
         canonicalize_range_excursions,
     )
 
-    assert canonicalize_range_excursions(
-        [{"decision_at": "2026-11-19T10:00:00+05:30", "side": "CE"}], []
-    ) == []
+    assert (
+        canonicalize_range_excursions(
+            [{"decision_at": "2026-11-19T10:00:00+05:30", "side": "CE"}], []
+        )
+        == []
+    )
