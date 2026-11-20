@@ -1189,12 +1189,45 @@ def _trace_adaptive_no_ratchet(
             if received is not None
             else None
         )
+        book_age = _quote_age_seconds(book)
+        if reason in {
+            "full_size_quote_unqualified",
+            "fallback_full_depth_unavailable",
+        }:
+            if not book:
+                gate = "no_cached_quote"
+            elif book_age is None:
+                gate = "invalid_or_future_event_timestamp"
+            elif book_age > _adaptive_positive_env(
+                "ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0
+            ):
+                gate = "stale_event_timestamp"
+            elif not isinstance(depth, Mapping):
+                gate = "missing_depth"
+            elif not isinstance(buys, list) or not buys:
+                gate = "empty_bid_levels"
+            elif qty is None:
+                gate = "missing_bid_quantity"
+            elif qty < int(getattr(bracket, "remaining_quantity", 0) or 0):
+                gate = "undersized_top_bid"
+            elif _positive(first.get("price")) is None:
+                gate = "invalid_top_bid"
+            elif _positive(book.get("ask")) is None:
+                gate = "missing_ask"
+            elif (_spread_pct(book) or 0.0) > _adaptive_positive_env(
+                "ADAPTIVE_PROFIT_MAX_SPREAD_PCT", 1.5, 2.0
+            ):
+                gate = "excessive_spread"
+            else:
+                gate = "book_mismatch_or_other"
+            reason = f"{reason}:{gate}"
         LOGGER.warning(
             "ADAPTIVE_PROFIT_LOCK_SKIP symbol=%s reason=%s "
             "observed_bid=%.2f observed_mfe_r=%.3f "
             "full_size_bid_proven=%s top_bid_qty=%s required_qty=%s "
             "book_bid=%s book_age_s=%s received_age_s=%s "
-            "quote_source=%s spread_pct=%s broker_stop_trigger=%s",
+            "quote_source=%s spread_pct=%s broker_stop_trigger=%s "
+            "quote_version=%s timestamp_source=%s exchange_time_valid=%s",
             symbol,
             reason,
             bid,
@@ -1211,6 +1244,9 @@ def _trace_adaptive_no_ratchet(
             book.get("source"),
             _spread_pct(book),
             getattr(bracket, "exchange_stop_trigger_price", None),
+            book.get("quote_update_version"),
+            book.get("timestamp_source"),
+            book.get("source_timestamp_valid"),
             extra={
                 "event": "ADAPTIVE_PROFIT_LOCK_SKIP",
                 "reason": reason,
