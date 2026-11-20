@@ -1165,9 +1165,10 @@ def _trace_adaptive_no_ratchet(
             reason,
             bid,
             (bid - entry) / (entry - initial),
-            bool(qty is not None and qty >= int(
-                getattr(bracket, "remaining_quantity", 0) or 0
-            ) > 0),
+            bool(
+                qty is not None
+                and qty >= int(getattr(bracket, "remaining_quantity", 0) or 0) > 0
+            ),
             qty,
             int(getattr(bracket, "remaining_quantity", 0) or 0),
             book.get("bid"),
