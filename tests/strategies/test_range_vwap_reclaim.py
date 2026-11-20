@@ -242,6 +242,49 @@ def test_option_reward_repriced_to_current_futures_not_completed_candle(
     )
 
 
+def test_excursion_research_records_original_regime_rejection_only_once() -> None:
+    cfg = RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.001)
+    structural = assess_range_vwap_reclaim(
+        bars(), decision_at=decision_at(), config=cfg
+    )
+    assert structural["qualified"] is False
+    assert structural["reason"] == "session_rolling_center_disagree"
+    assert structural["excursion_side"] == "CE"
+    assert structural["excursion_first_bar_timestamp"] == bars()[-2]["timestamp"]
+    strategy = RangeVWAPReclaimStrategy(cfg, History(bars()))
+    context = indicators(regime="TREND", is_selected_option=True)
+    strategy.observe_research_excursion(
+        OPTION, context, blocked_reason="strategy_regime_or_direction_ineligible"
+    )
+    first = strategy.get_research_snapshot()["opportunities"]
+    assert len(first) == 1
+    assert first[0]["dominant_rejection"] == "strategy_regime_or_direction_ineligible"
+    assert first[0]["center_gap_atr"] > 0
+    assert first[0]["volatility_ratio"] > 0
+    assert first[0]["quote"]["ask"] == 100.0
+    assert first[0]["status"] == "rejected"
+    strategy.observe_research_excursion(
+        OPTION, context, blocked_reason="strategy_regime_or_direction_ineligible"
+    )
+    assert len(strategy.get_research_snapshot()["opportunities"]) == 1
+    assert first[0]["observed_decisions"] == 1
+
+
+def test_qualified_excursion_reuses_first_futures_identity_not_option_bar() -> None:
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    context = indicators()
+    strategy._evaluate_signal(OPTION, context, 100.0)
+    records = strategy.get_research_snapshot()["opportunities"]
+    assert len(records) == 1
+    record = records[0]
+    assert record["excursion_first_bar"] == bars()[-2]["timestamp"]
+    assert record["identity"].startswith(FUTURE + ":CE:")
+    assert record["symbol"] == OPTION
+    assert record["option_fills_verified"] is False
+
+
 def test_partial_intraday_history_cannot_impersonate_session_vwap() -> None:
     data = bars()[5:]
     proof = assess_range_vwap_reclaim(

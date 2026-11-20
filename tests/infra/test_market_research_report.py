@@ -380,3 +380,163 @@ def test_postmarket_excludes_other_day_trade_decisions_before_markouts(
     session_log = research_report_log_lines(report)[0]
     assert '"structural_decision_rows_scoped":1' in session_log
     assert '"structural_decision_rows_excluded_non_session":2' in session_log
+
+
+def _range_excursion_session(tmp_path, *, bid_quantity: int = 65):
+    future = "NFO:NIFTY26NOVFUT"
+    archive = ReplayArchive(tmp_path / "replay_archive")
+    archive.record(
+        "snapshot",
+        {
+            "basket": {
+                "selected_ce": CONTRACT,
+                "selected_pe": OTHER,
+                "futures_symbol": future,
+                "token_by_symbol": {CONTRACT: 111, OTHER: 112, future: 113},
+            }
+        },
+        DECISION - timedelta(seconds=2),
+    )
+    for second in [-1, *range(1, 901, 5)]:
+        instant = DECISION + timedelta(seconds=second)
+        archive.record(
+            "tick",
+            {
+                "symbol": future,
+                "instrument_token": 113,
+                "source": "ws_full",
+                "ltp": 25000.0 + 0.02 * second,
+            },
+            instant,
+        )
+        bid = 100.0 + 0.01 * second
+        ask = bid + 0.5
+        archive.record(
+            "tick",
+            {
+                "symbol": CONTRACT,
+                "instrument_token": 111,
+                "source": "ws_full",
+                "tradable_quote": True,
+                "depth_available": True,
+                "bid": bid,
+                "ask": ask,
+                "depth": {
+                    "buy": [{"price": bid, "quantity": bid_quantity}],
+                    "sell": [{"price": ask, "quantity": 75}],
+                },
+            },
+            instant,
+        )
+    archive.close()
+    first_bar = (DECISION - timedelta(minutes=1)).isoformat()
+    identity = f"{future}:CE:{first_bar}"
+    observation = {
+        "v": 1,
+        "decision_at": DECISION.isoformat(),
+        "excursion_id": identity,
+        "futures_symbol": future,
+        "excursion_first_bar": first_bar,
+        "side": "CE",
+        "symbol": CONTRACT,
+        "regime": "RANGE",
+        "structural_qualified": False,
+        "structural_reason": "session_rolling_center_disagree",
+        "session_vwap": 25012.0,
+        "rolling_center": 25030.0,
+        "center_gap_atr": 1.5,
+        "volatility_ratio": 1.2,
+        "quote": {
+            "bid": 99.99,
+            "ask": 100.49,
+            "lot_size": 65,
+            "tradable": True,
+        },
+    }
+    stage = {
+        "v": 1,
+        "decision_at": (DECISION + timedelta(milliseconds=150)).isoformat(),
+        "excursion_id": identity,
+        "reason": "session_rolling_center_disagree",
+        "symbol": CONTRACT,
+        "modeled_stop_risk": None,
+        "modeled_net_rr": None,
+    }
+    journal = (
+        f"RANGE_VWAP_EXCURSION_OBSERVED {json.dumps(observation)}\n"
+        f"RANGE_VWAP_EXCURSION_DECISION {json.dumps(stage)}"
+    )
+    tape = tmp_path / "replay_archive" / "2026-11-03.jsonl"
+    return tape, journal
+
+
+def test_excursion_report_uses_full_lot_exact_token_books_and_futures(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "range_report.json",
+    )
+    assert report["status"] == "analysed"
+    assert len(report["range_excursion_opportunities"]) == 1
+    assert [r["horizon_seconds"] for r in report["range_excursion_horizons"]] == [
+        300,
+        600,
+        900,
+    ]
+    assert all(
+        row["observed_book_and_futures_complete"]
+        for row in report["range_excursion_horizons"]
+    )
+    assert all(
+        row["option_cost_adjusted"]["terminal"]["fees_rupees"] > 0
+        for row in report["range_excursion_horizons"]
+    )
+    assert (
+        report["range_excursion_horizons"][0]["futures_markout"][
+            "signed_terminal_points"
+        ]
+        > 0
+    )
+    center = next(
+        row
+        for row in report["range_admission_comparisons"]
+        if row["policy"] == "ignore_center_disagreement_only"
+        and row["horizon_seconds"] == 300
+    )
+    assert center["unique_first_seen_excursions"] == 1
+    assert center["full_lot_bid_futures_labelled"] == 1
+    assert center["same_decision_cash_risk_unverified"] == 1
+    assert center["verified_risk_and_observed_horizon"] == 0
+    assert center["modeled_net_rupees_mean"] is None
+    assert center["comparison_not_causal_or_promotable"] is True
+    assert report["eligible_for_entry_filter_change"] is False
+    assert json.loads((tmp_path / "range_report.json").read_text())[
+        "range_excursion_opportunities"
+    ]
+
+
+def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
+    tmp_path,
+) -> None:
+    tape, journal = _range_excursion_session(tmp_path, bid_quantity=64)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "missing_depth_report.json",
+    )
+    assert report["status"] == "analysed"
+    assert all(
+        row["futures_markout"] is not None
+        and row["option_full_lot_markout"] is None
+        and row["option_cost_adjusted"] is None
+        for row in report["range_excursion_horizons"]
+    )
+    assert all(
+        row["verified_risk_and_observed_horizon"] == 0
+        for row in report["range_admission_comparisons"]
+    )

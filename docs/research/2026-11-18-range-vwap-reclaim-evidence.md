@@ -405,3 +405,51 @@ state and short-term directional efficiency; percentage of complete option
 quote/fill evidence; forward 5/10/15-minute markouts for non-overlapping
 rejected opportunities; model-to-broker spread/IV/theta and fill shortfall.
 No new live threshold should be promoted on the limited futures-only proxy.
+
+## 20 November: canonical futures-excursion provenance and executable quote research
+
+Research-only extension, **no new LIVE admission, target, risk, trailing or broker
+state owner**. Scope: the existing `RangeVWAPReclaimStrategy` can now emit
+`RANGE_VWAP_EXCURSION_OBSERVED` once per selected CE/PE futures band excursion
+(the first contiguous completed futures bar beyond the frozen band identifies
+its causal start). The independent strategy-manager regime rejection path invokes
+only its throttled observation method; it does not evaluate a broker trade.
+
+- First immutable event records exact selected option symbol, side, futures
+  contract, previous completed-bar excursion identity, regime, session VWAP,
+  rolling center and ATR separation, short-horizon volatility/directional
+  efficiency and actual quote data only if present and tradable.
+  `RANGE_VWAP_EXCURSION_DECISION` logs distinct real rejection stages, the
+  cost-eligibility stage and signal emission. Evidence is written to **existing
+  journald**, copied by the existing daily archiver; no new table or collector.
+- Post-market `market_research_report.build_session_research_report` produces
+  exactly one canonical **first-seen** record per futures/side/excursion
+  timestamp across restarts. Later option contract rotations cannot replace
+  the entry option; conflicting contract identities are unlabelled.
+- For 300/600/900 seconds, its report joins causal *original captured* futures
+  WebSocket price paths with verified same-run, same-basket-phase, exact-token
+  `ws_full` option top-of-book quotes. One-lot executable **best-level** buy
+  and sell quantities are required. Sparse/gapped or stale entry/terminal
+  observations are UNLABELLED, not zero, and hypothetical quotes are not fills.
+- The same existing NSE/Zerodha fee model and 5-bps adverse slippage per side
+  price the observed ask-to-bid *terminal* scenarios; spread is not charged
+  again. Counterfactual policies are labelled
+  `ignore_center_disagreement_only` and `ignore_range_width_only`.
+  They qualify for a same-evaluation economics comparison ONLY if a
+  verifiable modeled stop risk of **at most ₹773** and net R:R of **at least
+  1.5** were present *at the first observation*. Most structurally blocked
+  opportunities cannot meet this evidence bar by definition. They remain
+  explicitly **risk-unverified**; do not infer an alternate profitable trade.
+- None of the research outcomes establishes broker fill probability,
+  executed protective-stop paths, realistic unfilled orders, signal-gate causal
+  impact or out-of-sample improvement. `eligible_for_entry_filter_change`
+  remains false. A 15-minute hypothetical terminal bid is not a complete
+  strategy lifecycle simulation.
+
+**Coverage caveat:** Observations require authenticated completed futures bars
+and a selected option at the decision. If the session was not captured, a
+strategy never evaluated, a manager context had no eligible selected option,
+or a tape lacks contract-token/depth/run provenance, output is missing or
+unlabelled rather than reconstructed. Volatility threshold tuning or a
+"relaxed" RANGE gate remains prohibited without independent out-of-sample
+execution evidence.

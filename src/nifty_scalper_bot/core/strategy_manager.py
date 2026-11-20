@@ -3825,6 +3825,15 @@ class StrategyManager(_BaseStrategyManager):
                 strategy_reasons[strategy_name] = reason
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 self._record_strategy_no_vote_observability(strategy_name, reason)
+                if strategy_name == "RangeVWAPReclaim" and symbol_is_option:
+                    # Observation only: inspect one completed futures minute
+                    # without bypassing this original regime/direction veto.
+                    observer = getattr(strategy, "observe_research_excursion", None)
+                    if callable(observer):
+                        try:
+                            observer(symbol, indicators, blocked_reason=reason)
+                        except Exception:  # noqa: BLE001
+                            pass  # A research failure must never block execution.
                 continue
             if strategy_name in {"VWAPPro", "OrderFlow"} and not symbol_is_option:
                 strategy_reasons[strategy_name] = "context_symbol_skipped_for_option_strategy"

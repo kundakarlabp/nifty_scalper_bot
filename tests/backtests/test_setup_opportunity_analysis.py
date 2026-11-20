@@ -403,3 +403,75 @@ def test_contextual_counterfactual_strata_count_unique_setup_not_repeated_votes(
     assert partial["labelled_setups"] == 1
     assert partial["unlabelled_setups"] == 1
     assert partial["mean_post_cost_r"] is None
+
+
+def test_range_excursion_canonicalizer_preserves_first_quote_across_restarts() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_range_excursions,
+    )
+
+    at = datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc)
+    first_bar = (at - timedelta(minutes=1)).isoformat()
+    future = "NFO:NIFTY26NOVFUT"
+    ce = "NFO:NIFTY26NOV25350CE"
+    other = "NFO:NIFTY26NOV25400CE"
+    identity = f"{future}:CE:{first_bar}"
+    first = {
+        "excursion_id": identity,
+        "decision_at": at.isoformat(),
+        "excursion_first_bar": first_bar,
+        "futures_symbol": future,
+        "symbol": ce,
+        "side": "CE",
+        "regime": "RANGING",
+        "structural_reason": "session_rolling_center_disagree",
+        "quote": {"bid": 100.0, "ask": 100.5, "lot_size": 65},
+    }
+    duplicate = {
+        **first,
+        "decision_at": (at + timedelta(minutes=1)).isoformat(),
+        "symbol": other,
+        "quote": {"bid": 135.0, "ask": 135.5, "lot_size": 65},
+    }
+    decisions = [
+        {
+            "excursion_id": identity,
+            "decision_at": at.isoformat(),
+            "symbol": ce,
+            "reason": "session_rolling_center_disagree",
+        },
+        {
+            "excursion_id": identity,
+            "decision_at": (at + timedelta(seconds=1)).isoformat(),
+            "symbol": other,
+            "reason": "signal_emitted",
+            "modeled_stop_risk": 100.0,
+            "modeled_net_rr": 4.0,
+        },
+    ]
+    records = canonicalize_range_excursions([duplicate, first], decisions)
+    assert len(records) == 1
+    record = records[0]
+    assert record["duplicate_restart_observations"] == 1
+    assert record["contract_identity_conflicted"] is True
+    assert record["symbol"] == ce
+    assert record["quote"]["ask"] == 100.5
+    assert record["first_rejection_reason"] == "session_rolling_center_disagree"
+    assert record["same_decision_signal_emitted"] is False
+    assert record["modeled_stop_risk"] is None
+    assert "signal_emitted" in record["observed_decision_reasons"]
+
+
+def test_range_excursion_invalid_identity_is_never_synthesized() -> None:
+    from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_range_excursions,
+    )
+
+    assert (
+        canonicalize_range_excursions(
+            [{"decision_at": "2026-11-19T10:00:00+05:30", "side": "CE"}], []
+        )
+        == []
+    )
