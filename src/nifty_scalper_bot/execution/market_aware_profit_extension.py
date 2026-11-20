@@ -1803,20 +1803,13 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
         return False
     get_fast_activation = getattr(manager, "_trail_activation_r", None)
     fast_activation = (
-        float(get_fast_activation(bracket))
-        if callable(get_fast_activation)
-        else 0.60
+        float(get_fast_activation(bracket)) if callable(get_fast_activation) else 0.60
     )
-    if (
-        max(
-            fast_bid,
-            _positive(fast_config.get("_adaptive_profit_executable_high"))
-            or fast_entry,
-            _positive(fast_config.get("_verified_legacy_executable_high"))
-            or fast_entry,
-        )
-        < fast_entry + fast_activation * (fast_entry - fast_stop)
-    ):
+    if max(
+        fast_bid,
+        _positive(fast_config.get("_adaptive_profit_executable_high")) or fast_entry,
+        _positive(fast_config.get("_verified_legacy_executable_high")) or fast_entry,
+    ) < fast_entry + fast_activation * (fast_entry - fast_stop):
         return False
 
     executable = _adaptive_executable_bid(manager, bracket)
