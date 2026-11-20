@@ -580,6 +580,18 @@ class VWAPProStrategy(EliteStrategy):
             stale_data = bool(indicators.get("stale_data_used")) or float(
                 indicators.get("data_age_seconds") or 0.0
             ) > max_data_age
+            # A stale premium candle must not prime a VWAP thesis. The runner
+            # has a separate safety veto, but this strategy is responsible for
+            # qualifying its own evidence before creating a candidate.
+            if stale_data:
+                self._no_vote("stale_or_invalid_data")
+                return None
+            # The authoritative context resolver can explicitly mark otherwise
+            # recent snapshots unusable (e.g., stale source tick/provenance).
+            # Never override that negative verdict with a small numeric age.
+            if indicators.get("context_fresh") is False:
+                self._no_vote("underlying_context_stale")
+                return None
             atr_safe = max(atr, current_price * 0.01, 1.0)
             distance_points = abs(current_price - vwap)
             distance_pct = distance_points / max(vwap, 1e-9)
@@ -922,8 +934,10 @@ class VWAPProStrategy(EliteStrategy):
             require_alignment_shadow = str(
                 os.getenv("VWAP_PRO_REQUIRE_UNDERLYING_ALIGNMENT_SHADOW", "false")
             ).lower() in {"1", "true", "yes", "on"}
-            context_fresh = context_age_seconds <= float(
-                os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
+            context_fresh = (
+                indicators.get("context_fresh") is not False
+                and context_age_seconds
+                <= float(os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120")
             )
             hard_conflict = bool(
                 (
