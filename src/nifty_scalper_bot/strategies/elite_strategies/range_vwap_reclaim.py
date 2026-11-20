@@ -777,6 +777,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         identity = f"{future}:{side}:{first}"
         with self._guard_lock:
             if identity in self._opportunities:
+                self._opportunities[identity]["_latest_evaluation_at"] = (
+                    decision_at.isoformat()
+                )
                 self._active_opportunity = identity
                 return
             bid = _value(indicators.get("bid"))
@@ -825,6 +828,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "dominant_rejection": None,
                 "identity": identity,
                 "observed_decisions": 0,
+                "_latest_evaluation_at": decision_at.isoformat(),
                 "shadow_net_pnl": None,
                 "option_fills_verified": False,
             }
@@ -861,7 +865,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             json.dumps(
                 {
                     "v": 1,
-                    "decision_at": datetime.now(_IST).isoformat(),
+                    "decision_at": record["_latest_evaluation_at"],
                     "excursion_id": identity,
                     "reason": reason[:100],
                     "symbol": record["symbol"],
