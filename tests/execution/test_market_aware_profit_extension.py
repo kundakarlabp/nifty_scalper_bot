@@ -1171,3 +1171,47 @@ def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
     )
     assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
     assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"
+
+@pytest.mark.parametrize("as_iso_string", [False, True])
+def test_naive_nse_exchange_timestamp_is_ist_for_full_depth_trailing(
+    as_iso_string,
+):
+    """A genuinely current exchange quote must not look 5h30m in the future."""
+    from zoneinfo import ZoneInfo
+
+    nse_now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    raw = nse_now.isoformat() if as_iso_string else nse_now
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0, quantity=65)
+    quote["exchange_timestamp"] = raw
+    age = profit_extension._quote_age_seconds(quote)
+
+    assert age is not None and age <= 3.0
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is not None
+
+
+@pytest.mark.parametrize("seconds_offset", [-120, 120])
+def test_naive_nse_exchange_time_cannot_be_overridden_by_recent_receive_time(
+    seconds_offset,
+):
+    """Stale/future source time must still veto trailing even if received now."""
+    from zoneinfo import ZoneInfo
+
+    nse_now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0, quantity=65)
+    quote["exchange_timestamp"] = (
+        nse_now + timedelta(seconds=seconds_offset)
+    ).isoformat()
+    quote["received_at"] = time()
+
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is None
+
+
+def test_aware_utc_and_numeric_epoch_quote_ages_are_unchanged():
+    now_utc = datetime.now(timezone.utc)
+    for stamp in (now_utc, now_utc.isoformat(), now_utc.timestamp()):
+        age = profit_extension._quote_age_seconds({"exchange_timestamp": stamp})
+        assert age is not None and age <= 3.0
