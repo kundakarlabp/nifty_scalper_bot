@@ -1685,6 +1685,9 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         _trace_adaptive_no_ratchet(manager, bracket, "ratchet_rejected", quote=quote)
         return False
+    # Once the continuation-aware owner has moved protection, never run a
+    # competing legacy tier later merely because adaptive holds its stop.
+    config["_adaptive_profit_has_ratcheted"] = True
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
         # A successful modify_order response updates the local broker record;
@@ -1756,6 +1759,21 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
     """
     if not _env_bool("VERIFIED_TIER_FALLBACK_ENABLED", True):
         return False
+    # An adaptive NOOP after its first ratchet is an intentional continuation
+    # decision, not a failure. Do not allow legacy tiers to override its
+    # wider giveback allowance or a proven STRONG continuation assessment.
+    owner_config = getattr(bracket, "trailing_config", None)
+    ownership_proof = getattr(bracket, "trade_provenance", None)
+    if adaptive_profit_lock_enabled(manager):
+        if isinstance(owner_config, dict) and (
+            owner_config.get("_adaptive_profit_has_ratcheted") is True
+            or owner_config.get("_adaptive_profit_state") == "STRONG"
+        ):
+            return False
+        if isinstance(ownership_proof, Mapping) and isinstance(
+            ownership_proof.get("adaptive_profit_lock"), Mapping
+        ):
+            return False
     if (
         str(getattr(bracket, "side", "")).upper() != "BUY"
         or not bool(getattr(bracket, "trailing_enabled", True))
