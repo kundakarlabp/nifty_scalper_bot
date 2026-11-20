@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -77,3 +78,13 @@ async def test_readiness_normalizes_context_symbols(monkeypatch, caplog) -> None
     await app._recompute_and_push_runtime_readiness(ctx, reason='test')
     assert ctx.active_trading_universe.get("spot_symbol") == "NSE:NIFTY"
     assert "NSE:NIFTY" in list(ctx.active_trading_universe.get("symbols") or [])
+
+
+def test_out_of_hours_data_mode_has_explicit_diagnostic() -> None:
+    source = (
+        Path(__file__).resolve().parents[2] / "src/nifty_scalper_bot/core/app.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "OUT_OF_HOURS_DATA_MODE" in source
+        or "BASKET_BUILD_DEFERRED" in source
+    )
