@@ -622,9 +622,7 @@ def test_vwap_has_no_unreachable_early_trend_pullback_branch():
         ({"context_fresh": False}, "underlying_context_stale"),
     ],
 )
-def test_live_vwap_never_arms_thesis_from_stale_inputs(
-    monkeypatch, updates, reason
-):
+def test_live_vwap_never_arms_thesis_from_stale_inputs(monkeypatch, updates, reason):
     """The strategy itself must fail closed, not only downstream admission."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
