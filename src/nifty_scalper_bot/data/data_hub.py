@@ -4,6 +4,8 @@ Runtime role:
 - Single read surface that strategies/execution use to access ticks, quotes,
   OHLC, open interest, and active-basket context.
 - Delegates all data access to MarketDataManager; binds to the MDM tick bus.
+- set_active_bracket_symbols forwards the canonical held-option protection set
+  to MDM, including across ATM basket rotation; it owns no subscription list.
 
 Position in the pipeline:
     data/market_data_manager.py → THIS FILE (data_hub.py)
