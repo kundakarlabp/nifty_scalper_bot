@@ -9282,9 +9282,10 @@ class MarketDataManager:
             elif "volume_traded" in raw_safe:
                 tick_dict["volume_cumulative"] = raw_safe.get("volume_traded")
             tick_dict["symbol"] = symbol
-            tick_dict["timestamp"] = pd.to_datetime(
-                tick_dict["timestamp"], utc=True, errors="coerce"
-            ).isoformat()
+            # The validated tick timestamp was already parsed to UTC above.
+            # Reusing it avoids a second Pandas datetime conversion on every
+            # websocket tick while keeping the same canonical UTC timestamp.
+            tick_dict["timestamp"] = tick_ts.isoformat()
             token_value = raw.get("instrument_token") or raw.get("token")
             if token_value is not None:
                 tick_dict["instrument_token"] = token_value
