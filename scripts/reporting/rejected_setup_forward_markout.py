@@ -129,8 +129,8 @@ def load_archive_quotes(
 def load_excursion_quote_paths(
     path: Path,
 ) -> tuple[
-    dict[str, list[tuple[float, float]]],
-    dict[str, list[tuple[float, float, float, int, int]]],
+    dict[str, list[tuple[float, float, str]]],
+    dict[str, list[tuple[float, float, float, int, int, str]]],
 ]:
     """Observe selected futures prices and exact-token FULL option books.
 
@@ -143,16 +143,19 @@ def load_excursion_quote_paths(
     from nifty_scalper_bot.storage.replay_archive import iter_session
     from nifty_scalper_bot.utils.symbols import normalize_symbol
 
-    futures: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    books: dict[str, list[tuple[float, float, float, int, int]]] = defaultdict(list)
+    futures: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
+    books: dict[str, list[tuple[float, float, float, int, int, str]]] = defaultdict(list)
     selected: dict[str, str] = {}
     tokens: dict[str, int] = {}
+    phase = 0
+    previous_phase_key: tuple[str, ...] | None = None
     for event in iter_session(path):
         payload = event["payload"]
         if event["kind"] == "snapshot":
             basket = payload.get("basket")
             if not isinstance(basket, Mapping):
                 selected = {}
+                previous_phase_key = None
                 continue
             selected = {
                 side: normalize_symbol(str(basket.get(f"selected_{side.lower()}") or ""))
@@ -177,10 +180,21 @@ def load_excursion_quote_paths(
                 for raw_symbol, token in mapping.items():
                     if type(token) is int and token > 0:
                         tokens[normalize_symbol(str(raw_symbol))] = token
+            phase_key = (
+                str(event["run_id"]),
+                selected.get("CE", ""),
+                selected.get("PE", ""),
+                selected.get("FUT", ""),
+                *(str(tokens.get(selected.get(k, "")) or "") for k in ("CE", "PE", "FUT")),
+            )
+            if phase_key != previous_phase_key:
+                phase += 1
+                previous_phase_key = phase_key
             continue
         if str(payload.get("source") or "").lower() not in {"ws", "ws_full"}:
             continue
         symbol = normalize_symbol(str(payload.get("symbol") or ""))
+        scope = f"{event['run_id']}:{phase}"
         at = datetime.fromisoformat(event["available_at"]).timestamp()
         if not math.isfinite(at):
             continue
@@ -191,7 +205,7 @@ def load_excursion_quote_paths(
             price = _positive(payload.get("ltp") or payload.get("last_price"))
             if price is not None and type(payload.get("instrument_token")) is int:
                 if payload["instrument_token"] == tokens.get(symbol):
-                    futures[symbol].append((at, price))
+                    futures[symbol].append((at, price, scope))
             continue
         side = symbol[-2:]
         if (
@@ -233,7 +247,7 @@ def load_excursion_quote_paths(
             or not math.isclose(ask, top_ask, abs_tol=1e-6)
         ):
             continue
-        books[symbol].append((at, bid, ask, bid_qty, ask_qty))
+        books[symbol].append((at, bid, ask, bid_qty, ask_qty, scope))
     for rows in futures.values():
         rows.sort(key=lambda row: row[0])
     for rows in books.values():
