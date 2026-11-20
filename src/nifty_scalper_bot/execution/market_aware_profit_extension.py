@@ -1834,7 +1834,9 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
     room = max(_TICK_SIZE, spread * 1.5)
     candidate = _round_tick(min(max(float(proposed), floor), bid - room))
     if candidate < floor - _TICK_SIZE / 2:
-        _trace_adaptive_no_ratchet(manager, bracket, "fallback_no_bid_room", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "fallback_no_bid_room", quote=quote
+        )
         return False
     current = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     if candidate <= current + _TICK_SIZE / 2:
@@ -1842,7 +1844,9 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
     if not _ratchet_stop(
         manager, bracket, candidate, bid, reason="verified_legacy_tier_fallback"
     ):
-        _trace_adaptive_no_ratchet(manager, bracket, "fallback_ratchet_rejected", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "fallback_ratchet_rejected", quote=quote
+        )
         return False
     config["_verified_legacy_last_quote_identity"] = str(
         quote.get("quote_update_version")
