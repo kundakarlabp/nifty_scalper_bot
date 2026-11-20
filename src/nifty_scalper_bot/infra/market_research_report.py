@@ -528,8 +528,15 @@ def _range_excursion_markouts(
         when = float(row["decision_timestamp"])
         quote = row.get("quote")
         evidence = quote if isinstance(quote, Mapping) else {}
-        quantity = evidence.get("lot_size")
-        lot_known = type(quantity) is int and 0 < quantity < 10000
+        raw_quantity = evidence.get("lot_size")
+        quantity: int | None = (
+            raw_quantity
+            if isinstance(raw_quantity, int)
+            and not isinstance(raw_quantity, bool)
+            and 0 < raw_quantity < 10000
+            else None
+        )
+        lot_known = quantity is not None
         original_future = futures.get(future, ())
         future_times = [tick[0] for tick in original_future]
         previous = bisect.bisect_right(future_times, when) - 1
@@ -552,15 +559,17 @@ def _range_excursion_markouts(
                 )
                 if scope == phase and bid_qty >= quantity and ask_qty >= quantity
             ]
-            if phase is not None and lot_known
+            if phase is not None and quantity is not None
             else []
         )
         times = [item[0] for item in full_lot]
         stop_risk = row.get("modeled_stop_risk")
         net_rr = row.get("modeled_net_rr")
         risk_verified = (
-            type(stop_risk) in (float, int)
-            and type(net_rr) in (float, int)
+            isinstance(stop_risk, (float, int))
+            and not isinstance(stop_risk, bool)
+            and isinstance(net_rr, (float, int))
+            and not isinstance(net_rr, bool)
             and math.isfinite(stop_risk)
             and math.isfinite(net_rr)
             and 0 < stop_risk <= 773
@@ -600,7 +609,7 @@ def _range_excursion_markouts(
                     quantity=quantity,
                     adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
                 )
-                if option is not None and lot_known
+                if option is not None and quantity is not None
                 else None
             )
             outcomes.append(
