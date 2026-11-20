@@ -42,3 +42,26 @@ def test_no_completed_bars_is_unknown_not_zero() -> None:
 def test_sparse_and_bad_volume_must_not_be_called_ready() -> None:
     bars = [_bar(15, 100), _bar(16, 0), _bar(17, 0), _bar(18, 200)]
     assert analyze_completed_futures_volume(bars)["ready"] is False
+
+
+def test_extreme_low_completed_volume_is_diagnostic_not_a_synthetic_vote() -> None:
+    bars = [_bar(minute, 100) for minute in range(15, 21)]
+    bars.append(_bar(21, 1))
+    report = analyze_completed_futures_volume(bars)
+    assert report["ready"] is True  # Data provenance is valid, activity is low.
+    assert report["ratio"] == 0.01
+    assert report["latest_volume"] == 1
+    assert report["baseline_mean"] == 100
+    assert report["baseline_min"] == 100
+    assert report["baseline_max"] == 100
+    assert report["extreme_low_relative_volume"] is True
+    assert report["reason"] == "verified"
+
+
+def test_normal_completed_volume_does_not_flag_extreme_low() -> None:
+    bars = [_bar(minute, 100) for minute in range(15, 21)]
+    bars.append(_bar(21, 75))
+    report = analyze_completed_futures_volume(bars)
+    assert report["ready"] is True
+    assert report["ratio"] == 0.75
+    assert report["extreme_low_relative_volume"] is False
