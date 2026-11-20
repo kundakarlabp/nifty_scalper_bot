@@ -767,11 +767,18 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         side = symbol[-2:].upper()
         future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
         first = str(structural.get("excursion_first_bar_timestamp") or "")
+        selected = (
+            indicators.get("is_selected_option") is True
+            or normalize_symbol(
+                str(indicators.get("selected_ce" if side == "CE" else "selected_pe") or "")
+            )
+            == normalize_symbol(symbol)
+        )
         if (
             future is None
             or structural.get("excursion_side") != side
             or not first
-            or indicators.get("is_selected_option") is not True
+            or not selected
         ):
             return
         identity = f"{future}:{side}:{first}"
