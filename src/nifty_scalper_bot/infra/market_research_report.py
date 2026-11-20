@@ -512,8 +512,8 @@ def _session_decision_rows(
 
 def _range_excursion_markouts(
     excursions: Sequence[Mapping[str, Any]],
-    futures: Mapping[str, Sequence[tuple[float, float]]],
-    books: Mapping[str, Sequence[tuple[float, float, float, int, int]]],
+    futures: Mapping[str, Sequence[tuple[float, float, str]]],
+    books: Mapping[str, Sequence[tuple[float, float, float, int, int, str]]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Price the same *first-seen* setup; keep thin/unverified paths unlabelled."""
     from scripts.reporting.rejected_setup_forward_markout import (
@@ -530,14 +530,27 @@ def _range_excursion_markouts(
         evidence = quote if isinstance(quote, Mapping) else {}
         quantity = evidence.get("lot_size")
         lot_known = type(quantity) is int and 0 < quantity < 10000
-        original_book = books.get(symbol, ())
+        original_future = futures.get(future, ())
+        future_times = [tick[0] for tick in original_future]
+        previous = bisect.bisect_right(future_times, when) - 1
+        # A restart or selected-contract rotation is not one continuous tape.
+        phase = (
+            original_future[previous][2]
+            if previous >= 0 and 0 <= when - future_times[previous] <= 3
+            else None
+        )
+        scoped_future = [
+            (timestamp, price)
+            for timestamp, price, scope in original_future
+            if phase is not None and scope == phase
+        ]
         full_lot = (
             [
                 (timestamp, bid, ask)
-                for timestamp, bid, ask, bid_qty, ask_qty in original_book
-                if bid_qty >= quantity and ask_qty >= quantity
+                for timestamp, bid, ask, bid_qty, ask_qty, scope in books.get(symbol, ())
+                if scope == phase and bid_qty >= quantity and ask_qty >= quantity
             ]
-            if lot_known
+            if phase is not None and lot_known
             else []
         )
         times = [item[0] for item in full_lot]
@@ -554,7 +567,7 @@ def _range_excursion_markouts(
         first_rejection = str(row.get("first_rejection_reason") or "")
         for horizon in (300, 600, 900):
             fut, fut_status = observed_futures_markout(
-                futures.get(future, ()),
+                scoped_future,
                 decision_ts=when, horizon_s=horizon, side=str(row["side"])
             )
             option, option_status = (
@@ -591,6 +604,7 @@ def _range_excursion_markouts(
                     "futures_contract": future,
                     "option_contract": symbol,
                     "side": row["side"],
+                    "replay_epoch_phase_verified": phase is not None,
                     "regime": row.get("regime"),
                     "center_gap_atr": row.get("center_gap_atr"),
                     "volatility_ratio": row.get("volatility_ratio"),
