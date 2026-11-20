@@ -1448,9 +1448,7 @@ def test_authoritative_exchange_timestamp_rejects_old_or_future_quote(delta):
 
 
 @pytest.mark.parametrize("proof", ["ratcheted", "strong", "provenance"])
-def test_verified_tiers_never_override_adaptive_continuation_owner(
-    monkeypatch, proof
-):
+def test_verified_tiers_never_override_adaptive_continuation_owner(monkeypatch, proof):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
@@ -1461,9 +1459,7 @@ def test_verified_tiers_never_override_adaptive_continuation_owner(
     else:
         bracket.trade_provenance["adaptive_profit_lock"] = {"state": "NORMAL"}
 
-    assert not profit_extension.tighten_verified_tier_fallback(
-        manager, bracket, 107.0
-    )
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
     assert bracket.sl_trigger_price == 94.0
     assert not syncs
 
@@ -1475,8 +1471,6 @@ def test_explicit_adaptive_disable_preserves_verified_live_tier_fallback(
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
     bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
-    assert profit_extension.tighten_verified_tier_fallback(
-        manager, bracket, 107.0
-    )
+    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
     assert bracket.sl_trigger_price > 94.0
     assert len(syncs) == 1
