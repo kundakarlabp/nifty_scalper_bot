@@ -823,6 +823,8 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 },
                 "status": "observed_not_traded",
                 "dominant_rejection": None,
+                "identity": identity,
+                "observed_decisions": 0,
                 "shadow_net_pnl": None,
                 "option_fills_verified": False,
             }
@@ -843,10 +845,16 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if not identity or identity not in self._opportunities:
             return
         record = self._opportunities[identity]
-        seen = record.setdefault("_research_logged_reasons", set())
-        if reason in seen:
+        seen = record.setdefault("_research_logged_reasons", [])
+        if reason in seen or len(seen) >= 16:
             return
-        seen.add(reason)
+        seen.append(reason)
+        record["observed_decisions"] = len(seen)
+        if reason not in {"cost_eligible", "signal_emitted"}:
+            record["dominant_rejection"] = reason
+            record["status"] = "rejected"
+        elif reason == "signal_emitted":
+            record["status"] = "signal_emitted"
         budget = record.get("option_cost_risk") or {}
         LOGGER.info(
             "RANGE_VWAP_EXCURSION_DECISION %s",
