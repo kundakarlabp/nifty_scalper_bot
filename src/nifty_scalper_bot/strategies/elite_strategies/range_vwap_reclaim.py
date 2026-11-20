@@ -363,14 +363,12 @@ def assess_range_vwap_reclaim(
     }
     excursion_side = evidence["excursion_side"]
     if excursion_side is not None:
-        outside = (
-            (lambda candle: float(candle["close"]) < lower)
-            if excursion_side == "CE"
-            else (lambda candle: float(candle["close"]) > upper)
-        )
         first_excursion_bar = None
         for bar in reversed(history):
-            if not outside(bar):
+            close = float(bar["close"])
+            if (excursion_side == "CE" and close >= lower) or (
+                excursion_side == "PE" and close <= upper
+            ):
                 break
             first_excursion_bar = bar["timestamp"]
         evidence["excursion_first_bar_timestamp"] = first_excursion_bar
@@ -1160,7 +1158,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_reversal_side_conflict")
             return None
         opportunity_key = self._active_opportunity
-        if opportunity_key in self._opportunities:
+        if opportunity_key is not None and opportunity_key in self._opportunities:
             self._opportunities[opportunity_key]["structural_qualified"] = True
 
         if indicators.get("underlying_direction_state") == "TRANSITION":
@@ -1377,8 +1375,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         ):
             self._no_vote("range_live_cash_risk_or_net_rr")
             return None
-        if self._active_opportunity in self._opportunities:
-            row = self._opportunities[self._active_opportunity]
+        active_opportunity = self._active_opportunity
+        if active_opportunity is not None and active_opportunity in self._opportunities:
+            row = self._opportunities[active_opportunity]
             row["status"] = "cost_eligible"
             row["modeled_cost_eligible"] = True
             row["option_cost_risk"] = budget
@@ -1428,8 +1427,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             if not self._persist_guard():
                 self._no_vote("range_durable_setup_reservation_failed")
                 return None
-        if self._active_opportunity in self._opportunities:
-            self._opportunities[self._active_opportunity]["setup_id"] = setup_id
+        active_opportunity = self._active_opportunity
+        if active_opportunity is not None and active_opportunity in self._opportunities:
+            self._opportunities[active_opportunity]["setup_id"] = setup_id
         if not live_pilot:
             if len(self._seen) > 512:
                 self._seen = {setup_id}
