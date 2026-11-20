@@ -291,7 +291,32 @@ def _chain_pcr(manager: Any) -> float | None:
 
 
 def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
-    raw = (
+    """Require fresh exchange-time evidence; never replace it with receipt time.
+
+    MDM normalizes broker-local naive exchange datetimes into an aware
+    canonical timestamp and labels its verified source. Prefer that proven
+    canonical field to reinterpreting the raw naive datetime as UTC.
+    """
+    canonical = quote.get("timestamp")
+    source = str(quote.get("timestamp_source") or "").strip().lower()
+    exchange_sources = {
+        "exchange_timestamp",
+        "last_trade_time",
+        "last_traded_time",
+        "last_trade_timestamp",
+        "exchange_update_time",
+        "last_price_time",
+    }
+    authoritative = None
+    if quote.get("source_timestamp_valid") is True and source in exchange_sources:
+        if isinstance(canonical, datetime) and canonical.tzinfo is not None:
+            authoritative = canonical
+        elif isinstance(canonical, str):
+            with suppress(ValueError, TypeError):
+                stamp = datetime.fromisoformat(canonical.replace("Z", "+00:00"))
+                if stamp.tzinfo is not None:
+                    authoritative = canonical
+    raw = authoritative or (
         quote.get("exchange_timestamp")
         or quote.get("timestamp")
         or quote.get("received_at")
