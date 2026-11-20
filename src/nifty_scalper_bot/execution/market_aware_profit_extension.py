@@ -33,12 +33,14 @@ import os
 import statistics
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 
 LOGGER = logging.getLogger("nifty_scalper_bot.execution.market_aware_profit_extension")
 _TICK_SIZE = 0.05
+_NSE_TZ = ZoneInfo("Asia/Kolkata")
 
 _OPTION_INDICATORS = (
     "ltp",
@@ -287,6 +289,13 @@ def _chain_pcr(manager: Any) -> float | None:
 
 
 def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
+    """Validate NSE event age; timezone-free exchange timestamps are IST.
+
+    Mirror the canonical market-tick contract: naive exchange and broker
+    datetimes are Asia/Kolkata, numeric epochs remain UTC, and aware values
+    keep their offset. Stale/future evidence still fails closed, even if a
+    receive timestamp happens to be recent.
+    """
     raw = (
         quote.get("exchange_timestamp")
         or quote.get("timestamp")
@@ -296,7 +305,7 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
         return None
     try:
         if isinstance(raw, datetime):
-            stamp = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            stamp = raw if raw.tzinfo else raw.replace(tzinfo=_NSE_TZ)
             age = (
                 datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
             ).total_seconds()
@@ -309,7 +318,7 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
         else:
             stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             if stamp.tzinfo is None:
-                stamp = stamp.replace(tzinfo=timezone.utc)
+                stamp = stamp.replace(tzinfo=_NSE_TZ)
             age = (
                 datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
             ).total_seconds()
