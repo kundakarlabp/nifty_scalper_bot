@@ -1376,3 +1376,45 @@ def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
     bracket.last_ltp = 107.0
     assert owner._apply_trailing_math(bracket)
     assert calls == ["adaptive", "verified_tiers"]
+
+
+def test_20261120_archived_286_bid_samples_are_not_full_lot_exit_proof(
+    monkeypatch,
+):
+    """Replay all actual saved bids; absent depth must never ratchet LIVE."""
+    import json
+    from pathlib import Path
+
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "nifty_20261120_smc_option_quote_replay.json"
+    )
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    samples = data["samples"]
+    assert len(samples) == 286
+    entry = data["entry_price"]
+    risk = entry - data["initial_sl"]
+    threshold = entry + 0.60 * risk
+    assert sum(row[1] >= threshold for row in samples) >= 12
+    assert max(row[1] for row in samples) == pytest.approx(150.30)
+
+    manager, bracket, quote, syncs = _ready_verified_tier_fallback()
+    bracket.entry_price = entry
+    bracket.initial_sl_trigger_price = data["initial_sl"]
+    bracket.sl_trigger_price = data["initial_sl"]
+    bracket.exchange_stop_trigger_price = data["initial_sl"]
+    # The actual archival recorder captured best bid/ask, not full-lot
+    # depth. Do not invent queue quantity, market-time identity or fills.
+    for _epoch, bid, ask, _source, _local_stop, _broker_stop in samples:
+        quote.update({"bid": bid, "ask": ask, "ltp": bid})
+        quote.pop("depth", None)
+        quote["received_at"] = time()
+        manager._exit_quotes[SYMBOL] = (bid, ask, time())
+        assert not profit_extension.tighten_verified_tier_fallback(
+            manager, bracket, bid
+        )
+    assert bracket.sl_trigger_price == data["initial_sl"]
+    assert bracket.trail_revision == 0
+    assert not syncs
