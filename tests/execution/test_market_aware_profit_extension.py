@@ -1171,3 +1171,62 @@ def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
     )
     assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
     assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"
+
+
+def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._exit_quotes = {SYMBOL: (115.0, 115.2, time())}
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager, bid=115.0, quantity=20)
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="nifty_scalper_bot.execution.market_aware_profit_extension",
+    ):
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+
+    lines = [record.message for record in caplog.records if
+             "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message]
+    assert len(lines) == 1
+    assert "reason=full_size_quote_unqualified" in lines[0]
+    assert "top_bid_qty=20.0 required_qty=65" in lines[0]
+    assert "full_size_bid_proven=False" in lines[0]
+    assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._exit_quotes = {SYMBOL: (115.0, 115.2, time())}
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0, quantity=65)
+    quote["exchange_timestamp"] = time() - 120.0
+    with caplog.at_level(
+        logging.WARNING,
+        logger="nifty_scalper_bot.execution.market_aware_profit_extension",
+    ):
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+
+    lines = [record.message for record in caplog.records if
+             "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message]
+    assert len(lines) == 1
+    assert "reason=full_size_quote_unqualified" in lines[0]
+    assert "full_size_bid_proven=True" in lines[0]
+    assert "received_age_s=" in lines[0]
+    assert bracket.sl_trigger_price == 94.0
