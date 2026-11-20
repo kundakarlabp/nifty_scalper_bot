@@ -687,10 +687,12 @@ def build_session_research_report(
     from scripts.reporting.rejected_setup_forward_markout import (
         evaluate_opportunities,
         load_archive_quotes,
+        load_excursion_quote_paths,
         summarize_groups,
     )
 
     from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_range_excursions,
         canonicalize_setup_opportunities,
     )
     from nifty_scalper_bot.journal.trade_ledger import load_candidate_decision_rows
@@ -700,6 +702,12 @@ def build_session_research_report(
     )
     rejection_records = _parse_records(
         journal, "RESEARCH_STRATEGY_REJECTION", session_date
+    )
+    range_excursion_observed = _parse_records(
+        journal, "RANGE_VWAP_EXCURSION_OBSERVED", session_date
+    )
+    range_excursion_decisions = _parse_records(
+        journal, "RANGE_VWAP_EXCURSION_DECISION", session_date
     )
     if not replay_path.is_file() and replay_path.name.endswith(".jsonl"):
         compressed_path = replay_path.with_name(replay_path.name + ".gz")
@@ -716,6 +724,11 @@ def build_session_research_report(
         "structural_outcomes": [],
         "structural_strata": [],
         "independent_setup_count": 0,
+        "range_excursion_opportunities": [],
+        "range_excursion_horizons": [],
+        "range_admission_comparisons": [],
+        "range_excursion_observed_events": len(range_excursion_observed),
+        "range_excursion_duplicate_observations": 0,
         "replay_sha256": None,
         "eligible_for_entry_filter_change": False,
         "cost_model_provenance": {
@@ -740,6 +753,19 @@ def build_session_research_report(
         report["writer_integrity_verified"] = True
         report["replay_sha256"] = sha
         report["tradable_ws_quote_ticks"] = quote_count
+        futures_tape, full_lot_books = load_excursion_quote_paths(replay_path)
+        opportunities = canonicalize_range_excursions(
+            range_excursion_observed, range_excursion_decisions
+        )
+        range_outcomes, comparisons = _range_excursion_markouts(
+            opportunities, futures_tape, full_lot_books
+        )
+        report["range_excursion_opportunities"] = opportunities
+        report["range_excursion_horizons"] = range_outcomes
+        report["range_admission_comparisons"] = comparisons
+        report["range_excursion_duplicate_observations"] = sum(
+            row["duplicate_restart_observations"] for row in opportunities
+        )
         if not quote_count:
             report["blocker"] = "no_tradable_depth_ws_quotes"
         else:
@@ -790,6 +816,14 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "replay_sha256": report.get("replay_sha256"),
         "tradable_ws_quote_ticks": report.get("tradable_ws_quote_ticks"),
         "independent_setup_count": report["independent_setup_count"],
+        "range_excursions": len(report["range_excursion_opportunities"]),
+        "range_excursion_duplicate_observations": report[
+            "range_excursion_duplicate_observations"
+        ],
+        "range_option_futures_horizons_fully_labelled": sum(
+            row["observed_book_and_futures_complete"]
+            for row in report["range_excursion_horizons"]
+        ),
         "structural_decision_rows_scoped": report.get(
             "structural_decision_rows_scoped"
         ),
@@ -897,6 +931,8 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             report["sampled_strata"] = []
             report["structural_outcomes"] = []
             report["structural_strata"] = []
+            report["range_excursion_horizons"] = []
+            report["range_admission_comparisons"] = []
             report["eligible_for_entry_filter_change"] = False
         fidelity = {
             "status": "unavailable",
