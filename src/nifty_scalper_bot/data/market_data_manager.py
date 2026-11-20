@@ -2642,9 +2642,9 @@ class MarketDataManager:
             to_add    = desired_tokens - current_ws_tokens
             to_remove = current_ws_tokens - desired_tokens
 
-        Tokens in ``desired_tokens`` are never unsubscribed (they ARE the
-        protected set).  Anything not in ``desired_tokens`` is stale and will
-        be removed from both ``_desired_tokens`` and the WebSocket transport.
+        The basket token list is supplemented by live bracket/open-position
+        tokens before any removal. A selected-ATM rotation may remove context
+        contracts, but must not remove a held position's tick/depth feed.
 
         Args:
             desired_tokens: Complete set of int tokens the bot should subscribe
@@ -2660,6 +2660,28 @@ class MarketDataManager:
         desired = {int(t) for t in desired_tokens if t and int(t) > 0}
 
         with self._lock:
+            # An ATM basket is NOT the full protected subscription universe.
+            # A newly selected strike must never unsubscribe an open option
+            # or its bracket's resting protective stop. Position/bracket
+            # ownership is maintained by the canonical execution layer.
+            protected_symbols = set(self._active_bracket_symbols)
+            protected_symbols.update(self._open_position_symbols)
+            protected_tokens: set[int] = set()
+            unresolved_protected: list[str] = []
+            for symbol in protected_symbols:
+                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(
+                    symbol
+                )
+                try:
+                    token_num = int(token) if token is not None else 0
+                except (TypeError, ValueError):
+                    token_num = 0
+                if token_num > 0:
+                    protected_tokens.add(token_num)
+                else:
+                    unresolved_protected.append(symbol)
+            preserved = len(protected_tokens - desired)
+            desired.update(protected_tokens)
             ws = self._ws
             if ws is not None:
                 snapshot_fn = getattr(ws, "tokens_snapshot", None)
@@ -2718,7 +2740,17 @@ class MarketDataManager:
             "added": len(to_add),
             "removed": len(to_remove),
             "after": after,
+            "protected_tokens_retained": preserved,
+            "protected_symbols_unresolved": len(unresolved_protected),
         }
+        if preserved or unresolved_protected:
+            self._logger.warning(
+                "PROTECTED_SUBSCRIPTIONS_RETAINED retained=%s "
+                "unresolved_count=%s held_symbols=%s",
+                preserved,
+                len(unresolved_protected),
+                sorted(protected_symbols)[:8],
+            )
         self._logger.info(
             "SUBSCRIPTION_RECONCILED desired=%d current_before=%d added=%d removed=%d current_after=%d",
             result["desired"],
