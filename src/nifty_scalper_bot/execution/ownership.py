@@ -260,15 +260,19 @@ class BoundBracketManager(RuntimeBracketManager):
         local.batch = batch
         try:
             ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
-            # Exactly one OPTIONAL trailing policy owns a position per tick.
-            # The canonical broker stop, hard-SL/TP exit dispatcher, emergency
-            # protection, and reconciliation remain active independently.
-            # Running tiered trailing first can irreversibly ratchet past the
-            # giveback allowance explicitly selected for a strong continuation.
+            # Exactly one OPTIONAL candidate can win a tick. Adaptive is
+            # first; if it produces NO ratchet, a full-lot verified version
+            # of the historical tier schedule may take over. It cannot use
+            # LTP-only prices, bypass broker protection or run a second sync.
             adaptive_selected = _profit_extension.adaptive_profit_lock_enabled(self)
+            broker_live = bool(self._is_live_execution())
             policy_config = getattr(bracket, "trailing_config", None)
+            selected = (
+                "adaptive_then_verified_tiers"
+                if adaptive_selected
+                else ("verified_tiers_live" if broker_live else "legacy_paper")
+            )
             if isinstance(policy_config, dict):
-                selected = "adaptive" if adaptive_selected else "legacy"
                 if policy_config.get("_optional_trail_owner") != selected:
                     policy_config["_optional_trail_owner"] = selected
                     _profit_extension.LOGGER.info(
@@ -278,26 +282,40 @@ class BoundBracketManager(RuntimeBracketManager):
                         selected,
                         self._trail_activation_r(bracket),
                     )
-            if adaptive_selected:
+
+            if adaptive_selected or broker_live:
                 if ltp is None:
                     return False
+                if adaptive_selected:
+                    try:
+                        if _profit_extension.tighten_adaptive_profit_lock(
+                            self, bracket, ltp
+                        ):
+                            return True
+                    except Exception as exc:  # noqa: BLE001 - hard stop survives
+                        _profit_extension.LOGGER.warning(
+                            "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                            getattr(bracket, "symbol", ""),
+                            type(exc).__name__,
+                        )
                 try:
+                    # Eligibility is rechecked against the current full-size
+                    # book; no unchecked legacy LTP fallback in real LIVE.
                     return bool(
-                        _profit_extension.tighten_adaptive_profit_lock(
+                        _profit_extension.tighten_verified_tier_fallback(
                             self, bracket, ltp
                         )
                     )
-                except Exception as exc:  # noqa: BLE001 - resting stop survives
+                except Exception as exc:  # noqa: BLE001
                     _profit_extension.LOGGER.warning(
-                        "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                        "VERIFIED_TIER_FALLBACK_SKIPPED symbol=%s error_type=%s",
                         getattr(bracket, "symbol", ""),
                         type(exc).__name__,
                     )
                     return False
 
-            # Explicit kill-switch / paper compatibility: preserve the legacy
-            # tiered and market-aware path. Never let either run *alongside*
-            # the active continuation-aware optional trailing policy.
+            # Paper/replay compatibility retains the historical tiered path.
+            # The exchange-stop owner remains unchanged in all modes.
             canonical_changed = bool(super()._apply_trailing_math(bracket))
             if ltp is None:
                 return canonical_changed
