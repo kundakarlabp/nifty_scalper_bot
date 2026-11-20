@@ -548,9 +548,8 @@ def test_completed_futures_volume_cache_tracks_candle_revisions_and_contracts(
     manager._augment_futures_metrics(corrected)
     assert len(calls) == 2
     assert corrected["futures_completed_bar_volume_ratio"] == 0.02
-    assert corrected["futures_completed_bar_volume_provenance"][
-        "extreme_low_relative_volume"
-    ] is True
+    provenance = corrected["futures_completed_bar_volume_provenance"]
+    assert provenance["extreme_low_relative_volume"] is True
 
     engine.bars[-1]["volume_delta_untrusted"] = True
     untrusted: dict[str, Any] = {}
