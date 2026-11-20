@@ -1195,8 +1195,11 @@ def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
             manager, bracket, 115.0
         )
 
-    lines = [record.message for record in caplog.records if
-             "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message]
+    lines = [
+        record.message
+        for record in caplog.records
+        if "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message
+    ]
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
     assert "top_bid_qty=20.0 required_qty=65" in lines[0]
@@ -1223,8 +1226,11 @@ def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
             manager, bracket, 115.0
         )
 
-    lines = [record.message for record in caplog.records if
-             "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message]
+    lines = [
+        record.message
+        for record in caplog.records
+        if "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message
+    ]
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
     assert "full_size_bid_proven=True" in lines[0]
