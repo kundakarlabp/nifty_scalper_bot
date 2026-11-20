@@ -307,7 +307,7 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
         "exchange_update_time",
         "last_price_time",
     }
-    authoritative = None
+    authoritative: str | datetime | None = None
     if quote.get("source_timestamp_valid") is True and source in exchange_sources:
         if isinstance(canonical, datetime) and canonical.tzinfo is not None:
             authoritative = canonical
