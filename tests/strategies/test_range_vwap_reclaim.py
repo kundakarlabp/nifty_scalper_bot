@@ -243,9 +243,7 @@ def test_option_reward_repriced_to_current_futures_not_completed_candle(
 
 
 def test_excursion_research_records_original_regime_rejection_only_once() -> None:
-    cfg = RangeVWAPReclaimStrategyConfig(
-        max_secondary_center_deviation_atr=0.001
-    )
+    cfg = RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.001)
     structural = assess_range_vwap_reclaim(
         bars(), decision_at=decision_at(), config=cfg
     )
