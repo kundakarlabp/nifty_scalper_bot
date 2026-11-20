@@ -5,10 +5,14 @@ futures-volume evidence; classify original entry setup subtype from provenance;
 calculate cost-adjusted, monotonic stops from fresh full-size bids, spread,
 fresh futures quotes and timestamped completed futures-volume candles; preserve
 the original FINAL_TP for VWAP mean-reversion entries.
-Interface: assess_continuation and tighten_adaptive_profit_lock provide
-read-only quality evidence and optional virtual ratchets; the private
-_exit_strategy_family, _verified_futures_volume_ratio and
-_adaptive_cost_per_unit helpers resolve the entry thesis, independent completed
+Interface: assess_continuation, tighten_adaptive_profit_lock and
+tighten_verified_tier_fallback provide independent continuation evidence,
+one optional full-depth-verified trailing stop per tick, and a strict
+broker-confirmed canonical synchronization path; the private
+_trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics only
+when the independently cached best bid has crossed 0.6R (not proof of full-size
+executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
+_adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
 tick. The canonical BracketManager alone modifies exchange stop orders and
@@ -287,7 +291,32 @@ def _chain_pcr(manager: Any) -> float | None:
 
 
 def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
-    raw = (
+    """Require fresh exchange-time evidence; never replace it with receipt time.
+
+    MDM normalizes broker-local naive exchange datetimes into an aware
+    canonical timestamp and labels its verified source. Prefer that proven
+    canonical field to reinterpreting the raw naive datetime as UTC.
+    """
+    canonical = quote.get("timestamp")
+    source = str(quote.get("timestamp_source") or "").strip().lower()
+    exchange_sources = {
+        "exchange_timestamp",
+        "last_trade_time",
+        "last_traded_time",
+        "last_trade_timestamp",
+        "exchange_update_time",
+        "last_price_time",
+    }
+    authoritative: str | datetime | None = None
+    if quote.get("source_timestamp_valid") is True and source in exchange_sources:
+        if isinstance(canonical, datetime) and canonical.tzinfo is not None:
+            authoritative = canonical
+        elif isinstance(canonical, str):
+            with suppress(ValueError, TypeError):
+                stamp = datetime.fromisoformat(canonical.replace("Z", "+00:00"))
+                if stamp.tzinfo is not None:
+                    authoritative = canonical
+    raw = authoritative or (
         quote.get("exchange_timestamp")
         or quote.get("timestamp")
         or quote.get("received_at")
@@ -920,9 +949,16 @@ def _ratchet_stop(
 
     validator = getattr(manager, "_is_trail_candidate_allowed", None)
     if callable(validator):
-        with suppress(Exception):
+        try:
             if not bool(validator(bracket, candidate, ltp)):
                 return False
+        except Exception as exc:  # noqa: BLE001 - do not bypass stop validation
+            LOGGER.warning(
+                "PROFIT_RATCHET_VALIDATOR_FAILED symbol=%s error_type=%s",
+                getattr(bracket, "symbol", ""),
+                type(exc).__name__,
+            )
+            return False
 
     lock = getattr(manager, "_lock", None)
     context = lock if hasattr(lock, "__enter__") else nullcontext()
@@ -1104,6 +1140,121 @@ def _adaptive_positive_env(name: str, default: float, cap: float) -> float:
     if value is None:
         value = default
     return min(cap, max(0.0, value))
+
+
+def _trace_adaptive_no_ratchet(
+    manager: Any, bracket: Any, reason: str, *, quote: Mapping[str, Any] | None = None
+) -> None:
+    """Bounded diagnosis of a skipped 0.6R trail; never changes exit eligibility.
+
+    The bracket's cached best bid proves only an observed price, NOT an
+    executable full-lot fill. Actual stop proposals continue to require all
+    adaptive quote, cost and broker-protection gates.
+    """
+    try:
+        entry = _positive(getattr(bracket, "entry_price", None))
+        initial = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+        symbol = str(getattr(bracket, "symbol", ""))
+        if entry is None or initial is None or initial >= entry or not symbol:
+            return
+        cached = getattr(manager, "_exit_quotes", {}).get(symbol)
+        if not isinstance(cached, (tuple, list)) or len(cached) < 3:
+            return
+        bid = _positive(cached[0])
+        seen_at = _as_float(cached[2])
+        now_wall = time.time()
+        if (
+            bid is None
+            or seen_at is None
+            or not 0 <= now_wall - seen_at <= 3.0
+            or bid < entry + 0.60 * (entry - initial)
+        ):
+            return
+        config = getattr(bracket, "trailing_config", None)
+        if not isinstance(config, dict):
+            return
+        now_mono = time.monotonic()
+        previous = _as_float(config.get("_adaptive_last_skip_trace_mono"))
+        if previous is not None and 0 <= now_mono - previous < 8.0:
+            return
+        config["_adaptive_last_skip_trace_mono"] = now_mono
+        book = _mapping(quote) if quote is not None else _quote(manager, symbol)
+        depth = book.get("depth")
+        buys = depth.get("buy") if isinstance(depth, Mapping) else None
+        first = buys[0] if isinstance(buys, list) and buys else {}
+        qty = _as_float(first.get("quantity")) if isinstance(first, Mapping) else None
+        received = book.get("received_at")
+        received_age = (
+            _quote_age_seconds({"received_at": received})
+            if received is not None
+            else None
+        )
+        book_age = _quote_age_seconds(book)
+        if reason in {
+            "full_size_quote_unqualified",
+            "fallback_full_depth_unavailable",
+        }:
+            if not book:
+                gate = "no_cached_quote"
+            elif book_age is None:
+                gate = "invalid_or_future_event_timestamp"
+            elif book_age > _adaptive_positive_env(
+                "ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0
+            ):
+                gate = "stale_event_timestamp"
+            elif not isinstance(depth, Mapping):
+                gate = "missing_depth"
+            elif not isinstance(buys, list) or not buys:
+                gate = "empty_bid_levels"
+            elif qty is None:
+                gate = "missing_bid_quantity"
+            elif qty < int(getattr(bracket, "remaining_quantity", 0) or 0):
+                gate = "undersized_top_bid"
+            elif _positive(first.get("price")) is None:
+                gate = "invalid_top_bid"
+            elif _positive(book.get("ask")) is None:
+                gate = "missing_ask"
+            elif (_spread_pct(book) or 0.0) > _adaptive_positive_env(
+                "ADAPTIVE_PROFIT_MAX_SPREAD_PCT", 1.5, 2.0
+            ):
+                gate = "excessive_spread"
+            else:
+                gate = "book_mismatch_or_other"
+            reason = f"{reason}:{gate}"
+        LOGGER.warning(
+            "ADAPTIVE_PROFIT_LOCK_SKIP symbol=%s reason=%s "
+            "observed_bid=%.2f observed_mfe_r=%.3f "
+            "full_size_bid_proven=%s top_bid_qty=%s required_qty=%s "
+            "book_bid=%s book_age_s=%s received_age_s=%s "
+            "quote_source=%s spread_pct=%s broker_stop_trigger=%s "
+            "quote_version=%s timestamp_source=%s exchange_time_valid=%s",
+            symbol,
+            reason,
+            bid,
+            (bid - entry) / (entry - initial),
+            bool(
+                qty is not None
+                and qty >= int(getattr(bracket, "remaining_quantity", 0) or 0) > 0
+            ),
+            qty,
+            int(getattr(bracket, "remaining_quantity", 0) or 0),
+            book.get("bid"),
+            _quote_age_seconds(book),
+            received_age,
+            book.get("source"),
+            _spread_pct(book),
+            getattr(bracket, "exchange_stop_trigger_price", None),
+            book.get("quote_update_version"),
+            book.get("timestamp_source"),
+            book.get("source_timestamp_valid"),
+            extra={
+                "event": "ADAPTIVE_PROFIT_LOCK_SKIP",
+                "reason": reason,
+                "symbol": symbol,
+            },
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never affect protection
+        return
 
 
 def _adaptive_executable_bid(
@@ -1358,6 +1509,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             or remaining_qty <= 0
         ):
             # A broker order ID alone does not prove the resting trigger/size.
+            _trace_adaptive_no_ratchet(manager, bracket, "broker_stop_unverified")
             return False
     entry = _positive(getattr(bracket, "entry_price", None))
     initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
@@ -1365,6 +1517,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
+        _trace_adaptive_no_ratchet(manager, bracket, "full_size_quote_unqualified")
         return False
     bid, spread, quote = executable
     if bid <= entry:
@@ -1372,6 +1525,9 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     cost = _adaptive_cost_per_unit(manager, bracket, bid)
     if cost is None or not math.isfinite(cost) or cost <= 0:
         # Never call a capped, unavailable or zero fee estimate NET profit.
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "cost_evidence_unavailable", quote=quote
+        )
         return False
     config = getattr(bracket, "trailing_config", None)
     if not isinstance(config, dict):
@@ -1385,9 +1541,15 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         or quote.get("exchange_timestamp")
     )
     if sample is None:
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "quote_identity_missing", quote=quote
+        )
         return False
     identity = str(sample)
     if identity == config.get("_adaptive_profit_last_sample"):
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "duplicate_quote_identity", quote=quote
+        )
         return False
     config["_adaptive_profit_last_sample"] = identity
     now = time.monotonic()
@@ -1508,14 +1670,24 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     room = max(_TICK_SIZE, spread * 1.5, micro_noise * 1.5)
     candidate = _round_tick(min(candidate, bid - room))
     if candidate < floor - _TICK_SIZE:
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "insufficient_bid_room", quote=quote
+        )
         return False
     old = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     if candidate < old + max(0.50, old * 0.0025):
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "no_monotonic_improvement", quote=quote
+        )
         return False
     if not _ratchet_stop(
         manager, bracket, candidate, bid, reason="adaptive_profit_lock"
     ):
+        _trace_adaptive_no_ratchet(manager, bracket, "ratchet_rejected", quote=quote)
         return False
+    # Once the continuation-aware owner has moved protection, never run a
+    # competing legacy tier later merely because adaptive holds its stop.
+    config["_adaptive_profit_has_ratcheted"] = True
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
         # A successful modify_order response updates the local broker record;
@@ -1577,6 +1749,211 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     return True
 
 
+def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bool:
+    """Fallback to the canonical tier schedule on verified executable evidence.
+
+    One optional policy may ratchet in a tick: this runs ONLY when the
+    adaptive policy did not commit a proposal. Neither LTP nor a bare best
+    bid is permitted to promote a live stop. The canonical broker owner
+    remains responsible for serial stop modifications and acknowledgements.
+    """
+    if not _env_bool("VERIFIED_TIER_FALLBACK_ENABLED", True):
+        return False
+    # An adaptive NOOP after its first ratchet is an intentional continuation
+    # decision, not a failure. Do not allow legacy tiers to override its
+    # wider giveback allowance or a proven STRONG continuation assessment.
+    owner_config = getattr(bracket, "trailing_config", None)
+    ownership_proof = getattr(bracket, "trade_provenance", None)
+    if adaptive_profit_lock_enabled(manager):
+        if isinstance(owner_config, dict) and (
+            owner_config.get("_adaptive_profit_has_ratcheted") is True
+            or owner_config.get("_adaptive_profit_state") == "STRONG"
+        ):
+            return False
+        if isinstance(ownership_proof, Mapping) and isinstance(
+            ownership_proof.get("adaptive_profit_lock"), Mapping
+        ):
+            return False
+    if (
+        str(getattr(bracket, "side", "")).upper() != "BUY"
+        or not bool(getattr(bracket, "trailing_enabled", True))
+        or not bool(getattr(bracket, "active", False))
+        or not bool(getattr(bracket, "entry_confirmed", False))
+        or getattr(bracket, "entry_status", "ACTIVE") != "ACTIVE"
+        or getattr(bracket, "exit_pending", False)
+        or getattr(bracket, "exit_executed", False)
+        or getattr(bracket, "exchange_stop_degraded_reason", None)
+    ):
+        return False
+    live_mode = getattr(manager, "_is_live_execution", None)
+    if not callable(live_mode) or not live_mode():
+        # Paper/replay retains its separately tested legacy behaviour.
+        return False
+    remaining = int(getattr(bracket, "remaining_quantity", 0) or 0)
+    if (
+        remaining <= 0
+        or not getattr(bracket, "exchange_stop_order_id", None)
+        or _positive(getattr(bracket, "exchange_stop_trigger_price", None)) is None
+        or int(getattr(bracket, "exchange_stop_quantity", 0) or 0) < remaining
+    ):
+        _trace_adaptive_no_ratchet(manager, bracket, "fallback_stop_unverified")
+        return False
+    # Avoid a second full quote/depth/fee evaluation on every quiet tick.
+    # Only assess fallback after an observed or earlier certified MFE
+    # is at least the original trailing activation threshold.
+    observed_fast = getattr(manager, "_exit_quotes", {}).get(
+        str(getattr(bracket, "symbol", ""))
+    )
+    if not isinstance(observed_fast, (tuple, list)) or not observed_fast:
+        return False
+    fast_bid = _positive(observed_fast[0])
+    fast_entry = _positive(getattr(bracket, "entry_price", None))
+    fast_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+    if (
+        fast_bid is None
+        or fast_entry is None
+        or fast_stop is None
+        or fast_stop >= fast_entry
+    ):
+        return False
+    fast_config = getattr(bracket, "trailing_config", None)
+    if not isinstance(fast_config, dict):
+        return False
+    get_fast_activation = getattr(manager, "_trail_activation_r", None)
+    fast_activation = (
+        float(get_fast_activation(bracket)) if callable(get_fast_activation) else 0.60
+    )
+    if max(
+        fast_bid,
+        _positive(fast_config.get("_adaptive_profit_executable_high")) or fast_entry,
+        _positive(fast_config.get("_verified_legacy_executable_high")) or fast_entry,
+    ) < fast_entry + fast_activation * (fast_entry - fast_stop):
+        return False
+
+    executable = _adaptive_executable_bid(manager, bracket)
+    if executable is None:
+        _trace_adaptive_no_ratchet(manager, bracket, "fallback_full_depth_unavailable")
+        return False
+    bid, spread, quote = executable
+
+    # Verify the full-size book and the bracket exit-price cache agree. Do
+    # not promote a quote from a different tick/contract into live protection.
+    observed = getattr(manager, "_exit_quotes", {}).get(
+        str(getattr(bracket, "symbol", ""))
+    )
+    if not isinstance(observed, (tuple, list)) or len(observed) < 3:
+        _trace_adaptive_no_ratchet(manager, bracket, "fallback_tick_unmatched")
+        return False
+    cached_bid = _positive(observed[0])
+    seen_at = _as_float(observed[2])
+    if (
+        cached_bid is None
+        or seen_at is None
+        or not 0 <= time.time() - seen_at <= 3.0
+        or abs(cached_bid - bid) > _TICK_SIZE / 2
+    ):
+        _trace_adaptive_no_ratchet(manager, bracket, "fallback_tick_unmatched")
+        return False
+
+    entry = _positive(getattr(bracket, "entry_price", None))
+    initial_sl = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+    if entry is None or initial_sl is None or initial_sl >= entry:
+        return False
+    cost = _adaptive_cost_per_unit(manager, bracket, bid)
+    if cost is None or cost <= 0 or not math.isfinite(cost):
+        _trace_adaptive_no_ratchet(manager, bracket, "fallback_cost_unverified")
+        return False
+    risk = entry - initial_sl
+    config = getattr(bracket, "trailing_config", None)
+    if not isinstance(config, dict):
+        return False
+    get_activation = getattr(manager, "_trail_activation_r", None)
+    activation = float(get_activation(bracket)) if callable(get_activation) else 0.60
+    if not math.isfinite(activation) or activation <= 0:
+        return False
+
+    # Both adaptive and verified legacy watermarks come from full-lot bids.
+    # A newer qualifying tick may overtake an older stored adaptive high.
+    high = max(
+        entry,
+        _positive(config.get("_adaptive_profit_executable_high")) or entry,
+        _positive(config.get("_verified_legacy_executable_high")) or entry,
+        bid,
+    )
+    config["_verified_legacy_executable_high"] = _round_tick(high)
+    mfe = high - entry
+    if mfe + 1e-9 < risk * activation:
+        return False
+
+    schedule = getattr(manager, "_calculate_tiered_trailing_sl", None)
+    if not callable(schedule):
+        return False
+    indicator = _indicator_snapshot(manager, str(bracket.symbol), ("atr",))
+    atr = _positive(indicator.get("atr"))
+    age = _as_float(indicator.get("context_age_seconds"))
+    if age is None or not 0 <= age <= 60:
+        atr = None
+    try:
+        proposed = schedule(
+            bracket=bracket,
+            ltp=bid,
+            profit_pct=(bid - entry) / entry * 100,
+            high_water=high,
+            atr=atr or 0.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - hard stop must remain active
+        LOGGER.warning(
+            "VERIFIED_TIER_FALLBACK_SCHEDULE_FAILED symbol=%s error_type=%s",
+            bracket.symbol,
+            type(exc).__name__,
+        )
+        return False
+    if proposed is None:
+        return False
+
+    # Cost-plus-slippage makes a nominal entry-price stop a NET loss.
+    # The tier schedule defines the giveback; this floor and executable
+    # quote room decide whether it is safe to submit that proposal.
+    slippage = _adaptive_positive_env("ADAPTIVE_PROFIT_SLIPPAGE_POINTS", 0.50, 3.0)
+    fixed = _adaptive_positive_env("ADAPTIVE_PROFIT_MIN_POINTS", 1.0, 3.0)
+    floor = entry + cost + slippage + max(fixed, risk * 0.10)
+    room = max(_TICK_SIZE, spread * 1.5)
+    candidate = _round_tick(min(max(float(proposed), floor), bid - room))
+    if candidate < floor - _TICK_SIZE / 2:
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "fallback_no_bid_room", quote=quote
+        )
+        return False
+    current = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
+    if candidate <= current + _TICK_SIZE / 2:
+        return False
+    if not _ratchet_stop(
+        manager, bracket, candidate, bid, reason="verified_legacy_tier_fallback"
+    ):
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "fallback_ratchet_rejected", quote=quote
+        )
+        return False
+    config["_verified_legacy_last_quote_identity"] = str(
+        quote.get("quote_update_version")
+        or quote.get("received_at")
+        or quote.get("timestamp")
+    )
+    LOGGER.info(
+        "VERIFIED_TIER_FALLBACK_RATCHET symbol=%s bid=%.2f "
+        "mfe_r=%.3f tier_stop=%.2f new_sl=%.2f "
+        "full_lot_qty=%s source=%s",
+        bracket.symbol,
+        bid,
+        mfe / risk,
+        float(proposed),
+        candidate,
+        remaining,
+        quote.get("source"),
+    )
+    return True
+
+
 def tighten_market_aware_floor(manager: Any, bracket: Any, ltp: float) -> bool:
     """Tighten an already-profitable trade when continuation evidence deteriorates."""
     if not _env_bool("MARKET_AWARE_PROFIT_TIGHTEN_ENABLED", True):
@@ -1633,4 +2010,5 @@ __all__ = [
     "tighten_market_aware_floor",
     "adaptive_profit_lock_enabled",
     "tighten_adaptive_profit_lock",
+    "tighten_verified_tier_fallback",
 ]

@@ -1171,3 +1171,306 @@ def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
     )
     assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
     assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"
+
+
+def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._exit_quotes = {SYMBOL: (115.0, 115.2, time())}
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager, bid=115.0, quantity=20)
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="nifty_scalper_bot.execution.market_aware_profit_extension",
+    ):
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+
+    lines = [
+        record.message
+        for record in caplog.records
+        if "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message
+    ]
+    assert len(lines) == 1
+    assert "reason=full_size_quote_unqualified" in lines[0]
+    assert "top_bid_qty=20.0 required_qty=65" in lines[0]
+    assert "full_size_bid_proven=False" in lines[0]
+    assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
+    monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._exit_quotes = {SYMBOL: (115.0, 115.2, time())}
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0, quantity=65)
+    quote["exchange_timestamp"] = time() - 120.0
+    with caplog.at_level(
+        logging.WARNING,
+        logger="nifty_scalper_bot.execution.market_aware_profit_extension",
+    ):
+        assert not profit_extension.tighten_adaptive_profit_lock(
+            manager, bracket, 115.0
+        )
+
+    lines = [
+        record.message
+        for record in caplog.records
+        if "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message
+    ]
+    assert len(lines) == 1
+    assert "reason=full_size_quote_unqualified" in lines[0]
+    assert "full_size_bid_proven=True" in lines[0]
+    assert "received_age_s=" in lines[0]
+    assert bracket.sl_trigger_price == 94.0
+
+
+def _ready_verified_tier_fallback(*, bid=107.0, depth_qty=65):
+    """Live broker-free bracket with genuine current full-size book evidence."""
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    manager._trail_activation_r = lambda _bracket: 0.60
+    manager._calculate_tiered_trailing_sl = (
+        lambda **kwargs: kwargs["bracket"].entry_price + 0.8
+    )
+    manager._is_trail_candidate_allowed = (
+        lambda bracket, candidate, price: bracket.sl_trigger_price < candidate < price
+    )
+    syncs = []
+    manager._sync_exchange_protective_stop = (
+        lambda bracket: syncs.append(bracket.sl_trigger_price) or True
+    )
+    bracket = _bracket(protected=False)
+    bracket.active = True
+    bracket.entry_confirmed = True
+    bracket.entry_status = "ACTIVE"
+    bracket.trailing_enabled = True
+    bracket.trail_revision = 0
+    bracket.exchange_stop_order_id = "broker-stop"
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_degraded_reason = None
+    quote = _adaptive_market(manager, bid=bid, quantity=depth_qty)
+    manager._exit_quotes = {SYMBOL: (bid, bid + 0.2, time())}
+    return manager, bracket, quote, syncs
+
+
+def test_verified_tier_fallback_ratchets_only_on_full_lot_bid(monkeypatch):
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107)
+    assert bracket.sl_trigger_price >= 102.0
+    assert bracket.sl_trigger_price < 107
+    assert bracket.trail_revision == 1
+    assert syncs == [bracket.sl_trigger_price]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "depth_small",
+        "depth_missing",
+        "old_exchange",
+        "wide_spread",
+        "unmatched_tick",
+        "no_cached_tick",
+        "broker_stop_missing",
+        "broker_stop_undersized",
+        "broker_stop_degraded",
+        "missing_cost",
+    ],
+)
+def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, failure):
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, quote, syncs = _ready_verified_tier_fallback()
+    if failure == "depth_small":
+        quote["depth"]["buy"][0]["quantity"] = 10
+    elif failure == "depth_missing":
+        quote.pop("depth")
+    elif failure == "old_exchange":
+        quote["exchange_timestamp"] = time() - 30
+    elif failure == "wide_spread":
+        quote["ask"] = quote["bid"] + 5.0
+    elif failure == "unmatched_tick":
+        manager._exit_quotes[SYMBOL] = (106.0, 107.2, time())
+    elif failure == "no_cached_tick":
+        manager._exit_quotes.clear()
+    elif failure == "broker_stop_missing":
+        bracket.exchange_stop_order_id = None
+    elif failure == "broker_stop_undersized":
+        bracket.exchange_stop_quantity = 20
+    elif failure == "broker_stop_degraded":
+        bracket.exchange_stop_degraded_reason = "broker_stop_unverified"
+    elif failure == "missing_cost":
+        manager._breakeven_cost_per_unit = lambda _bracket: 0.0
+
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 120.0)
+    assert bracket.sl_trigger_price == 94.0
+    assert bracket.trail_revision == 0
+    assert not syncs
+
+
+def test_live_verified_tiers_reject_ltp_only_peak_even_if_tier_threshold_crossed(
+    monkeypatch,
+):
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, quote, syncs = _ready_verified_tier_fallback(bid=105.0)
+    bracket.last_ltp = 125.0
+    bracket.highest_ltp = 125.0
+    quote["ltp"] = 125.0
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 125.0)
+    assert bracket.sl_trigger_price == 94.0
+    assert not syncs
+
+
+def test_raised_stop_candidate_validator_must_fail_closed():
+    manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+
+    def broken_validator(*_args):
+        raise RuntimeError("validation unavailable")
+
+    manager._is_trail_candidate_allowed = broken_validator
+    assert not profit_extension._ratchet_stop(
+        manager, bracket, 102.5, 107.0, reason="validator_test"
+    )
+    assert bracket.sl_trigger_price == 94.0
+    assert not syncs
+
+
+def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, _quote, _syncs = _ready_verified_tier_fallback()
+    # Keep owner dispatch independent of real broker and background workers.
+    # FakeManager is sufficient for exercising BoundBracketManager's override.
+    calls = []
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_adaptive_profit_lock",
+        lambda *_args: calls.append("adaptive") or False,
+    )
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_verified_tier_fallback",
+        lambda *_args: calls.append("verified_tiers") or True,
+    )
+    owner = object.__new__(BoundBracketManager)
+    owner._trail_sync_context = threading.local()
+    owner._is_live_execution = lambda: True
+    owner._trail_activation_r = lambda _: 0.6
+    owner._sync_exchange_protective_stop = lambda _: calls.append("sync")
+    bracket.last_ltp = 107.0
+    assert owner._apply_trailing_math(bracket)
+    assert calls == ["adaptive", "verified_tiers"]
+
+
+def test_20261120_archived_286_bid_samples_are_not_full_lot_exit_proof(
+    monkeypatch,
+):
+    """Replay all actual saved bids; absent depth must never ratchet LIVE."""
+    import json
+    from pathlib import Path
+
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "nifty_20261120_smc_option_quote_replay.json"
+    )
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    samples = data["samples"]
+    assert len(samples) == 286
+    entry = data["entry_price"]
+    risk = entry - data["initial_sl"]
+    threshold = entry + 0.60 * risk
+    assert sum(row[1] >= threshold for row in samples) >= 12
+    assert max(row[1] for row in samples) == pytest.approx(150.30)
+
+    manager, bracket, quote, syncs = _ready_verified_tier_fallback()
+    bracket.entry_price = entry
+    bracket.initial_sl_trigger_price = data["initial_sl"]
+    bracket.sl_trigger_price = data["initial_sl"]
+    bracket.exchange_stop_trigger_price = data["initial_sl"]
+    # The actual archival recorder captured best bid/ask, not full-lot
+    # depth. Do not invent queue quantity, market-time identity or fills.
+    for _epoch, bid, ask, _source, _local_stop, _broker_stop in samples:
+        quote.update({"bid": bid, "ask": ask, "ltp": bid})
+        quote.pop("depth", None)
+        quote["received_at"] = time()
+        manager._exit_quotes[SYMBOL] = (bid, ask, time())
+        assert not profit_extension.tighten_verified_tier_fallback(
+            manager, bracket, bid
+        )
+    assert bracket.sl_trigger_price == data["initial_sl"]
+    assert bracket.trail_revision == 0
+    assert not syncs
+
+
+def test_canonical_exchange_timestamp_prevents_raw_naive_utc_misread():
+    """The same valid quote must not be rejected as 5.5 hours future."""
+    manager, bracket, quote, _syncs = _ready_verified_tier_fallback()
+    quote["exchange_timestamp"] = datetime.now().replace(tzinfo=None)
+    quote["timestamp"] = datetime.now(timezone.utc).isoformat()
+    quote["timestamp_source"] = "exchange_timestamp"
+    quote["source_timestamp_valid"] = True
+
+    age = profit_extension._quote_age_seconds(quote)
+    assert age is not None and age <= 3.0
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is not None
+
+
+@pytest.mark.parametrize("delta", [-120, 120])
+def test_authoritative_exchange_timestamp_rejects_old_or_future_quote(delta):
+    """A fresh receive timestamp must never mask stale exchange evidence."""
+    manager, bracket, quote, _syncs = _ready_verified_tier_fallback()
+    quote["exchange_timestamp"] = datetime.now().replace(tzinfo=None)
+    quote["timestamp"] = (
+        datetime.now(timezone.utc) + timedelta(seconds=delta)
+    ).isoformat()
+    quote["timestamp_source"] = "exchange_timestamp"
+    quote["source_timestamp_valid"] = True
+    quote["received_at"] = time()
+
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is None
+
+
+@pytest.mark.parametrize("proof", ["ratcheted", "strong", "provenance"])
+def test_verified_tiers_never_override_adaptive_continuation_owner(monkeypatch, proof):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+    if proof == "ratcheted":
+        bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
+    elif proof == "strong":
+        bracket.trailing_config["_adaptive_profit_state"] = "STRONG"
+    else:
+        bracket.trade_provenance["adaptive_profit_lock"] = {"state": "NORMAL"}
+
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
+    assert bracket.sl_trigger_price == 94.0
+    assert not syncs
+
+
+def test_explicit_adaptive_disable_preserves_verified_live_tier_fallback(
+    monkeypatch,
+):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+    bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
+    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
+    assert bracket.sl_trigger_price > 94.0
+    assert len(syncs) == 1

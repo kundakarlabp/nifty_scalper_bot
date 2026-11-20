@@ -4,6 +4,8 @@ Runtime role:
 - Single read surface that strategies/execution use to access ticks, quotes,
   OHLC, open interest, and active-basket context.
 - Delegates all data access to MarketDataManager; binds to the MDM tick bus.
+- set_active_bracket_symbols forwards the canonical held-option protection set
+  to MDM, including across ATM basket rotation; it owns no subscription list.
 
 Position in the pipeline:
     data/market_data_manager.py → THIS FILE (data_hub.py)
@@ -2703,6 +2705,30 @@ class DataHub:
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("DataHub MDM delegate %s failed: %s", name, exc)
             return default
+
+    def set_active_bracket_symbols(self, symbols: Iterable[str]) -> None:
+        """Forward the bracket owner's full held-symbol set to MDM.
+
+        Unlike the ATM basket, protected contract subscriptions must survive
+        selection rotation until the broker-confirmed bracket is closed.
+        """
+        owned = tuple(str(symbol) for symbol in symbols if str(symbol or "").strip())
+        setter = getattr(self._mdm, "set_active_bracket_symbols", None)
+        if not callable(setter):
+            LOGGER.error(
+                "DATAHUB_BRACKET_SYMBOL_SYNC_UNAVAILABLE held_count=%s",
+                len(owned),
+            )
+            return
+        try:
+            setter(owned)
+        except Exception as exc:  # noqa: BLE001 - avoid silent data loss
+            LOGGER.error(
+                "DATAHUB_BRACKET_SYMBOL_SYNC_FAILED held_count=%s error_type=%s",
+                len(owned),
+                type(exc).__name__,
+            )
+            raise
 
     @property
     def ws_connected(self) -> bool:
