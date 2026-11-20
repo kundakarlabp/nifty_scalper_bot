@@ -1172,6 +1172,7 @@ def test_unknown_entry_setup_cannot_claim_strong_trend_permission():
     assert profit_extension._exit_strategy_family(bracket) == "UNCLASSIFIED"
     assert profit_extension._adaptive_continuation_state(decision, bracket) == "NORMAL"
 
+
 @pytest.mark.parametrize("as_iso_string", [False, True])
 def test_naive_nse_exchange_timestamp_is_ist_for_full_depth_trailing(
     as_iso_string,
