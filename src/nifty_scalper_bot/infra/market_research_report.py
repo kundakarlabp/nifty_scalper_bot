@@ -570,11 +570,15 @@ def _range_excursion_markouts(
         for horizon in (300, 600, 900):
             fut, fut_status = observed_futures_markout(
                 scoped_future,
-                decision_ts=when, horizon_s=horizon, side=str(row["side"])
+                decision_ts=when,
+                horizon_s=horizon,
+                side=str(row["side"]),
             )
             option, option_status = (
                 observed_markout(
-                    full_lot, decision_ts=when, horizon_s=horizon,
+                    full_lot,
+                    decision_ts=when,
+                    horizon_s=horizon,
                     timestamps=times,
                 )
                 if full_lot and not row.get("contract_identity_conflicted")
@@ -583,9 +587,8 @@ def _range_excursion_markouts(
                     "rotated_contract_or_missing_full_lot_verified_book",
                 )
             )
-            dense = (
-                option is not None
-                and _quote_path_dense(times, decision_ts=when, horizon_s=horizon)
+            dense = option is not None and _quote_path_dense(
+                times, decision_ts=when, horizon_s=horizon
             )
             if not dense:
                 option = None
@@ -593,7 +596,8 @@ def _range_excursion_markouts(
                     option_status = "option_full_lot_book_path_gapped"
             costed = (
                 _cost_model(
-                    option, quantity=quantity,
+                    option,
+                    quantity=quantity,
                     adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
                 )
                 if option is not None and lot_known
@@ -648,11 +652,13 @@ def _range_excursion_markouts(
     ):
         for horizon in (300, 600, 900):
             group = [
-                row for row in outcomes
+                row
+                for row in outcomes
                 if row["horizon_seconds"] == horizon and row[predicate]
             ]
             feasible = [
-                row for row in group
+                row
+                for row in group
                 if row["same_decision_risk_773_and_net_rr_verified"]
                 and row["observed_book_and_futures_complete"]
             ]
@@ -672,7 +678,11 @@ def _range_excursion_markouts(
                     "modeled_net_rupees_mean": (
                         round(
                             statistics.mean(
-                                float(row["option_cost_adjusted"]["terminal"]["net_rupees"])
+                                float(
+                                    row["option_cost_adjusted"]["terminal"][
+                                        "net_rupees"
+                                    ]
+                                )
                                 for row in feasible
                             ),
                             2,
