@@ -144,8 +144,8 @@ def load_excursion_quote_paths(
     from nifty_scalper_bot.utils.symbols import normalize_symbol
 
     futures: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
-    books: dict[str, list[tuple[float, float, float, int, int, str]]] = (
-        defaultdict(list)
+    books: dict[str, list[tuple[float, float, float, int, int, str]]] = defaultdict(
+        list
     )
     selected: dict[str, str] = {}
     tokens: dict[str, int] = {}
@@ -165,9 +165,7 @@ def load_excursion_quote_paths(
                 )
                 for side in ("CE", "PE")
             }
-            selected["FUT"] = normalize_symbol(
-                str(basket.get("futures_symbol") or "")
-            )
+            selected["FUT"] = normalize_symbol(str(basket.get("futures_symbol") or ""))
             catalog = payload.get("instruments")
             if isinstance(catalog, list):
                 for item in catalog:
@@ -205,9 +203,8 @@ def load_excursion_quote_paths(
         at = datetime.fromisoformat(event["available_at"]).timestamp()
         if not math.isfinite(at):
             continue
-        if (
-            canonical_nifty_future_symbol(symbol) is not None
-            and symbol == selected.get("FUT")
+        if canonical_nifty_future_symbol(symbol) is not None and symbol == selected.get(
+            "FUT"
         ):
             price = _positive(payload.get("ltp") or payload.get("last_price"))
             if price is not None and type(payload.get("instrument_token")) is int:
