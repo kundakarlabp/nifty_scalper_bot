@@ -7,8 +7,10 @@ fresh futures quotes and timestamped completed futures-volume candles; preserve
 the original FINAL_TP for VWAP mean-reversion entries.
 Interface: assess_continuation and tighten_adaptive_profit_lock provide
 read-only quality evidence and optional virtual ratchets; the private
-_exit_strategy_family, _verified_futures_volume_ratio and
-_adaptive_cost_per_unit helpers resolve the entry thesis, independent completed
+_trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics only
+when the independently cached best bid has crossed 0.6R (not proof of full-size
+executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
+_adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
 tick. The canonical BracketManager alone modifies exchange stop orders and
