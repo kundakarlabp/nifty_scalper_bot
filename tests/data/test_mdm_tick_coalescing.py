@@ -2407,3 +2407,22 @@ def test_ws_recovery_missing_required_subscription_is_not_false_success(monkeypa
     assert result["ok"] is False
     assert result["missing_current_generation_ticks"] == [selected_ce]
     assert result["state"] == "waiting_for_first_ticks"
+
+
+def test_datahub_protects_held_option_across_atm_basket_rotation() -> None:
+    """Held 25700 CE remains required after the selected ATM rolls to 25750."""
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    mdm = MarketDataManager(kite=None)
+    hub = object.__new__(DataHub)
+    hub._mdm = mdm
+    held = "NFO:NIFTY26NOV25700CE"
+    next_atm = "NFO:NIFTY26NOV25750CE"
+    mdm._active_contract_basket = {"selected_ce": held}
+    hub.set_active_bracket_symbols([held])
+    assert held in mdm._required_live_symbols()
+
+    mdm._active_contract_basket = {"selected_ce": next_atm}
+    assert {held, next_atm} <= mdm._required_live_symbols()
+    hub.set_active_bracket_symbols([])
+    assert held not in mdm._required_live_symbols()
