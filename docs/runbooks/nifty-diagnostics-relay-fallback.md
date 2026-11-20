@@ -1,4 +1,6 @@
-# NIFTY production diagnostics: relay outage and independent fallback
+# NIFTY production diagnostics: Supabase-first, no relay dependency
+
+**Operating rule (20 November 2026):** For routine live logs or runner questions, read the existing private Supabase heartbeat and archive; for public IP reachability, attempt a single bounded direct probe if supported. When direct access is blocked, **stop retrying the same network path** and continue with Supabase. Do not ask for a backend, SSH, additional hosting, or an AppDeploy restart merely to read logs. The canonical network and release policy is [Production HTTP access](../ops/PRODUCTION_HTTP_ACCESS.md).
 
 ## Scope and classification
 
@@ -9,15 +11,13 @@ On 2026-11-19, `/livez`, `/health`, `/status`, and `/logs` returned HTTP 404
 with body `{"error":"Backend not found"}` from AppDeploy. The platform host
 also returned its own 404 for an unrelated `/health` path. A relay 404 is a
 routing/backend-binding failure, **not proof that the trading engine is down**.
-Do not automatically redeploy AppDeploy v15 merely to read production logs.
-Never SSH to recover diagnostics. Check authorization, backend binding, release
-revision, active runtime and app route with the AppDeploy owner before changing it.
+The AppDeploy relay is a historical optional path, **not** a prerequisite for status or log inspection. Its `Backend not found` response does not imply AWS failure. Preserve existing AppDeploy v15 unchanged; if its own operation is ever needed, examine authorization, active backend binding, revision, and route with its owner separately. No replacement relay, SSH, or new paid service is necessary for the documented log workflow.
 
-## Independent read-only evidence source (available today)
+## Primary read-only evidence source
 
-The live Lightsail reporter writes heartbeat and periodic, partial market-day
-journald archives into Supabase project `dehdptgkqbrkyzyodicd`.
-Use an authenticated Supabase SQL connection; do not expose these logs publicly.
+The Lightsail host reports a heartbeat approximately every 120 seconds and stores periodic, **partial** market-day journald archives in existing Supabase project `dehdptgkqbrkyzyodicd`. Use authenticated Supabase SQL access; do not expose log tables publicly or add a new API. Include heartbeat age and archive age in results, and compare `build_sha` with GitHub main before claiming a release is current. A normal after-hours AUTO quiet mode is not a failure; a stale or missing heartbeat is `UNKNOWN`, not verified downtime.
+
+The current market-day archive can lag behind live execution. Supabase does not prove external public ingress, exchange-side orders, or instantaneous tick-by-tick market data.
 
 ### Heartbeat: engine/streamlit health and build identity
 
