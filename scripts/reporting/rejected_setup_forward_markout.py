@@ -144,7 +144,9 @@ def load_excursion_quote_paths(
     from nifty_scalper_bot.utils.symbols import normalize_symbol
 
     futures: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
-    books: dict[str, list[tuple[float, float, float, int, int, str]]] = defaultdict(list)
+    books: dict[str, list[tuple[float, float, float, int, int, str]]] = (
+        defaultdict(list)
+    )
     selected: dict[str, str] = {}
     tokens: dict[str, int] = {}
     phase = 0
@@ -158,7 +160,9 @@ def load_excursion_quote_paths(
                 previous_phase_key = None
                 continue
             selected = {
-                side: normalize_symbol(str(basket.get(f"selected_{side.lower()}") or ""))
+                side: normalize_symbol(
+                    str(basket.get(f"selected_{side.lower()}") or "")
+                )
                 for side in ("CE", "PE")
             }
             selected["FUT"] = normalize_symbol(
@@ -185,7 +189,10 @@ def load_excursion_quote_paths(
                 selected.get("CE", ""),
                 selected.get("PE", ""),
                 selected.get("FUT", ""),
-                *(str(tokens.get(selected.get(k, "")) or "") for k in ("CE", "PE", "FUT")),
+                *(
+                    str(tokens.get(selected.get(k, "")) or "")
+                    for k in ("CE", "PE", "FUT")
+                ),
             )
             if phase_key != previous_phase_key:
                 phase += 1
@@ -225,7 +232,12 @@ def load_excursion_quote_paths(
         sell = depth.get("sell")
         if not isinstance(buy, list) or not isinstance(sell, list):
             continue
-        if not buy or not sell or not isinstance(buy[0], Mapping) or not isinstance(sell[0], Mapping):
+        if (
+            not buy
+            or not sell
+            or not isinstance(buy[0], Mapping)
+            or not isinstance(sell[0], Mapping)
+        ):
             continue
         bid = _positive(buy[0].get("price"))
         ask = _positive(sell[0].get("price"))
