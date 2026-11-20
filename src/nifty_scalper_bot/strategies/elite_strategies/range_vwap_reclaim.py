@@ -329,9 +329,11 @@ def assess_range_vwap_reclaim(
         "excursion_side": (
             "CE"
             if float(previous["close"]) < lower and float(previous["low"]) < lower
-            else "PE"
-            if float(previous["close"]) > upper and float(previous["high"]) > upper
-            else None
+            else (
+                "PE"
+                if float(previous["close"]) > upper and float(previous["high"]) > upper
+                else None
+            )
         ),
         "reclaim_body_fraction": round(body_fraction, 4),
         "reclaim_lower_wick_fraction": (
@@ -770,10 +772,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         selected_symbol = indicators.get(
             "selected_ce" if side == "CE" else "selected_pe"
         )
-        selected = (
-            indicators.get("is_selected_option") is True
-            or normalize_symbol(str(selected_symbol or "")) == normalize_symbol(symbol)
-        )
+        selected = indicators.get("is_selected_option") is True or normalize_symbol(
+            str(selected_symbol or "")
+        ) == normalize_symbol(symbol)
         if (
             future is None
             or structural.get("excursion_side") != side
@@ -784,9 +785,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         identity = f"{future}:{side}:{first}"
         with self._guard_lock:
             if identity in self._opportunities:
-                self._opportunities[identity]["_latest_evaluation_at"] = (
-                    decision_at.isoformat()
-                )
+                self._opportunities[identity][
+                    "_latest_evaluation_at"
+                ] = decision_at.isoformat()
                 self._active_opportunity = identity
                 return
             bid = _value(indicators.get("bid"))
@@ -927,7 +928,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         # This is an observation only; NEVER call live lifecycle or reserve.
         self._active_opportunity = None
         self._observe_excursion(
-            symbol, indicators, evidence, decision_at=decision,
+            symbol,
+            indicators,
+            evidence,
+            decision_at=decision,
             reason=blocked_reason,
         )
         self._active_opportunity = None
@@ -1140,9 +1144,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     structural["history_recovery"] = recovery_reason
             else:
                 structural["history_recovery"] = recovery_reason
-        self._observe_excursion(
-            symbol, indicators, structural, decision_at=decision_at
-        )
+        self._observe_excursion(symbol, indicators, structural, decision_at=decision_at)
         if not self._load_persistent_guard(decision_at):
             self._no_vote("range_durable_setup_guard_unavailable")
             return None
