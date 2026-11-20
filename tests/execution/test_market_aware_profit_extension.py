@@ -1258,6 +1258,7 @@ def _ready_verified_tier_fallback(*, bid=107.0, depth_qty=65):
     bracket.entry_confirmed = True
     bracket.entry_status = "ACTIVE"
     bracket.trailing_enabled = True
+    bracket.trail_revision = 0
     bracket.exchange_stop_order_id = "broker-stop"
     bracket.exchange_stop_trigger_price = 94.0
     bracket.exchange_stop_quantity = 65
