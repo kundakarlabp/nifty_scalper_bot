@@ -1720,7 +1720,11 @@ class StrategyManager:
                         active_future,
                         tuple(
                             (
-                                bar.get("timestamp") or bar.get("datetime") or bar.get("time"),
+                                (
+                                    bar.get("timestamp")
+                                    or bar.get("datetime")
+                                    or bar.get("time")
+                                ),
                                 bar.get("volume"),
                                 bar.get("is_complete"),
                                 bar.get("is_provisional"),
@@ -1731,7 +1735,11 @@ class StrategyManager:
                         ),
                     )
                 cached = getattr(self, "_futures_completed_bar_quality_cache", None)
-                if cache_key is not None and cached is not None and cached[0] == cache_key:
+                if (
+                    cache_key is not None
+                    and cached is not None
+                    and cached[0] == cache_key
+                ):
                     volume_quality = cached[1]
                 else:
                     volume_quality = analyze_completed_futures_volume(completed_bars)
