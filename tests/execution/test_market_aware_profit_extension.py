@@ -1418,3 +1418,31 @@ def test_20261120_archived_286_bid_samples_are_not_full_lot_exit_proof(
     assert bracket.sl_trigger_price == data["initial_sl"]
     assert bracket.trail_revision == 0
     assert not syncs
+
+
+def test_canonical_exchange_timestamp_prevents_raw_naive_utc_misread():
+    """The same valid quote must not be rejected as 5.5 hours future."""
+    manager, bracket, quote, _syncs = _ready_verified_tier_fallback()
+    quote["exchange_timestamp"] = datetime.now().replace(tzinfo=None)
+    quote["timestamp"] = datetime.now(timezone.utc).isoformat()
+    quote["timestamp_source"] = "exchange_timestamp"
+    quote["source_timestamp_valid"] = True
+
+    age = profit_extension._quote_age_seconds(quote)
+    assert age is not None and age <= 3.0
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is not None
+
+
+@pytest.mark.parametrize("delta", [-120, 120])
+def test_authoritative_exchange_timestamp_rejects_old_or_future_quote(delta):
+    """A fresh receive timestamp must never mask stale exchange evidence."""
+    manager, bracket, quote, _syncs = _ready_verified_tier_fallback()
+    quote["exchange_timestamp"] = datetime.now().replace(tzinfo=None)
+    quote["timestamp"] = (
+        datetime.now(timezone.utc) + timedelta(seconds=delta)
+    ).isoformat()
+    quote["timestamp_source"] = "exchange_timestamp"
+    quote["source_timestamp_valid"] = True
+    quote["received_at"] = time()
+
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is None
