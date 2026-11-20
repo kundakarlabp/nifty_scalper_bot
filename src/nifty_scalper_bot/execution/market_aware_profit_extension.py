@@ -1176,7 +1176,11 @@ def _trace_adaptive_no_ratchet(
             book.get("source"),
             _spread_pct(book),
             getattr(bracket, "exchange_stop_trigger_price", None),
-            extra={"event": "ADAPTIVE_PROFIT_LOCK_SKIP", "reason": reason, "symbol": symbol},
+            extra={
+                "event": "ADAPTIVE_PROFIT_LOCK_SKIP",
+                "reason": reason,
+                "symbol": symbol,
+            },
         )
     except Exception:  # noqa: BLE001 - telemetry must never affect protection
         return
@@ -1450,7 +1454,9 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     cost = _adaptive_cost_per_unit(manager, bracket, bid)
     if cost is None or not math.isfinite(cost) or cost <= 0:
         # Never call a capped, unavailable or zero fee estimate NET profit.
-        _trace_adaptive_no_ratchet(manager, bracket, "cost_evidence_unavailable", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "cost_evidence_unavailable", quote=quote
+        )
         return False
     config = getattr(bracket, "trailing_config", None)
     if not isinstance(config, dict):
@@ -1464,11 +1470,15 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         or quote.get("exchange_timestamp")
     )
     if sample is None:
-        _trace_adaptive_no_ratchet(manager, bracket, "quote_identity_missing", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "quote_identity_missing", quote=quote
+        )
         return False
     identity = str(sample)
     if identity == config.get("_adaptive_profit_last_sample"):
-        _trace_adaptive_no_ratchet(manager, bracket, "duplicate_quote_identity", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "duplicate_quote_identity", quote=quote
+        )
         return False
     config["_adaptive_profit_last_sample"] = identity
     now = time.monotonic()
@@ -1589,11 +1599,15 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     room = max(_TICK_SIZE, spread * 1.5, micro_noise * 1.5)
     candidate = _round_tick(min(candidate, bid - room))
     if candidate < floor - _TICK_SIZE:
-        _trace_adaptive_no_ratchet(manager, bracket, "insufficient_bid_room", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "insufficient_bid_room", quote=quote
+        )
         return False
     old = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     if candidate < old + max(0.50, old * 0.0025):
-        _trace_adaptive_no_ratchet(manager, bracket, "no_monotonic_improvement", quote=quote)
+        _trace_adaptive_no_ratchet(
+            manager, bracket, "no_monotonic_improvement", quote=quote
+        )
         return False
     if not _ratchet_stop(
         manager, bracket, candidate, bid, reason="adaptive_profit_lock"
