@@ -1780,6 +1780,45 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
     ):
         _trace_adaptive_no_ratchet(manager, bracket, "fallback_stop_unverified")
         return False
+    # Avoid a second full quote/depth/fee evaluation on every quiet tick.
+    # Only assess fallback after an observed or earlier certified MFE
+    # is at least the original trailing activation threshold.
+    observed_fast = getattr(manager, "_exit_quotes", {}).get(
+        str(getattr(bracket, "symbol", ""))
+    )
+    if not isinstance(observed_fast, (tuple, list)) or not observed_fast:
+        return False
+    fast_bid = _positive(observed_fast[0])
+    fast_entry = _positive(getattr(bracket, "entry_price", None))
+    fast_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+    if (
+        fast_bid is None
+        or fast_entry is None
+        or fast_stop is None
+        or fast_stop >= fast_entry
+    ):
+        return False
+    fast_config = getattr(bracket, "trailing_config", None)
+    if not isinstance(fast_config, dict):
+        return False
+    get_fast_activation = getattr(manager, "_trail_activation_r", None)
+    fast_activation = (
+        float(get_fast_activation(bracket))
+        if callable(get_fast_activation)
+        else 0.60
+    )
+    if (
+        max(
+            fast_bid,
+            _positive(fast_config.get("_adaptive_profit_executable_high"))
+            or fast_entry,
+            _positive(fast_config.get("_verified_legacy_executable_high"))
+            or fast_entry,
+        )
+        < fast_entry + fast_activation * (fast_entry - fast_stop)
+    ):
+        return False
+
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
         _trace_adaptive_no_ratchet(manager, bracket, "fallback_full_depth_unavailable")
