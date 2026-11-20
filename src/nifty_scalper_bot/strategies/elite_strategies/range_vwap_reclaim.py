@@ -767,12 +767,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         side = symbol[-2:].upper()
         future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
         first = str(structural.get("excursion_first_bar_timestamp") or "")
+        selected_symbol = indicators.get(
+            "selected_ce" if side == "CE" else "selected_pe"
+        )
         selected = (
             indicators.get("is_selected_option") is True
-            or normalize_symbol(
-                str(indicators.get("selected_ce" if side == "CE" else "selected_pe") or "")
-            )
-            == normalize_symbol(symbol)
+            or normalize_symbol(str(selected_symbol or "")) == normalize_symbol(symbol)
         )
         if (
             future is None
@@ -811,9 +811,15 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "structural_reason": str(structural.get("reason") or "unverified"),
                 "structural_qualified": structural.get("qualified") is True,
                 "regime": str(indicators.get("regime") or "UNKNOWN"),
-                "regime_transition": indicators.get("regime_transition_pending") is True,
-                "session_vwap": _value(structural.get("session_vwap_before_confirmation")),
-                "rolling_center": _value(structural.get("rolling_20m_secondary_center")),
+                "regime_transition": (
+                    indicators.get("regime_transition_pending") is True
+                ),
+                "session_vwap": _value(
+                    structural.get("session_vwap_before_confirmation")
+                ),
+                "rolling_center": _value(
+                    structural.get("rolling_20m_secondary_center")
+                ),
                 "center_gap_atr": _value(structural.get("secondary_divergence_atr")),
                 "futures_atr": _value(structural.get("futures_atr")),
                 "range_width_atr": _value(structural.get("range_width_atr")),
