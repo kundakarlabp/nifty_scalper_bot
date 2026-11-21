@@ -290,3 +290,45 @@ def test_shadow_records_full_lot_bid_only_with_same_tick_exchange_proof() -> Non
     tick["source_timestamp_valid"] = False
     stale_clock = sample(65, 0.0)
     assert stale_clock["full_lot_bid_proven"] is False
+
+
+def test_rejected_prefill_tick_cannot_poison_watchdog_exit_quote() -> None:
+    """The core pre-fill tick veto must also protect the cached BBO."""
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(_CachedMarketData({}))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="prefill-quote-guard",
+        symbol=symbol,
+        side="BUY",
+        qty=65,
+        price=110.0,
+        sl=100.0,
+        tp=130.0,
+        activate_immediately=True,
+    )
+    bracket = manager.get_bracket("prefill-quote-guard")
+    assert bracket is not None
+    bracket.entry_fill_ts = time()
+    bracket.last_ltp = 110.0
+    bracket.previous_ltp = 110.0
+    manager._exit_quotes[symbol] = (110.0, 110.2, time())
+    delayed_event = bracket.entry_fill_ts - 2.0
+
+    manager.on_tick(
+        symbol,
+        90.0,
+        exchange_ts=delayed_event,
+        tick={
+            "symbol": symbol,
+            "ltp": 90.0,
+            "bid": 89.9,
+            "ask": 90.2,
+            "exchange_timestamp": delayed_event,
+        },
+    )
+
+    assert bracket.last_ltp == 110.0
+    assert manager._executable_exit_price(bracket, 110.0) == (110.0, "bid")
+    assert manager._sl_crossed(bracket, bracket.last_ltp) is False
