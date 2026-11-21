@@ -1421,19 +1421,23 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         original_distance = abs(target - entry)
         quote_distance = abs(target - fut_tick)
         remaining_distance = min(original_distance, quote_distance)
-        # If the two centers disagree, the *nearer* rolling center is a
-        # potential resistance/support barrier. Do not model an uninterrupted
-        # return all the way to session VWAP for a conditional exception.
+        # The rolling center can obstruct price before session VWAP even
+        # when the center gap is within the normal 1.0 ATR allowance.
+        # Price the nearer barrier for both entry routes, not only for the
+        # stricter conditional exception. A center already passed cannot
+        # become a new forward target or manufacture additional reward.
         local_barrier_points: float | None = None
-        if conditional_center:
-            local_center = _value(structural.get("rolling_20m_secondary_center"))
-            if (
-                local_center is None
-                or (side == "CE" and fut_tick >= local_center)
-                or (side == "PE" and fut_tick <= local_center)
-            ):
-                self._no_vote("range_conditional_local_center_already_reached")
-                return None
+        local_center = _value(structural.get("rolling_20m_secondary_center"))
+        if local_center is None:
+            self._no_vote("range_local_center_unverified")
+            return None
+        local_center_ahead = (side == "CE" and fut_tick < local_center) or (
+            side == "PE" and fut_tick > local_center
+        )
+        if conditional_center and not local_center_ahead:
+            self._no_vote("range_conditional_local_center_already_reached")
+            return None
+        if local_center_ahead:
             local_barrier_points = abs(local_center - fut_tick)
             remaining_distance = min(remaining_distance, local_barrier_points)
         stop_distance = max(abs(entry - invalidation), abs(fut_tick - invalidation))
@@ -1452,6 +1456,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         budget["conditional_center_exception"] = conditional_center
         budget["first_local_center_barrier_points"] = (
             round(local_barrier_points, 4) if local_barrier_points is not None else None
+        )
+        budget["local_center_binds_modeled_payoff"] = (
+            local_barrier_points is not None
+            and local_barrier_points < min(original_distance, quote_distance)
         )
         budget["modeled_futures_reward_points"] = round(remaining_distance, 4)
         # Optional economic priority evidence uses the existing canonical
