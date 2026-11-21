@@ -343,6 +343,60 @@ def test_live_quote_rebreak_of_frozen_futures_band_is_not_traded(monkeypatch) ->
     assert strategy.last_no_vote_reason == "range_futures_rebroke_outer_band"
 
 
+def test_normal_center_is_forward_payoff_barrier_even_without_exception(
+    monkeypatch,
+) -> None:
+    """The normal <=1 ATR route must not assume uninterrupted session-VWAP travel."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    data = bars()
+    # Lift early session prices only: session VWAP moves above the rolling
+    # center without affecting the causal late-session reclaim structure.
+    for candle in data[:15]:
+        for field in ("open", "high", "low", "close"):
+            candle[field] += 4.0
+    cfg = RangeVWAPReclaimStrategyConfig()
+    proof = assess_range_vwap_reclaim(data, decision_at=decision_at(), config=cfg)
+    assert proof["qualified"] is True, proof
+    assert proof["conditional_center_exception_used"] is False
+    future_quote = 25247.0
+    local = proof["rolling_20m_secondary_center"]
+    session = proof["session_vwap_before_confirmation"]
+    assert future_quote < local < session
+    observed = {}
+
+    def option_model(_quote, **kwargs):
+        observed.update(kwargs)
+        return {
+            "qualified": True,
+            "worst_stop_loss_including_costs": 650.0,
+            "target_net_reward_after_costs": 1040.0,
+            "net_reward_risk": 1.6,
+            "stop_price_model": 94.0,
+            "vwap_limited_target_price_model": 112.0,
+        }
+
+    monkeypatch.setattr(range_module, "assess_option_cost_risk", option_model)
+    strategy = RangeVWAPReclaimStrategy(cfg, History(data))
+    strategy._regime_bar_confirmed(FUTURE, data[-2]["timestamp"])
+    signal = strategy._evaluate_signal(
+        OPTION,
+        indicators(futures_ltp=future_quote, futures_vwap=session),
+        100.0,
+    )
+    assert signal is not None, strategy.last_no_vote_reason
+    budget = signal.metadata["option_cost_risk"]
+    assert budget["conditional_center_exception"] is False
+    assert budget["local_center_binds_modeled_payoff"] is True
+    assert math.isclose(
+        observed["futures_target_distance"],
+        local - future_quote,
+        abs_tol=0.0001,
+    )
+    assert observed["futures_target_distance"] < session - future_quote
+    # Session VWAP remains the original thesis reference, not a synthetic VWAP.
+    assert math.isclose(signal.metadata["range_futures_target"], session, abs_tol=0.0001)
+
+
 def test_option_reward_repriced_to_current_futures_not_completed_candle(
     monkeypatch,
 ) -> None:
