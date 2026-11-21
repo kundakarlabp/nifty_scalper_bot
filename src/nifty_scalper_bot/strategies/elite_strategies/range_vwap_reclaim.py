@@ -1354,6 +1354,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_independent_option_flow_unconfirmed")
             return None
 
+        conditional_center = structural.get("conditional_center_exception_used") is True
+        if conditional_center and (
+            ofi < self._cfg.min_conditional_option_ofi_3s
+        ):
+            self._no_vote("range_conditional_option_flow_insufficient")
+            return None
+
         stamp = decision_at.date().isoformat()
         excursion_key = (future, side, stamp)
         if excursion_key in self._consumed_excursions:
@@ -1415,6 +1422,21 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         original_distance = abs(target - entry)
         quote_distance = abs(target - fut_tick)
         remaining_distance = min(original_distance, quote_distance)
+        # If the two centers disagree, the *nearer* rolling center is a
+        # potential resistance/support barrier. Do not model an uninterrupted
+        # return all the way to session VWAP for a conditional exception.
+        local_barrier_points: float | None = None
+        if conditional_center:
+            local_center = _value(
+                structural.get("rolling_20m_secondary_center")
+            )
+            if local_center is None or (
+                side == "CE" and fut_tick >= local_center
+            ) or (side == "PE" and fut_tick <= local_center):
+                self._no_vote("range_conditional_local_center_already_reached")
+                return None
+            local_barrier_points = abs(local_center - fut_tick)
+            remaining_distance = min(remaining_distance, local_barrier_points)
         stop_distance = max(abs(entry - invalidation), abs(fut_tick - invalidation))
         budget = assess_option_cost_risk(
             quote,
@@ -1426,10 +1448,36 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         budget["original_completed_bar_target_points"] = round(original_distance, 4)
         budget["fresh_futures_target_points"] = round(quote_distance, 4)
         budget["target_points_removed_due_to_quote_drift"] = round(
-            original_distance - remaining_distance, 4
+            original_distance - min(original_distance, quote_distance), 4
+        )
+        budget["conditional_center_exception"] = conditional_center
+        budget["first_local_center_barrier_points"] = (
+            round(local_barrier_points, 4)
+            if local_barrier_points is not None
+            else None
+        )
+        budget["modeled_futures_reward_points"] = round(remaining_distance, 4)
+        # Optional economic priority evidence uses the existing canonical
+        # cost and spread stressed budget. It must not supersede the selector.
+        model_reward = _value(budget.get("target_net_reward_after_costs"))
+        model_risk = _value(budget.get("worst_stop_loss_including_costs"))
+        budget["net_cash_surplus_above_1_5r"] = (
+            round(model_reward - 1.5 * model_risk, 2)
+            if model_reward is not None and model_risk is not None
+            else None
         )
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
+            return None
+        if conditional_center and (
+            _value(budget.get("net_reward_risk")) is None
+            or budget["net_reward_risk"] < max(
+                self._cfg.min_net_reward_risk,
+                self._cfg.min_conditional_net_reward_risk,
+                1.75,
+            )
+        ):
+            self._no_vote("range_conditional_payoff_buffer_insufficient")
             return None
         live_pilot = range_vwap_live_enabled()
         if live_pilot and (
@@ -1547,6 +1595,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "range_structure": structural,
                 "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
+                "range_failed_breakout_quality": structural.get(
+                    "failed_breakout_quality"
+                ),
+                "range_conditional_center_exception": conditional_center,
+                "range_economic_surplus_rupees": budget.get(
+                    "net_cash_surplus_above_1_5r"
+                ),
                 "research_opportunity_id": opportunity_key,
                 "setup_reasons": ["closed_session_vwap_band_reentry"],
                 "required_data_present": True,
