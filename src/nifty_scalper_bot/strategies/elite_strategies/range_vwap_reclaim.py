@@ -7,9 +7,11 @@ identity for bounded local recovery. Frozen ATR/sigma and session-anchored
 bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
-RangeVWAPReclaimStrategy emits bounded, deduplicated futures-excursion research
-provenance before admissions; validates same-tick OrderFlow handoff and owns
-regime confirmation plus live setup de-duplication.
+RangeVWAPReclaimStrategy records first-seen futures excursions and applies a
+bounded failed-breakout exception to center disagreement with stronger
+same-quote option flow and first-barrier after-cost payoff requirements.
+It owns regime confirmation and live setup de-duplication; the manager,
+runner and broker still own execution and protective orders.
 Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
 StrategyManager callbacks; exact setup/consumption state is restored and
 write-verified through PositionManager's same-day risk circuit before LIVE
@@ -372,6 +374,55 @@ def assess_range_vwap_reclaim(
                 break
             first_excursion_bar = bar["timestamp"]
         evidence["excursion_first_bar_timestamp"] = first_excursion_bar
+
+    # Reuse the *two completed futures bars*; do not add a correlated RSI/ADX
+    # confirmation or use the forming bar. The volatility comparison excludes
+    # the reclaim candle and is not by itself a prediction of profitability.
+    previous_close = float(previous["close"])
+    latest_close = float(latest["close"])
+    if excursion_side == "CE":
+        extension_atr = (lower - previous_close) / atr
+        reentry_atr = (latest_close - lower) / atr
+        reversal_progress_atr = (latest_close - previous_close) / atr
+        direction_confirmed = (
+            latest_close > float(latest["open"])
+            and latest_close < min(session_vwap, rolling_center)
+            and float(latest["low"]) >= float(previous["low"])
+        )
+    elif excursion_side == "PE":
+        extension_atr = (previous_close - upper) / atr
+        reentry_atr = (upper - latest_close) / atr
+        reversal_progress_atr = (previous_close - latest_close) / atr
+        direction_confirmed = (
+            latest_close < float(latest["open"])
+            and latest_close > max(session_vwap, rolling_center)
+            and float(latest["high"]) <= float(previous["high"])
+        )
+    else:
+        extension_atr = 0.0
+        reentry_atr = 0.0
+        reversal_progress_atr = 0.0
+        direction_confirmed = False
+    failed_breakout_quality = bool(
+        direction_confirmed
+        and extension_atr >= 0.05
+        and reentry_atr >= config.min_failed_breakout_reentry_atr
+        and reversal_progress_atr >= config.min_failed_breakout_reentry_atr
+        and recent_efficiency <= config.max_directional_efficiency
+        and recent_tr_ratio <= config.max_failed_breakout_recent_tr_ratio
+        and rvol >= config.min_reclaim_volume_ratio
+        and 0 < bar_range <= 2.0 * atr
+        and body_fraction >= config.min_reclaim_body_fraction
+    )
+    evidence["failed_breakout_quality"] = {
+        "exterior_close_distance_atr": round(extension_atr, 4),
+        "completed_reentry_depth_atr": round(reentry_atr, 4),
+        "completed_reversal_progress_atr": round(reversal_progress_atr, 4),
+        "prior_5m_tr_ratio": round(recent_tr_ratio, 4),
+        "prior_5m_directional_efficiency": round(recent_efficiency, 4),
+        "qualified_for_center_exception": failed_breakout_quality,
+    }
+    evidence["conditional_center_exception_used"] = False
     if slope_bps > config.max_vwap_slope_bps_per_min:
         return {**evidence, "reason": "session_vwap_sloping"}
     if efficiency > config.max_directional_efficiency:
@@ -379,7 +430,19 @@ def assess_range_vwap_reclaim(
     if not 1.5 <= width <= config.max_range_width_atr:
         return {**evidence, "reason": "range_width_unproven"}
     if midpoint_gap_atr > config.max_secondary_center_deviation_atr:
-        return {**evidence, "reason": "session_rolling_center_disagree"}
+        # A wider center is *not* a generic signal. Only the original 1.0
+        # to 1.25 ATR interval is eligible, with completed-bar exhaustion
+        # evidence and every unchanged range, data and broker risk gate.
+        conditional = bool(
+            config.enable_conditional_center_tolerance
+            and config.max_secondary_center_deviation_atr >= 1.0
+            and 1.0 < midpoint_gap_atr
+            <= min(config.max_conditional_center_deviation_atr, 1.25)
+            and failed_breakout_quality
+        )
+        if not conditional:
+            return {**evidence, "reason": "session_rolling_center_disagree"}
+        evidence["conditional_center_exception_used"] = True
     if rvol < config.min_reclaim_volume_ratio:
         return {**evidence, "reason": "reclaim_volume_weak"}
     if bar_range <= 0 or bar_range > 2.0 * atr:
