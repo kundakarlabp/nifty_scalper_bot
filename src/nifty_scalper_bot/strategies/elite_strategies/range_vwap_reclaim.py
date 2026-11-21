@@ -1355,7 +1355,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
 
         conditional_center = structural.get("conditional_center_exception_used") is True
         if conditional_center and (
-            ofi < self._cfg.min_conditional_option_ofi_3s
+            ofi is None or ofi < self._cfg.min_conditional_option_ofi_3s
         ):
             self._no_vote("range_conditional_option_flow_insufficient")
             return None
