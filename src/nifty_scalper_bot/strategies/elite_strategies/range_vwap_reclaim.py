@@ -435,8 +435,10 @@ def assess_range_vwap_reclaim(
         conditional = bool(
             config.enable_conditional_center_tolerance
             and config.max_secondary_center_deviation_atr >= 1.0
-            and 1.0 < midpoint_gap_atr
-            <= min(config.max_conditional_center_deviation_atr, 1.25)
+            and midpoint_gap_atr > 1.0
+            and midpoint_gap_atr <= min(
+                config.max_conditional_center_deviation_atr, 1.25
+            )
             and failed_breakout_quality
         )
         if not conditional:
@@ -1426,12 +1428,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         # return all the way to session VWAP for a conditional exception.
         local_barrier_points: float | None = None
         if conditional_center:
-            local_center = _value(
-                structural.get("rolling_20m_secondary_center")
-            )
-            if local_center is None or (
-                side == "CE" and fut_tick >= local_center
-            ) or (side == "PE" and fut_tick <= local_center):
+            local_center = _value(structural.get("rolling_20m_secondary_center"))
+            if (
+                local_center is None
+                or (side == "CE" and fut_tick >= local_center)
+                or (side == "PE" and fut_tick <= local_center)
+            ):
                 self._no_vote("range_conditional_local_center_already_reached")
                 return None
             local_barrier_points = abs(local_center - fut_tick)
@@ -1451,9 +1453,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         )
         budget["conditional_center_exception"] = conditional_center
         budget["first_local_center_barrier_points"] = (
-            round(local_barrier_points, 4)
-            if local_barrier_points is not None
-            else None
+            round(local_barrier_points, 4) if local_barrier_points is not None else None
         )
         budget["modeled_futures_reward_points"] = round(remaining_distance, 4)
         # Optional economic priority evidence uses the existing canonical
@@ -1468,13 +1468,14 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
             return None
+        conditional_min_rr = max(
+            self._cfg.min_net_reward_risk,
+            self._cfg.min_conditional_net_reward_risk,
+            1.75,
+        )
         if conditional_center and (
             _value(budget.get("net_reward_risk")) is None
-            or budget["net_reward_risk"] < max(
-                self._cfg.min_net_reward_risk,
-                self._cfg.min_conditional_net_reward_risk,
-                1.75,
-            )
+            or budget["net_reward_risk"] < conditional_min_rr
         ):
             self._no_vote("range_conditional_payoff_buffer_insufficient")
             return None
