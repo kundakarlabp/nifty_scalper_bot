@@ -113,3 +113,32 @@ changes from one sample. Run the full CI shards, broker-free end-to-end
 simulation, and verify LIVE broker flat/open positions, stop state and active
 subscriptions before activating any release. Keep ₹773 daily loss gate,
 normal risk sizing, no parallel ordered-tick processing, and no bypasses.
+
+
+## 21 November follow-up: depth-attested peak-to-fill retention research
+
+The canonical per-bracket shadow now distinguishes (1) observed top-of-book
+bid, (2) observed option LTP and LTP-derived MFE, and (3) a strictly verified
+one-lot-executable **quoted** bid. The third category requires exact current
+option symbol/ltp, matching protection-tick exchange timestamp, valid aware
+exchange-time provenance (not receipt time), a WS FULL top bid/ask matching the
+canonical cached bid/ask, and visible top-bid quantity covering the **remaining
+held quantity**. All other observations remain explicitly unqualified.
+
+The existing canonical closed-trade outcome combines a time-bounded verified
+whole-lot bid peak with the already broker-reconciled actual exit and costs.
+It records the peak bid, peak option-bid R, a *quoted* peak-net proxy using the
+actual trade's cost amount, and the cash difference from broker-realized net
+P&L. This is **not** a hypothetical tradable fill, guarantee of an exit near
+the peak, or proof that a submitted stop amendment would have been accepted.
+No price/quantity is imputed when missing or on a truncated path. A price
+recorded after the actual exit cannot influence the result. Bid-only archived
+records from 20 Nov remain unlabelled, not full-lot profitable opportunities.
+
+The five original stop-retention research alternatives now abstain when only
+unverified top bids exist. Only the recorded strategy/stop owner may act in
+LIVE; no trading threshold, position size, entry logic, broker reconciliation,
+stop modification cadence or risk ceiling changes. A fresh chronological
+observed bid peak is the *opportunity information set*, while broker net P&L is
+the actual outcome. The resulting gap is a hypothesis for subsequent review,
+not evidence of net expected improvement by itself.
