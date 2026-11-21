@@ -1203,7 +1203,11 @@ def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
     assert "top_bid_qty=20.0 required_qty=65" in lines[0]
-    assert "full_size_bid_proven=False" in lines[0]
+    assert "top_bid_quantity_sufficient=False" in lines[0]
+    assert bracket.trailing_config["_adaptive_skip_reasons"] == {
+        "full_size_quote_unqualified:undersized_top_bid": 1
+    }
+    assert bracket.trailing_config["_adaptive_last_skip_bid"] == 115.0
     assert bracket.sl_trigger_price == 94.0
 
 
@@ -1233,7 +1237,9 @@ def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
     ]
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
-    assert "full_size_bid_proven=True" in lines[0]
+    # The sufficient TOP quantity cannot prove fresh whole-lot execution.
+    assert "top_bid_quantity_sufficient=True" in lines[0]
+    assert "full_size_bid_proven" not in lines[0]
     assert "received_age_s=" in lines[0]
     assert bracket.sl_trigger_price == 94.0
 
@@ -1375,6 +1381,7 @@ def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
     bracket.last_ltp = 107.0
     assert owner._apply_trailing_math(bracket)
     assert calls == ["adaptive", "verified_tiers"]
+    assert bracket.trailing_config["_optional_trail_eval_count"] == 1
 
 
 def test_20261120_archived_286_bid_samples_are_not_full_lot_exit_proof(

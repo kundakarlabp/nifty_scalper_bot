@@ -11,6 +11,8 @@ Responsibilities:
 - Keep trading ledger persistence distinct from the live protective mechanism.
 - Attribute broker-realized net P&L separately from observed full-lot option
   bid peaks; quote-to-fill gaps are research proxies, never missed fills.
+- Preserve the optional-trailing owner, evaluation count and bounded skip
+  reasons at confirmed closure without granting them trading authority.
 
 Boundaries: BoundBracket/core remain authoritative for protective broker actions.
 Safety: Ledger failure cannot suppress SL/TP exits; uncertain fills block new entries.
@@ -851,6 +853,9 @@ class LedgerBracketManager(CanonicalBracketManager):
         research_config = getattr(bracket, "trailing_config", {}) or {}
         raw_quality_path = research_config.get("_research_executable_path", [])
         quality_path = raw_quality_path if isinstance(raw_quality_path, list) else []
+        skip_reasons = research_config.get("_adaptive_skip_reasons")
+        if not isinstance(skip_reasons, dict):
+            skip_reasons = {}
         bid_path = [
             obs for obs in quality_path
             if isinstance(obs, Mapping) and obs.get("source") == "bid"
@@ -1067,6 +1072,28 @@ class LedgerBracketManager(CanonicalBracketManager):
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
             "trade_quality_shadow": shadow,
+            # This is an audit of optional policy *decisions*, not evidence
+            # of broker stop acceptance or of a full-lot missed fill.
+            "optional_trailing_evidence": {
+                "owner": research_config.get("_optional_trail_owner"),
+                "evaluations": research_config.get("_optional_trail_eval_count"),
+                "skip_reason_counts": dict(skip_reasons),
+                "last_skip_reason": research_config.get("_adaptive_last_skip_reason"),
+                "last_skip_bid": _finite(
+                    research_config.get("_adaptive_last_skip_bid")
+                ),
+                "last_skip_at_epoch": _finite(
+                    research_config.get("_adaptive_last_skip_at")
+                ),
+                "adaptive_has_ratcheted": (
+                    research_config.get("_adaptive_profit_has_ratcheted") is True
+                ),
+                "highest_adaptive_qualified_bid": _finite(
+                    research_config.get("_adaptive_profit_executable_high")
+                ),
+                "missing_skip_reason_does_not_prove_success": True,
+                "skip_traces_require_recent_cached_bid_above_0p6r": True,
+            },
             "adverse_orderflow_shadow": {
                 **flow_shadow,
                 "sample_count": len(flow_observations),

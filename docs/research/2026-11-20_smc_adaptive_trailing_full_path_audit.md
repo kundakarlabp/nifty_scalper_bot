@@ -142,3 +142,47 @@ stop modification cadence or risk ceiling changes. A fresh chronological
 observed bid peak is the *opportunity information set*, while broker net P&L is
 the actual outcome. The resulting gap is a hypothesis for subsequent review,
 not evidence of net expected improvement by itself.
+
+
+## 21 November re-audit: loss mechanism and what cannot be inferred
+
+The authoritative ledger for 20 Nov identifies build
+`6a040c1fc8ac7ea6e1ea4d22dc5bcbab22d15bf2`, the one-lot 25700CE
+filled at 13:40:30 IST for 145.35, and its original broker stop filled at
+13:43:58 IST for 138.85; gross -422.50, net -491.00, no stop modifications.
+The historical `BoundBracketManager._apply_trailing_math` from that **exact**
+build routed exclusively to adaptive when enabled: an adaptive no-ratchet
+did not invoke any legacy tier. Current `#2079` specifically corrects this
+structural failure with a strictly full-depth-verified tier fallback before
+adaptive takes ownership. This confirms a *missing fallback*, not a claim
+that the historical quote passed all conditions for a profitable stop.
+
+A newly computed split of the archived research quote path establishes that
+**275/286 recorded option-bid observations occurred after the 13:40:38 IST
+basket shift**, with **81 distinct bid prices** in total. Their 205.50-second
+sampled path had a maximum inter-sample gap of 1.749 seconds and **zero
+gaps over 3 seconds**. This proves sampled bracket bid observations stayed
+continuous, not that their source retained authenticated WS FULL depth.
+Twelve best-bid samples reached nominal 0.6R (149.25); the observed peak
+150.30 bid was at
+13:41:19.4892 IST. The held contract therefore **continued producing quote
+observations** after the shift. Earlier suggestions that the basket rotation
+proved a *complete* loss of quote delivery are too strong. The previous
+subscription ownership bug was real and fixed, but missing authenticated
+FULL depth at the moment of the profitable best bid remains unverified.
+
+The historical build did not record per-tick adaptive gate decisions, top-bid
+quantities, or acknowledged broker stop modification trials; its absence of
+`ADAPTIVE_PROFIT_LOCK_SKIP` logs is **not** proof the policy succeeded or
+was never evaluated. The current audit adds only bounded in-bracket evaluation
+counts and skip-reason summaries, persisted into the existing closed-trade
+outcome. An empty skip summary remains **unknown** (the trace requires a
+recent cached bid above 0.6R), not proof that no decision was skipped.
+Top-bid quantity sufficiency is explicitly *not* an attestation of a
+complete executable quote.
+
+The strategy signal's 13:40:28 IST sustained orderflow confirmation,
+affordability and regime checks passed; the resulting SMC trade nevertheless
+moved adversely later. That outcome alone does not prove the admission
+threshold was wrong. No entry thresholds, risk cap, adaptive calculations,
+broker stop owner or executable-price requirements have been changed.
