@@ -213,7 +213,9 @@ def test_conditional_center_admission_requires_strong_completed_failure() -> Non
         config=RangeVWAPReclaimStrategyConfig(),
     )
     assert rejected["reason"] == "session_rolling_center_disagree"
-    assert rejected["failed_breakout_quality"]["qualified_for_center_exception"] is False
+    assert (
+        rejected["failed_breakout_quality"]["qualified_for_center_exception"] is False
+    )
 
 
 def test_conditional_center_does_not_override_range_width_or_strict_policy() -> None:
@@ -287,7 +289,9 @@ def test_conditional_center_requires_stronger_net_payoff_and_records_first_barri
     strategy._regime_bar_confirmed(FUTURE, data[-2]["timestamp"])
     quote = indicators(futures_ltp=25242.2, futures_vwap=25243.6)
     assert strategy._evaluate_signal(OPTION, quote, 100.0) is None
-    assert strategy.last_no_vote_reason == "range_conditional_payoff_buffer_insufficient"
+    assert (
+        strategy.last_no_vote_reason == "range_conditional_payoff_buffer_insufficient"
+    )
     outcome["rr"] = 1.85
     signal = strategy._evaluate_signal(OPTION, quote, 100.0)
     assert signal is not None, strategy.last_no_vote_reason
