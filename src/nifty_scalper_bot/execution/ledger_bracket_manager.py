@@ -1091,9 +1091,6 @@ class LedgerBracketManager(CanonicalBracketManager):
                 "highest_adaptive_qualified_bid": _finite(
                     research_config.get("_adaptive_profit_executable_high")
                 ),
-                "highest_verified_tier_bid": _finite(
-                    research_config.get("_verified_legacy_executable_high")
-                ),
                 "missing_skip_reason_does_not_prove_success": True,
                 "skip_traces_require_recent_cached_bid_above_0p6r": True,
             },
