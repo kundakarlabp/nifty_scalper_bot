@@ -19,6 +19,8 @@ Runtime role:
   regardless of the optional global stalled-position time-stop setting.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
+- Broker order completion cannot close a residual position; emergency market
+  flatten verifies signed net residual after terminal cancellation.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
   ghost cleanup: journal a proven protective exit before removing the bracket;
   defer on missing fill or unresolved ledger accounting.
@@ -3549,16 +3551,53 @@ class BracketManager:
                     bracket.bracket_id,
                     stuck_order_id,
                 )
+            # A partially filled cancelled exit can leave fewer contracts
+            # than the bracket's last recorded quantity. A second SELL for
+            # the old size could open an unintended short position.
+            try:
+                signed_qty = int(
+                    self._authoritative_position_snapshot().quantity_for(symbol)
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown is not a quantity
+                LOGGER.critical(
+                    "EXIT_ESCALATION_RESIDUAL_UNVERIFIED bracket_id=%s symbol=%s "
+                    "reason=broker_positions_unavailable error_type=%s",
+                    bracket.bracket_id,
+                    symbol,
+                    type(exc).__name__,
+                )
+                return
+            if signed_qty == 0:
+                self._reconcile_exit_state(
+                    bracket, requested_by="escalation_cancelled_flat"
+                )
+                return
+            direction_matches = (
+                signed_qty > 0 if bracket.side == "BUY" else signed_qty < 0
+            )
+            residual_qty = abs(signed_qty)
+            if not direction_matches or residual_qty > qty:
+                LOGGER.critical(
+                    "EXIT_ESCALATION_RESIDUAL_MISMATCH bracket_id=%s symbol=%s "
+                    "broker_signed_qty=%s bracket_qty=%s expected_side=%s",
+                    bracket.bracket_id,
+                    symbol,
+                    signed_qty,
+                    qty,
+                    side,
+                )
+                return
             with self._lock:
+                bracket.remaining_quantity = residual_qty
                 bracket.exit_order_id = None
                 bracket.pending_exit_order_id = None
-            if not symbol or qty <= 0:
+            if not symbol or residual_qty <= 0:
                 return
             try:
                 order_id = self.order_manager.place_order(
                     symbol=symbol,
                     side=side,
-                    quantity=qty,
+                    quantity=residual_qty,
                     order_type="MARKET",
                     tag=f"EXIT_MKT_{bracket.bracket_id[:8]}",
                     check_risk=False,
@@ -3587,7 +3626,7 @@ class BracketManager:
                     bracket.bracket_id,
                     symbol,
                     order_id,
-                    qty,
+                    residual_qty,
                 )
             else:
                 LOGGER.critical(
@@ -4952,6 +4991,30 @@ class BracketManager:
             filled,
         )
         if filled:
+            if not flat:
+                # An exchange order can be COMPLETE while the position still
+                # carries residual exposure, or the broker net snapshot is
+                # temporarily unavailable. Order fill is not flatness proof.
+                with self._lock:
+                    bracket.exit_pending = True
+                    bracket.position_flat_confirmed = False
+                    bracket.last_exit_error = "filled_order_position_not_proven_flat"
+                LOGGER.critical(
+                    "EXIT_FILLED_POSITION_UNRESOLVED bracket_id=%s symbol=%s "
+                    "order_id=%s filled_qty=%s reason=broker_not_proven_flat",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    order_id,
+                    filled_qty,
+                    extra={
+                        "event": "EXIT_FILLED_POSITION_UNRESOLVED",
+                        "bracket_id": bracket.bracket_id,
+                        "symbol": bracket.symbol,
+                        "order_id": order_id,
+                        "filled_qty": filled_qty,
+                    },
+                )
+                return False
             self._log_bracket_event(
                 "EXIT_FILLED",
                 bracket,
