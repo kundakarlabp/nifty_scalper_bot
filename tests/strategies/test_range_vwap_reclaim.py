@@ -229,9 +229,7 @@ def test_conditional_center_does_not_override_range_width_or_strict_policy() -> 
     strictly_disabled = assess_range_vwap_reclaim(
         data,
         decision_at=decision_at(),
-        config=RangeVWAPReclaimStrategyConfig(
-            max_secondary_center_deviation_atr=0.1
-        ),
+        config=RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.1),
     )
     assert strictly_disabled["reason"] == "session_rolling_center_disagree"
     assert strictly_disabled["conditional_center_exception_used"] is False
@@ -283,9 +281,7 @@ def test_conditional_center_requires_stronger_net_payoff_and_records_first_barri
 
     monkeypatch.setattr(range_module, "assess_option_cost_risk", option_model)
     data = shifted_failed_breakout()
-    strategy = RangeVWAPReclaimStrategy(
-        RangeVWAPReclaimStrategyConfig(), History(data)
-    )
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), History(data))
     strategy._regime_bar_confirmed(FUTURE, data[-2]["timestamp"])
     quote = indicators(futures_ltp=25242.2, futures_vwap=25243.6)
     assert strategy._evaluate_signal(OPTION, quote, 100.0) is None
