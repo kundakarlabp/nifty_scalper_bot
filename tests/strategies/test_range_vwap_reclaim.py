@@ -353,7 +353,7 @@ def test_normal_center_is_forward_payoff_barrier_even_without_exception(
     # center without affecting the causal late-session reclaim structure.
     for candle in data[:15]:
         for field in ("open", "high", "low", "close"):
-            candle[field] += 4.0
+            candle[field] += 1.0
     cfg = RangeVWAPReclaimStrategyConfig()
     proof = assess_range_vwap_reclaim(data, decision_at=decision_at(), config=cfg)
     assert proof["qualified"] is True, proof
