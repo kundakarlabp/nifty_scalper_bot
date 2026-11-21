@@ -178,9 +178,7 @@ class CanonicalBracketManager(HardenedBracketManager):
         # reversed short must not be treated as a surviving long TP1 lot.
         try:
             signed_residual = int(
-                self._authoritative_position_snapshot().quantity_for(
-                    bracket.symbol
-                )
+                self._authoritative_position_snapshot().quantity_for(bracket.symbol)
             )
         except Exception as exc:  # noqa: BLE001 - unknown direction is not proof
             _core.LOGGER.critical(
