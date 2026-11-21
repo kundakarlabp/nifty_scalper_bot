@@ -159,8 +159,12 @@ that the historical quote passed all conditions for a profitable stop.
 
 A newly computed split of the archived research quote path establishes that
 **275/286 recorded option-bid observations occurred after the 13:40:38 IST
-basket shift**, with **81 distinct bid prices** in total. Twelve best-bid
-samples reached nominal 0.6R (149.25); the observed peak 150.30 bid was at
+basket shift**, with **81 distinct bid prices** in total. Their 205.50-second
+sampled path had a maximum inter-sample gap of 1.749 seconds and **zero
+gaps over 3 seconds**. This proves sampled bracket bid observations stayed
+continuous, not that their source retained authenticated WS FULL depth.
+Twelve best-bid samples reached nominal 0.6R (149.25); the observed peak
+150.30 bid was at
 13:41:19.4892 IST. The held contract therefore **continued producing quote
 observations** after the shift. Earlier suggestions that the basket rotation
 proved a *complete* loss of quote delivery are too strong. The previous
