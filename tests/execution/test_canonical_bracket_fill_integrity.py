@@ -382,3 +382,24 @@ def test_tp1_verified_live_residual_stop_keeps_entries_unblocked(
     assert manager.has_unresolved_exit() is False
     assert "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED" not in events
     assert "PARTIAL_EXIT_CONFIRMED" in events
+
+
+def test_tp1_cannot_resume_long_protection_on_reversed_broker_short() -> None:
+    """A signed -65 net is not 65 long contracts for TP1 residual re-arming."""
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-reversed-position",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=-65,
+        average_price=110.05,
+    )
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.tp_levels[0].executed is False
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.position_flat_confirmed is False
+    assert manager.has_unresolved_exit() is True
+    assert order_manager.place_calls == []
