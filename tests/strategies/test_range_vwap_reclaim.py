@@ -394,7 +394,9 @@ def test_normal_center_is_forward_payoff_barrier_even_without_exception(
     )
     assert observed["futures_target_distance"] < session - future_quote
     # Session VWAP remains the original thesis reference, not a synthetic VWAP.
-    assert math.isclose(signal.metadata["range_futures_target"], session, abs_tol=0.0001)
+    assert math.isclose(
+        signal.metadata["range_futures_target"], session, abs_tol=0.0001
+    )
 
 
 def test_option_reward_repriced_to_current_futures_not_completed_candle(
