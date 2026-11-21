@@ -162,6 +162,148 @@ def test_true_session_anchor_and_rolling_secondary_agree() -> None:
     assert report["session_vwap_before_confirmation"] > 25245.3
 
 
+def shifted_failed_breakout() -> list[dict]:
+    """Synthetic shift with 1.0-1.25 ATR center gap and true reclaim."""
+    data = bars()
+    for candle in data[:15]:
+        for field in ("open", "high", "low", "close"):
+            candle[field] -= 20.0
+    data[-2].update(
+        open=25236.4,
+        high=25238.0,
+        low=25233.0,
+        close=25236.0,
+    )
+    data[-1].update(
+        open=25239.0,
+        high=25244.0,
+        low=25237.0,
+        close=25242.0,
+    )
+    return data
+
+
+def test_conditional_center_admission_requires_strong_completed_failure() -> None:
+    data = shifted_failed_breakout()
+    baseline = assess_range_vwap_reclaim(
+        data,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(
+            enable_conditional_center_tolerance=False
+        ),
+    )
+    assert baseline["reason"] == "session_rolling_center_disagree"
+    assert 1.0 < baseline["secondary_divergence_atr"] < 1.25
+    pilot = assess_range_vwap_reclaim(
+        data,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(),
+    )
+    assert pilot["qualified"] is True, pilot
+    assert pilot["side"] == "CE"
+    assert pilot["conditional_center_exception_used"] is True
+    assert pilot["failed_breakout_quality"]["qualified_for_center_exception"]
+    assert pilot["failed_breakout_quality"]["exterior_close_distance_atr"] > 0
+    assert pilot["failed_breakout_quality"]["completed_reentry_depth_atr"] > 0.15
+    weak = shifted_failed_breakout()
+    weak[-1].update(open=25241.5)
+    rejected = assess_range_vwap_reclaim(
+        weak,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(),
+    )
+    assert rejected["reason"] == "session_rolling_center_disagree"
+    assert rejected["failed_breakout_quality"]["qualified_for_center_exception"] is False
+
+
+def test_conditional_center_does_not_override_range_width_or_strict_policy() -> None:
+    data = shifted_failed_breakout()
+    narrow = assess_range_vwap_reclaim(
+        data,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(max_range_width_atr=2.0),
+    )
+    assert narrow["reason"] == "range_width_unproven"
+    strictly_disabled = assess_range_vwap_reclaim(
+        data,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(
+            max_secondary_center_deviation_atr=0.1
+        ),
+    )
+    assert strictly_disabled["reason"] == "session_rolling_center_disagree"
+    assert strictly_disabled["conditional_center_exception_used"] is False
+    tightened = assess_range_vwap_reclaim(
+        data,
+        decision_at=decision_at(),
+        config=RangeVWAPReclaimStrategyConfig(
+            max_conditional_center_deviation_atr=1.05
+        ),
+    )
+    assert tightened["reason"] == "session_rolling_center_disagree"
+
+
+def test_conditional_center_requires_stronger_same_quote_ofi(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    data = shifted_failed_breakout()
+    engine = History(data)
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), engine)
+    strategy._regime_bar_confirmed(FUTURE, data[-2]["timestamp"])
+    strategy._evaluate_signal(
+        OPTION,
+        indicators(
+            futures_ltp=25242.2,
+            futures_vwap=25243.6,
+            ofi_3s_normalized=0.15,
+        ),
+        100.0,
+    )
+    assert strategy.last_no_vote_reason == "range_conditional_option_flow_insufficient"
+
+
+def test_conditional_center_requires_stronger_net_payoff_and_records_first_barrier(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    observed = {}
+    outcome = {"rr": 1.65}
+
+    def option_model(_quote, **kwargs):
+        observed.update(kwargs)
+        return {
+            "qualified": True,
+            "worst_stop_loss_including_costs": 650.0,
+            "target_net_reward_after_costs": outcome["rr"] * 650.0,
+            "net_reward_risk": outcome["rr"],
+            "stop_price_model": 94.0,
+            "vwap_limited_target_price_model": 112.0,
+        }
+
+    monkeypatch.setattr(range_module, "assess_option_cost_risk", option_model)
+    data = shifted_failed_breakout()
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(data)
+    )
+    strategy._regime_bar_confirmed(FUTURE, data[-2]["timestamp"])
+    quote = indicators(futures_ltp=25242.2, futures_vwap=25243.6)
+    assert strategy._evaluate_signal(OPTION, quote, 100.0) is None
+    assert strategy.last_no_vote_reason == "range_conditional_payoff_buffer_insufficient"
+    outcome["rr"] = 1.85
+    signal = strategy._evaluate_signal(OPTION, quote, 100.0)
+    assert signal is not None, strategy.last_no_vote_reason
+    assert signal.metadata["range_conditional_center_exception"] is True
+    economics = signal.metadata["option_cost_risk"]
+    assert economics["conditional_center_exception"] is True
+    assert economics["modeled_futures_reward_points"] <= (
+        economics["first_local_center_barrier_points"]
+    )
+    assert observed["futures_target_distance"] <= (
+        economics["first_local_center_barrier_points"]
+    )
+    assert economics["net_cash_surplus_above_1_5r"] > 0
+    assert signal.metadata["range_economic_surplus_rupees"] > 0
+
+
 def test_volatility_pressure_uses_only_preconfirmation_futures_history() -> None:
     baseline = assess_range_vwap_reclaim(
         bars(), decision_at=decision_at(), config=RangeVWAPReclaimStrategyConfig()
