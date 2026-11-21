@@ -200,7 +200,7 @@ class BoundBracketManager(RuntimeBracketManager):
             tick_ltp = tick.get("ltp") or tick.get("last_price") or tick.get("price")
             try:
                 current_ltp = float(ltp)
-                observed_ltp = float(tick_ltp)
+                observed_ltp = float(tick_ltp) if tick_ltp is not None else 0.0
                 same_ltp = (
                     bool(_profit_extension._positive(current_ltp))
                     and bool(_profit_extension._positive(observed_ltp))
