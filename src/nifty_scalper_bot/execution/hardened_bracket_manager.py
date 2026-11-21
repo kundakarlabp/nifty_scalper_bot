@@ -470,9 +470,7 @@ class HardenedBracketManager(_CoreBracketManager):
         # cancellation, never a stale bracket quantity or an ABS-only value.
         try:
             signed_qty = int(
-                self._authoritative_position_snapshot().quantity_for(
-                    bracket.symbol
-                )
+                self._authoritative_position_snapshot().quantity_for(bracket.symbol)
             )
         except Exception as exc:  # noqa: BLE001 - unknown is not flat
             with self._lock:
