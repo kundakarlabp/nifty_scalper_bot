@@ -1481,3 +1481,31 @@ def test_explicit_adaptive_disable_preserves_verified_live_tier_fallback(
     assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
     assert bracket.sl_trigger_price > 94.0
     assert len(syncs) == 1
+
+
+@pytest.mark.parametrize("cache_issue", ["missing", "wrong_bid", "wrong_ask", "stale"])
+def test_live_adaptive_cannot_ratchet_from_quote_ahead_of_protection_tick(
+    monkeypatch, cache_issue: str
+) -> None:
+    """A fast MDM cache may advance before the ordered bracket callback."""
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=False)
+    bracket.exchange_stop_order_id = "stop-1"
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 65
+    _adaptive_market(manager, bid=115.0)
+    cached = {
+        "missing": {},
+        "wrong_bid": {SYMBOL: (108.0, 115.2, time())},
+        "wrong_ask": {SYMBOL: (115.0, 118.0, time())},
+        "stale": {SYMBOL: (115.0, 115.2, time() - 10.0)},
+    }
+    manager._exit_quotes = cached[cache_issue]
+
+    assert not profit_extension.tighten_adaptive_profit_lock(
+        manager, bracket, 115.0
+    )
+    assert bracket.sl_trigger_price == 94.0
+    assert bracket.trail_revision == 0 if hasattr(bracket, "trail_revision") else True
