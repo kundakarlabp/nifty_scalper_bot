@@ -45,6 +45,7 @@ def _bid_path(samples: Any) -> list[tuple[float, float]]:
         top_qty = _number(observation.get("top_bid_qty"))
         required = _number(observation.get("required_qty"))
         quote_age_ms = _number(observation.get("quote_age_ms"))
+        market_age_ms = _number(observation.get("market_age_ms"))
         if (
             timestamp is None
             or timestamp <= 0
@@ -56,6 +57,8 @@ def _bid_path(samples: Any) -> list[tuple[float, float]]:
             or top_qty < required
             or quote_age_ms is None
             or not 0 <= quote_age_ms <= 2000.0
+            or market_age_ms is None
+            or not 0 <= market_age_ms <= 2000.0
         ):
             continue
         normalized[timestamp] = bid
