@@ -332,3 +332,18 @@ def test_rejected_prefill_tick_cannot_poison_watchdog_exit_quote() -> None:
     assert bracket.last_ltp == 110.0
     assert manager._executable_exit_price(bracket, 110.0) == (110.0, "bid")
     assert manager._sl_crossed(bracket, bracket.last_ltp) is False
+
+    # The public event adapter previously wrote the quote even earlier,
+    # before it forwarded this same event to BoundBracketManager.on_tick.
+    manager.on_tick_event(
+        {
+            "symbol": symbol,
+            "ltp": 90.0,
+            "bid": 89.9,
+            "ask": 90.2,
+            "exchange_timestamp": delayed_event,
+        }
+    )
+    assert bracket.last_ltp == 110.0
+    assert manager._executable_exit_price(bracket, 110.0) == (110.0, "bid")
+    assert manager._sl_crossed(bracket, bracket.last_ltp) is False
