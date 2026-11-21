@@ -461,3 +461,55 @@ def test_exit_worker_survives_broker_state_exception_and_handles_next_item(
     assert second.wait(timeout=1.0)
     assert manager._exit_dispatch_thread.is_alive()
     assert bracket.exit_pending is True
+
+
+@pytest.mark.parametrize("residual_qty", [35, 65])
+def test_complete_exit_order_does_not_close_nonflat_broker_position(
+    residual_qty: int,
+) -> None:
+    """A filled order is not proof that the whole symbol position is flat."""
+    broker = _Broker(
+        status="COMPLETE",
+        positions=[{"symbol": "NFO:NIFTY2660923100CE", "quantity": residual_qty}],
+    )
+    manager = _active_manager(_OrderManager(broker=broker))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    bracket.exit_order_id = "exit-1"
+    bracket.pending_exit_order_id = "exit-1"
+    bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.remaining_quantity > 0
+    assert bracket.exit_pending is True
+    assert bracket.exit_order_id == "exit-1"
+    assert bracket.position_flat_confirmed is False
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert manager.has_unresolved_exit() is True
+
+
+def test_complete_exit_order_requires_readable_broker_position_snapshot() -> None:
+    """Even a complete order with an average fill price needs net-position proof."""
+
+    class _UnknownPositionBroker(_Broker):
+        def get_positions(self) -> list[dict[str, Any]]:
+            raise RuntimeError("broker positions temporarily unavailable")
+
+    broker = _UnknownPositionBroker(status="COMPLETE")
+    manager = _active_manager(_OrderManager(broker=broker))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    bracket.exit_order_id = "exit-1"
+    bracket.pending_exit_order_id = "exit-1"
+    bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
