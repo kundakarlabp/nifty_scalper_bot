@@ -9,6 +9,8 @@ Key responsibilities:
     - Keep active virtual brackets supplied with fresh canonical market data.
     - Forward the original protection tick to read-only full-lot research
       without introducing another quote cache or stop authority.
+    - Count optional trail assessments in existing per-bracket state to
+      distinguish missed dispatch from a legitimate no-ratchet decision.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
@@ -276,6 +278,15 @@ class BoundBracketManager(RuntimeBracketManager):
                 else ("verified_tiers_live" if broker_live else "legacy_paper")
             )
             if isinstance(policy_config, dict):
+                # One bounded integer per evaluated tick. No broker I/O,
+                # persistence write or additional policy decision.
+                try:
+                    evaluated = int(policy_config.get("_optional_trail_eval_count") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    evaluated = 0
+                policy_config["_optional_trail_eval_count"] = min(
+                    1000000, max(0, evaluated) + 1
+                )
                 if policy_config.get("_optional_trail_owner") != selected:
                     policy_config["_optional_trail_owner"] = selected
                     _profit_extension.LOGGER.info(
