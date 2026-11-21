@@ -4991,7 +4991,7 @@ class BracketManager:
             filled,
         )
         if filled:
-            if not flat:
+            if self._is_live_execution() and not flat:
                 # An exchange order can be COMPLETE while the position still
                 # carries residual exposure, or the broker net snapshot is
                 # temporarily unavailable. Order fill is not flatness proof.
