@@ -11,7 +11,8 @@ one optional full-depth-verified trailing stop per tick, and a strict
 broker-confirmed canonical synchronization path; the private
 _trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics and
 retains a bounded per-position skip summary only when the independently cached
-best bid has crossed 0.6R (not proof of full-size executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
+best bid has crossed 0.6R (not proof of full-size executable fill).
+_exit_strategy_family, _verified_futures_volume_ratio and
 _adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
