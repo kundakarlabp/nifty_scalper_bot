@@ -149,6 +149,89 @@ def test_runtime_on_tick_matches_cached_quote_using_received_at_fallback() -> No
     assert manager._exit_quotes[symbol][:2] == (99.25, 99.55)
 
 
+def _active_manager_for_quote_identity() -> tuple[BracketManager, str]:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(
+        _CachedMarketData(
+            {
+                "symbol": symbol,
+                "ltp": 111.0,
+                "bid": 110.0,
+                "ask": 112.0,
+                "timestamp": 1_002.0,
+            }
+        )
+    )
+    manager.register_virtual_bracket(
+        "quote-identity",
+        symbol,
+        "BUY",
+        65,
+        110.0,
+        100.0,
+        140.0,
+        activate_immediately=True,
+    )
+    manager._fire_exits_batch = Mock()
+    return manager, symbol
+
+
+def test_new_depthless_tick_cannot_reuse_old_bid_to_mask_hard_stop() -> None:
+    manager, symbol = _active_manager_for_quote_identity()
+    manager._exit_quotes[symbol] = (108.0, 108.2, time())
+
+    manager.on_tick(
+        symbol,
+        99.0,
+        exchange_ts=1_001.0,
+        defer_submission=True,
+        tick={"symbol": symbol, "ltp": 99.0, "timestamp": 1_001.0},
+    )
+
+    assert symbol not in manager._exit_quotes
+    manager._fire_exits_batch.assert_called_once()
+    action = manager._fire_exits_batch.call_args.args[0][0][1]
+    assert action["type"] == "SL"
+    assert action["trigger_price_source"] == "ltp"
+
+
+def test_new_depthless_tick_cannot_reuse_old_bid_to_fake_take_profit() -> None:
+    manager, symbol = _active_manager_for_quote_identity()
+    manager._exit_quotes[symbol] = (141.0, 141.2, time())
+
+    manager.on_tick(
+        symbol,
+        110.0,
+        exchange_ts=1_001.0,
+        defer_submission=True,
+        tick={"symbol": symbol, "ltp": 110.0, "timestamp": 1_001.0},
+    )
+
+    assert symbol not in manager._exit_quotes
+    manager._fire_exits_batch.assert_not_called()
+
+
+def test_tick_from_different_option_cannot_contaminate_protective_quote() -> None:
+    manager, symbol = _active_manager_for_quote_identity()
+
+    manager.on_tick(
+        symbol,
+        108.0,
+        exchange_ts=1_001.0,
+        defer_submission=True,
+        tick={
+            "symbol": "NFO:NIFTY26AUG24050CE",
+            "ltp": 108.0,
+            "bid": 95.0,
+            "ask": 96.0,
+            "timestamp": 1_001.0,
+        },
+    )
+
+    assert symbol not in manager._exit_quotes
+    manager._fire_exits_batch.assert_not_called()
+
+
 def test_shadow_records_full_lot_bid_only_with_same_tick_exchange_proof() -> None:
     symbol = "NFO:NIFTY26AUG24050PE"
     manager = object.__new__(BracketManager)

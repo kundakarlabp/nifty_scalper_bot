@@ -9,6 +9,7 @@ Key responsibilities:
     - Keep active virtual brackets supplied with fresh canonical market data.
     - Forward the original protection tick to read-only full-lot research
       without introducing another quote cache or stop authority.
+    - Discard prior-tick exit quotes when a new tick has no matching BBO.
     - Count optional trail assessments in existing per-bracket state to
       distinguish missed dispatch from a legitimate no-ratchet decision.
 
@@ -139,20 +140,23 @@ class BoundBracketManager(RuntimeBracketManager):
         symbol: str,
         ltp: float,
         exchange_ts: float | None,
-    ) -> None:
-        """Recover executable depth from the cached SSOT without mixing ticks."""
+    ) -> bool:
+        """Capture a quote only when the SSOT matches this protection tick."""
         source = getattr(self, "_market_data", None)
         getter = (
             getattr(source, "get_latest_tick", None) if source is not None else None
         )
         if not callable(getter):
-            return
+            return False
         try:
             cached = getter(symbol)
         except Exception:
-            return
+            return False
         if not isinstance(cached, Mapping):
-            return
+            return False
+        cached_symbol = cached.get("symbol")
+        if cached_symbol and normalize_symbol(str(cached_symbol)) != symbol:
+            return False
         try:
             cached_ltp = float(
                 cached.get("ltp")
@@ -161,23 +165,23 @@ class BoundBracketManager(RuntimeBracketManager):
                 or 0.0
             )
             current_ltp = float(ltp)
-        except (TypeError, ValueError):
-            return
+        except (TypeError, ValueError, OverflowError):
+            return False
         if (
-            cached_ltp <= 0.0
-            or current_ltp <= 0.0
+            not _profit_extension._positive(cached_ltp)
+            or not _profit_extension._positive(current_ltp)
             or abs(cached_ltp - current_ltp) > 1e-9
         ):
-            return
+            return False
         if exchange_ts is not None:
             cached_ts = _core.tick_exchange_epoch(cached)
             try:
                 current_ts = float(exchange_ts)
-            except (TypeError, ValueError):
-                return
+            except (TypeError, ValueError, OverflowError):
+                return False
             if cached_ts is None or abs(float(cached_ts) - current_ts) > 0.001:
-                return
-        self._capture_exit_quote(normalize_symbol(symbol), cached)
+                return False
+        return bool(self._capture_exit_quote(symbol, cached))
 
     def on_tick(
         self,
@@ -188,12 +192,44 @@ class BoundBracketManager(RuntimeBracketManager):
         defer_submission: bool = False,
         tick: Mapping[str, Any] | None = None,
     ) -> None:
-        """Preserve executable bid/ask from the exact normalized protection tick."""
+        """Never evaluate a new protection tick using a previous tick's BBO."""
+        normalized = normalize_symbol(symbol)
         captured = False
         if isinstance(tick, Mapping):
-            captured = self._capture_exit_quote(normalize_symbol(symbol), tick)
+            tick_symbol = tick.get("symbol")
+            tick_ltp = tick.get("ltp") or tick.get("last_price") or tick.get("price")
+            try:
+                current_ltp = float(ltp)
+                observed_ltp = float(tick_ltp) if tick_ltp is not None else 0.0
+                same_ltp = (
+                    bool(_profit_extension._positive(current_ltp))
+                    and bool(_profit_extension._positive(observed_ltp))
+                    and abs(observed_ltp - current_ltp) <= 1e-9
+                )
+                tick_ts = _core.tick_exchange_epoch(tick)
+                same_event = exchange_ts is None or (
+                    tick_ts is not None
+                    and abs(float(tick_ts) - float(exchange_ts)) <= 0.001
+                )
+            except (TypeError, ValueError, OverflowError):
+                same_ltp = False
+                same_event = False
+            if (
+                (not tick_symbol or normalize_symbol(str(tick_symbol)) == normalized)
+                and same_ltp
+                and same_event
+            ):
+                captured = bool(self._capture_exit_quote(normalized, tick))
         if not captured:
-            self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
+            captured = self._capture_same_tick_cached_quote(
+                normalized, ltp, exchange_ts
+            )
+        if isinstance(tick, Mapping) and not captured:
+            # A depth-less/invalid new tick must not reuse an older BBO.
+            # Canonical hard SL/TP still evaluates the current LTP; the
+            # broker-resident protective stop is never cancelled here.
+            with self._lock:
+                self._exit_quotes.pop(normalized, None)
         super().on_tick(
             symbol,
             ltp,
