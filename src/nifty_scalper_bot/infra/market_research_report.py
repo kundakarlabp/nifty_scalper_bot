@@ -2,7 +2,8 @@
 
 Responsibilities: validate archived quote provenance, report canonical
 first-observed RangeVWAP futures excursions with 5/10/15-minute futures and
-full-lot option bid outcomes, and preserve the existing structural decisions,
+full-lot option bid outcomes stressed at the same default slippage as live,
+while preserving the existing structural decisions,
 minute-sampled rejections, cost/MAE labels and option volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
@@ -25,6 +26,9 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    RangeVWAPReclaimStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -32,7 +36,8 @@ LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 _HORIZONS = (60, 180, 300, 600, 900)
 _MODELED_QUANTITY_DEFAULT = 65  # Research assumption; verify instrument lot.
-_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Per-side model, not observed broker fill.
+_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Generic sampling, not broker fill.
+_RANGE_VWAP_SLIPPAGE_BPS = RangeVWAPReclaimStrategyConfig().slippage_stress_bps
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
@@ -607,7 +612,7 @@ def _range_excursion_markouts(
                 _cost_model(
                     option,
                     quantity=quantity,
-                    adverse_slippage_bps=_MODELED_ADVERSE_SLIPPAGE_BPS,
+                    adverse_slippage_bps=_RANGE_VWAP_SLIPPAGE_BPS,
                 )
                 if option is not None and quantity is not None
                 else None
@@ -646,6 +651,7 @@ def _range_excursion_markouts(
                     "option_full_lot_markout": option,
                     "option_status": option_status,
                     "option_cost_adjusted": costed,
+                    "adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
                     "observed_book_and_futures_complete": (
                         fut is not None and costed is not None
                     ),
@@ -675,6 +681,7 @@ def _range_excursion_markouts(
                 {
                     "policy": policy,
                     "horizon_seconds": horizon,
+                    "adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
                     "unique_first_seen_excursions": len(group),
                     "full_lot_bid_futures_labelled": sum(
                         row["observed_book_and_futures_complete"] for row in group
@@ -770,6 +777,7 @@ def build_session_research_report(
             "one_lot_default_units": _MODELED_QUANTITY_DEFAULT,
             "default_lot_size_is_assumption": True,
             "adverse_slippage_bps_per_side": _MODELED_ADVERSE_SLIPPAGE_BPS,
+            "range_vwap_adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
             "implementation": "risk.cost_model.estimate_round_trip_cost",
             "fills_and_protective_stops_verified": False,
         },

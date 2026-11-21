@@ -481,6 +481,14 @@ def test_excursion_report_uses_full_lot_exact_token_books_and_futures(tmp_path) 
     )
     assert report["status"] == "analysed"
     assert len(report["range_excursion_opportunities"]) == 1
+    assert (
+        report["cost_model_provenance"]["range_vwap_adverse_slippage_bps_per_side"]
+        == 25.0
+    )
+    assert all(
+        r["adverse_slippage_bps_per_side"] == 25.0
+        for r in report["range_excursion_horizons"]
+    )
     assert [r["horizon_seconds"] for r in report["range_excursion_horizons"]] == [
         300,
         600,

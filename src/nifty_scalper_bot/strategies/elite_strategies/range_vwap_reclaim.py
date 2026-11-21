@@ -7,9 +7,11 @@ identity for bounded local recovery. Frozen ATR/sigma and session-anchored
 bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
-RangeVWAPReclaimStrategy emits bounded, deduplicated futures-excursion research
-provenance before admissions; validates same-tick OrderFlow handoff and owns
-regime confirmation plus live setup de-duplication.
+RangeVWAPReclaimStrategy records first-seen futures excursions and applies a
+bounded failed-breakout exception to center disagreement with stronger
+same-quote option flow and first-barrier after-cost payoff requirements.
+It owns regime confirmation and live setup de-duplication; the manager,
+runner and broker still own execution and protective orders.
 Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
 StrategyManager callbacks; exact setup/consumption state is restored and
 write-verified through PositionManager's same-day risk circuit before LIVE
@@ -372,6 +374,54 @@ def assess_range_vwap_reclaim(
                 break
             first_excursion_bar = bar["timestamp"]
         evidence["excursion_first_bar_timestamp"] = first_excursion_bar
+
+    # Reuse the *two completed futures bars*; do not add a correlated RSI/ADX
+    # confirmation or use the forming bar. The volatility comparison excludes
+    # the reclaim candle and is not by itself a prediction of profitability.
+    previous_close = float(previous["close"])
+    latest_close = float(latest["close"])
+    if excursion_side == "CE":
+        extension_atr = (lower - previous_close) / atr
+        reentry_atr = (latest_close - lower) / atr
+        reversal_progress_atr = (latest_close - previous_close) / atr
+        direction_confirmed = (
+            latest_close > float(latest["open"])
+            and latest_close < min(session_vwap, rolling_center)
+            and float(latest["low"]) >= float(previous["low"])
+        )
+    elif excursion_side == "PE":
+        extension_atr = (previous_close - upper) / atr
+        reentry_atr = (upper - latest_close) / atr
+        reversal_progress_atr = (previous_close - latest_close) / atr
+        direction_confirmed = (
+            latest_close < float(latest["open"])
+            and latest_close > max(session_vwap, rolling_center)
+            and float(latest["high"]) <= float(previous["high"])
+        )
+    else:
+        extension_atr = 0.0
+        reentry_atr = 0.0
+        reversal_progress_atr = 0.0
+        direction_confirmed = False
+    failed_breakout_quality = bool(
+        direction_confirmed
+        and extension_atr >= 0.05
+        and reentry_atr >= config.min_failed_breakout_reentry_atr
+        and reversal_progress_atr >= config.min_failed_breakout_reentry_atr
+        and recent_tr_ratio <= config.max_failed_breakout_recent_tr_ratio
+        and rvol >= config.min_reclaim_volume_ratio
+        and 0 < bar_range <= 2.0 * atr
+        and body_fraction >= config.min_reclaim_body_fraction
+    )
+    evidence["failed_breakout_quality"] = {
+        "exterior_close_distance_atr": round(extension_atr, 4),
+        "completed_reentry_depth_atr": round(reentry_atr, 4),
+        "completed_reversal_progress_atr": round(reversal_progress_atr, 4),
+        "prior_5m_tr_ratio": round(recent_tr_ratio, 4),
+        "prior_5m_directional_efficiency": round(recent_efficiency, 4),
+        "qualified_for_center_exception": failed_breakout_quality,
+    }
+    evidence["conditional_center_exception_used"] = False
     if slope_bps > config.max_vwap_slope_bps_per_min:
         return {**evidence, "reason": "session_vwap_sloping"}
     if efficiency > config.max_directional_efficiency:
@@ -379,7 +429,19 @@ def assess_range_vwap_reclaim(
     if not 1.5 <= width <= config.max_range_width_atr:
         return {**evidence, "reason": "range_width_unproven"}
     if midpoint_gap_atr > config.max_secondary_center_deviation_atr:
-        return {**evidence, "reason": "session_rolling_center_disagree"}
+        # A wider center is *not* a generic signal. Only the original 1.0
+        # to 1.25 ATR interval is eligible, with completed-bar exhaustion
+        # evidence and every unchanged range, data and broker risk gate.
+        conditional_upper_gap = min(config.max_conditional_center_deviation_atr, 1.25)
+        conditional = bool(
+            config.enable_conditional_center_tolerance
+            and config.max_secondary_center_deviation_atr >= 1.0
+            and 1.0 < midpoint_gap_atr <= conditional_upper_gap
+            and failed_breakout_quality
+        )
+        if not conditional:
+            return {**evidence, "reason": "session_rolling_center_disagree"}
+        evidence["conditional_center_exception_used"] = True
     if rvol < config.min_reclaim_volume_ratio:
         return {**evidence, "reason": "reclaim_volume_weak"}
     if bar_range <= 0 or bar_range > 2.0 * atr:
@@ -1291,6 +1353,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_independent_option_flow_unconfirmed")
             return None
 
+        conditional_center = structural.get("conditional_center_exception_used") is True
+        if conditional_center and (
+            ofi is None or ofi < self._cfg.min_conditional_option_ofi_3s
+        ):
+            self._no_vote("range_conditional_option_flow_insufficient")
+            return None
+
         stamp = decision_at.date().isoformat()
         excursion_key = (future, side, stamp)
         if excursion_key in self._consumed_excursions:
@@ -1352,6 +1421,21 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         original_distance = abs(target - entry)
         quote_distance = abs(target - fut_tick)
         remaining_distance = min(original_distance, quote_distance)
+        # If the two centers disagree, the *nearer* rolling center is a
+        # potential resistance/support barrier. Do not model an uninterrupted
+        # return all the way to session VWAP for a conditional exception.
+        local_barrier_points: float | None = None
+        if conditional_center:
+            local_center = _value(structural.get("rolling_20m_secondary_center"))
+            if (
+                local_center is None
+                or (side == "CE" and fut_tick >= local_center)
+                or (side == "PE" and fut_tick <= local_center)
+            ):
+                self._no_vote("range_conditional_local_center_already_reached")
+                return None
+            local_barrier_points = abs(local_center - fut_tick)
+            remaining_distance = min(remaining_distance, local_barrier_points)
         stop_distance = max(abs(entry - invalidation), abs(fut_tick - invalidation))
         budget = assess_option_cost_risk(
             quote,
@@ -1363,10 +1447,35 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         budget["original_completed_bar_target_points"] = round(original_distance, 4)
         budget["fresh_futures_target_points"] = round(quote_distance, 4)
         budget["target_points_removed_due_to_quote_drift"] = round(
-            original_distance - remaining_distance, 4
+            original_distance - min(original_distance, quote_distance), 4
+        )
+        budget["conditional_center_exception"] = conditional_center
+        budget["first_local_center_barrier_points"] = (
+            round(local_barrier_points, 4) if local_barrier_points is not None else None
+        )
+        budget["modeled_futures_reward_points"] = round(remaining_distance, 4)
+        # Optional economic priority evidence uses the existing canonical
+        # cost and spread stressed budget. It must not supersede the selector.
+        model_reward = _value(budget.get("target_net_reward_after_costs"))
+        model_risk = _value(budget.get("worst_stop_loss_including_costs"))
+        budget["net_cash_surplus_above_1_5r"] = (
+            round(model_reward - 1.5 * model_risk, 2)
+            if model_reward is not None and model_risk is not None
+            else None
         )
         if not budget["qualified"]:
             self._no_vote(str(budget["reason"]))
+            return None
+        conditional_min_rr = max(
+            self._cfg.min_net_reward_risk,
+            self._cfg.min_conditional_net_reward_risk,
+            1.75,
+        )
+        if conditional_center and (
+            _value(budget.get("net_reward_risk")) is None
+            or budget["net_reward_risk"] < conditional_min_rr
+        ):
+            self._no_vote("range_conditional_payoff_buffer_insufficient")
             return None
         live_pilot = range_vwap_live_enabled()
         if live_pilot and (
@@ -1484,6 +1593,13 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "range_structure": structural,
                 "exchange_session_vwap_at_decision": exchange_vwap,
                 "option_cost_risk": budget,
+                "range_failed_breakout_quality": structural.get(
+                    "failed_breakout_quality"
+                ),
+                "range_conditional_center_exception": conditional_center,
+                "range_economic_surplus_rupees": budget.get(
+                    "net_cash_surplus_above_1_5r"
+                ),
                 "research_opportunity_id": opportunity_key,
                 "setup_reasons": ["closed_session_vwap_band_reentry"],
                 "required_data_present": True,
