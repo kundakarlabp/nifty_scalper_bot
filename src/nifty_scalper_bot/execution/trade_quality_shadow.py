@@ -153,6 +153,7 @@ def compare_profit_retention(
     entry_at: float | None = None,
     exit_at: float | None = None,
     realized_net_pnl: float | None = None,
+    cost_source: str | None = None,
 ) -> dict[str, Any]:
     """Compare quote policies and measure only supported peak-to-fill giveback."""
     variants = {
@@ -210,7 +211,9 @@ def compare_profit_retention(
                     else None
                 ),
                 "peak_net_using_actual_exit_costs_proxy": round(peak_net_proxy, 2),
-                "actual_broker_net_pnl": round(actual_net, 2),
+                "actual_ledger_net_pnl": round(actual_net, 2),
+                "recorded_cost_source": str(cost_source or "unverified"),
+                "broker_costs_verified": cost_source == "broker_virtual_contract_note",
                 "peak_to_realized_cash_gap_proxy": round(max(0.0, gap), 2),
                 "positive_quoted_profit_given_back_proxy": round(
                     max(0.0, gap) if peak_net_proxy > 0 else 0.0, 2
