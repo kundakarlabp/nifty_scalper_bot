@@ -13,6 +13,8 @@ Runtime role:
 - _range_vwap_underlying_exit_action reuses the existing protective/target exit
   dispatcher with a verified active futures cache and frozen session-VWAP
   invalidation/target carried through the canonical TradePlan provenance.
+- _time_stop_action enforces the Range VWAP strategy-specific maximum hold
+  regardless of the optional global stalled-position time-stop setting.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
@@ -3802,14 +3804,14 @@ class BracketManager:
         The trade is closed once it has been held past LIFECYCLE_TIME_STOP_MIN
         without ever reaching TIME_STOP_MIN_PROGRESS_R of its initial risk.
         """
-        if self._time_stop_seconds <= 0 or bracket.remaining_quantity <= 0:
+        if bracket.remaining_quantity <= 0:
             return None
         opened_at = float(bracket.entry_fill_ts or 0.0)
         if opened_at <= 0:
             return None
         held = time.time() - opened_at
-        if held < self._time_stop_seconds:
-            return None
+        # The explicit Range VWAP maximum is independent of the shared
+        # stalled-position time-stop, which operators may disable or lengthen.
         # A VWAP mean-reversion trade is a time-limited thesis. Reuse this
         # canonical reduce-only exit path even when it briefly reached +0.5R,
         # instead of holding past the decay window used to price its entry.
@@ -3828,6 +3830,8 @@ class BracketManager:
                         "qty": bracket.remaining_quantity,
                         "reason": f"RANGE_VWAP_MAX_HOLD held={int(held)}s",
                     }
+        if self._time_stop_seconds <= 0 or held < self._time_stop_seconds:
+            return None
         entry = float(bracket.entry_price or 0.0)
         initial_sl = float(bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0)
         initial_risk = abs(entry - initial_sl)
