@@ -9,9 +9,9 @@ Interface: assess_continuation, tighten_adaptive_profit_lock and
 tighten_verified_tier_fallback provide independent continuation evidence,
 one optional full-depth-verified trailing stop per tick, and a strict
 broker-confirmed canonical synchronization path; the private
-_trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics only
-when the independently cached best bid has crossed 0.6R (not proof of full-size
-executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
+_trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics and
+retains a bounded per-position skip summary only when the independently cached
+best bid has crossed 0.6R (not proof of full-size executable fill). _exit_strategy_family, _verified_futures_volume_ratio and
 _adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
 Ownership: BoundBracketManager selects ONE optional trailing algorithm per
@@ -1221,10 +1221,27 @@ def _trace_adaptive_no_ratchet(
             else:
                 gate = "book_mismatch_or_other"
             reason = f"{reason}:{gate}"
+        # The original 20 Nov logs could not distinguish a policy not
+        # evaluated from a price-only quote rejected at a specific gate.
+        # Keep bounded evidence in the existing bracket state so the final
+        # broker-ledger outcome preserves the decision even after log rotation.
+        reason_counts = config.get("_adaptive_skip_reasons")
+        if not isinstance(reason_counts, dict):
+            reason_counts = {}
+            config["_adaptive_skip_reasons"] = reason_counts
+        key = reason if reason in reason_counts or len(reason_counts) < 12 else "other"
+        try:
+            count = int(reason_counts.get(key, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+        reason_counts[key] = min(10000, max(0, count) + 1)
+        config["_adaptive_last_skip_reason"] = reason
+        config["_adaptive_last_skip_bid"] = round(bid, 2)
+        config["_adaptive_last_skip_at"] = round(now_wall, 3)
         LOGGER.warning(
             "ADAPTIVE_PROFIT_LOCK_SKIP symbol=%s reason=%s "
             "observed_bid=%.2f observed_mfe_r=%.3f "
-            "full_size_bid_proven=%s top_bid_qty=%s required_qty=%s "
+            "top_bid_quantity_sufficient=%s top_bid_qty=%s required_qty=%s "
             "book_bid=%s book_age_s=%s received_age_s=%s "
             "quote_source=%s spread_pct=%s broker_stop_trigger=%s "
             "quote_version=%s timestamp_source=%s exchange_time_valid=%s",
