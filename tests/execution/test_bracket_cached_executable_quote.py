@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from time import time
 from unittest.mock import Mock
 
-from nifty_scalper_bot.execution.bracket_manager import BracketManager
 from nifty_scalper_bot.execution.bracket_core import BracketState
+from nifty_scalper_bot.execution.bracket_manager import BracketManager
 
 
 class _CachedMarketData:
