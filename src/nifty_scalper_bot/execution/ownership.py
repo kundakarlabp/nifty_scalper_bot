@@ -281,7 +281,9 @@ class BoundBracketManager(RuntimeBracketManager):
                 # One bounded integer per evaluated tick. No broker I/O,
                 # persistence write or additional policy decision.
                 try:
-                    evaluated = int(policy_config.get("_optional_trail_eval_count") or 0)
+                    evaluated = int(
+                        policy_config.get("_optional_trail_eval_count") or 0
+                    )
                 except (TypeError, ValueError, OverflowError):
                     evaluated = 0
                 policy_config["_optional_trail_eval_count"] = min(
