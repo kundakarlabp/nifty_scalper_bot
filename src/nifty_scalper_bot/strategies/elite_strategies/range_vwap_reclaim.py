@@ -408,7 +408,6 @@ def assess_range_vwap_reclaim(
         and extension_atr >= 0.05
         and reentry_atr >= config.min_failed_breakout_reentry_atr
         and reversal_progress_atr >= config.min_failed_breakout_reentry_atr
-        and recent_efficiency <= config.max_directional_efficiency
         and recent_tr_ratio <= config.max_failed_breakout_recent_tr_ratio
         and rvol >= config.min_reclaim_volume_ratio
         and 0 < bar_range <= 2.0 * atr
