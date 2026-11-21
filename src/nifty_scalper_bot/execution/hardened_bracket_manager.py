@@ -7,7 +7,9 @@ and installs a final unresolved-exit guard on the attached OrderManager.
 Responsibilities: Apply live bracket safety checks and only initialize the
 first-fill extrema. Later cumulative fills must preserve the existing trail.
 Ownership: Core owns entry/stop geometry; hardened subclass enforces recovery.
-Safety: A late broker callback must not reset high/low watermarks or exit state.
+Safety: A late broker callback must not reset high/low watermarks or exit
+state. A filled exit is not flatness proof; every rescue replacement requires
+terminal cancellation and a direction-matched broker residual quantity.
 """
 
 from __future__ import annotations
@@ -343,9 +345,6 @@ class HardenedBracketManager(_CoreBracketManager):
                 self._reconcile_exit_state(bracket, requested_by="hardening_filled")
                 return
             if status in _core._CANCELLED_STATUSES:
-                with self._lock:
-                    bracket.exit_order_id = None
-                    bracket.pending_exit_order_id = None
                 self._submit_rescue_exit(bracket, qty=qty, prior_order_id=str(order_id))
                 return
 
@@ -423,15 +422,28 @@ class HardenedBracketManager(_CoreBracketManager):
         )
 
         cancel_requested = self._cancel_exit_order(order_id)
-        terminal = (
-            self._wait_for_cancel_or_fill(order_id)
-            if cancel_requested
-            else "unconfirmed"
-        )
-        if terminal == "filled" or self._safe_position_flat(bracket.symbol):
+        try:
+            terminal = (
+                self._wait_for_cancel_or_fill(order_id)
+                if cancel_requested
+                else "unconfirmed"
+            )
+        except Exception as exc:  # noqa: BLE001 - broker status is uncertain
+            _core.LOGGER.error(
+                "EXIT_RESCUE_STATUS_UNAVAILABLE bracket_id=%s order_id=%s "
+                "error_type=%s",
+                bracket.bracket_id,
+                order_id,
+                type(exc).__name__,
+            )
+            terminal = "unconfirmed"
+        if terminal == "filled":
+            # A completed reducing order is not proof that the broker's
+            # residual position is flat. Preserve the canonical TP1/partial
+            # fill reconciler, including its direction and protection checks.
             with self._lock:
                 bracket.exit_in_progress = False
-            self._close_bracket(bracket, close_source="rescue_reconciled_flat")
+            self._reconcile_exit_state(bracket, requested_by="rescue_filled")
             return
         if terminal != "cancelled":
             with self._lock:
@@ -442,9 +454,8 @@ class HardenedBracketManager(_CoreBracketManager):
 
         with self._lock:
             bracket.exit_in_progress = False
-            bracket.exit_order_id = None
-            bracket.pending_exit_order_id = None
-            bracket.last_exit_error = None
+        # Keep the terminal order's identity until a broker-verified residual
+        # is established. The submit helper owns clearing the old ID.
         self._submit_rescue_exit(bracket, qty=qty, prior_order_id=order_id)
 
     def _submit_rescue_exit(
@@ -454,11 +465,71 @@ class HardenedBracketManager(_CoreBracketManager):
         qty: int,
         prior_order_id: str,
     ) -> None:
-        if self._safe_position_flat(bracket.symbol):
+        # Both callers have already observed a terminal cancellation. A
+        # retry must use broker net quantity *and signed side* after that
+        # cancellation, never a stale bracket quantity or an ABS-only value.
+        try:
+            signed_qty = int(
+                self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown is not flat
+            with self._lock:
+                bracket.exit_in_progress = False
+                bracket.exit_pending = True
+                bracket.position_flat_confirmed = False
+                bracket.last_exit_error = (
+                    f"rescue_position_unavailable:{type(exc).__name__}"
+                )
+                bracket.exit_state = (
+                    _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                )
+                bracket.entry_status = bracket.exit_state
+            _core.LOGGER.critical(
+                "EXIT_RESCUE_BROKER_POSITION_UNAVAILABLE bracket_id=%s "
+                "symbol=%s prior_order_id=%s error_type=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                prior_order_id,
+                type(exc).__name__,
+            )
+            return
+        if signed_qty == 0:
             self._close_bracket(bracket, close_source="rescue_pre_submit_flat")
             return
-
+        valid_side = signed_qty > 0 if bracket.side == "BUY" else signed_qty < 0
+        broker_qty = abs(signed_qty)
         with self._lock:
+            local_qty = int(bracket.remaining_quantity or 0)
+        if not valid_side or broker_qty > local_qty or qty <= 0:
+            with self._lock:
+                bracket.exit_in_progress = False
+                bracket.exit_pending = True
+                bracket.position_flat_confirmed = False
+                bracket.last_exit_error = "rescue_position_direction_or_size_mismatch"
+                bracket.exit_state = (
+                    _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                )
+                bracket.entry_status = bracket.exit_state
+            _core.LOGGER.critical(
+                "EXIT_RESCUE_BROKER_POSITION_MISMATCH bracket_id=%s "
+                "symbol=%s prior_order_id=%s signed_qty=%s "
+                "local_qty=%s requested_qty=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                prior_order_id,
+                signed_qty,
+                local_qty,
+                qty,
+            )
+            return
+        effective_qty = min(int(qty), broker_qty)
+        with self._lock:
+            bracket.remaining_quantity = broker_qty
+            bracket.exit_order_id = None
+            bracket.pending_exit_order_id = None
+            bracket.last_exit_error = None
             bracket.exit_in_progress = True
             bracket.exit_attempt_count += 1
             now_ts = time.time()
@@ -470,7 +541,7 @@ class HardenedBracketManager(_CoreBracketManager):
 
         result = self.submit_exit_order(
             symbol=_core.normalize_symbol(bracket.symbol),
-            qty=qty,
+            qty=effective_qty,
             reason="EXIT_ESCALATED_RESCUE",
             bracket_id=bracket.bracket_id,
             preferred_order_type="MARKET",
@@ -497,14 +568,14 @@ class HardenedBracketManager(_CoreBracketManager):
                     prior_order_id,
                     new_order_id,
                     attempt,
-                    qty,
+                    effective_qty,
                     extra={
                         "event": "EXIT_RESCUE_ORDER_SUBMITTED",
                         "bracket_id": bracket.bracket_id,
                         "prior_order_id": prior_order_id,
                         "new_order_id": new_order_id,
                         "attempt": attempt,
-                        "qty": qty,
+                        "qty": effective_qty,
                     },
                 )
                 return
