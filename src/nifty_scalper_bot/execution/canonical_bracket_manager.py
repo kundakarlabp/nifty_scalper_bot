@@ -7,7 +7,9 @@ adds only fill-integrity invariants:
 * a broker FILLED exit cannot close local state while broker exposure remains;
 * a confirmed TP1 fill resumes protection only for a broker-verified,
   direction-matched residual position;
-* any other FILLED/non-flat mismatch fails closed and blocks new entries.
+* any other FILLED/non-flat mismatch fails closed and blocks new entries;
+* rescued exits retain broker-order identity until terminal cancellation and
+  signed residual checks establish safe replacement quantity.
 
 Responsibility: Reconcile TP1 fills, residual positions and broker-flat truth.
 Ownership: Core bracket manager owns virtual stops and exchange-resident SLs;
@@ -767,11 +769,21 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
 
         cancel_requested = self._cancel_exit_order(order_id)
-        terminal = (
-            self._wait_for_cancel_or_fill(order_id)
-            if cancel_requested
-            else "unconfirmed"
-        )
+        try:
+            terminal = (
+                self._wait_for_cancel_or_fill(order_id)
+                if cancel_requested
+                else "unconfirmed"
+            )
+        except Exception as exc:  # noqa: BLE001 - broker outcome unknown
+            _core.LOGGER.error(
+                "EXIT_RESCUE_CANCEL_STATUS_UNAVAILABLE bracket_id=%s "
+                "order_id=%s error_type=%s",
+                bracket.bracket_id,
+                order_id,
+                type(exc).__name__,
+            )
+            terminal = "unconfirmed"
         if terminal == "filled":
             with self._lock:
                 bracket.exit_in_progress = False
@@ -781,7 +793,10 @@ class CanonicalBracketManager(HardenedBracketManager):
             )
             return
         flat_evidence = self._broker_position_evidence(bracket.symbol)
-        if flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED:
+        if (
+            terminal == "cancelled"
+            and flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED
+        ):
             with self._lock:
                 bracket.exit_in_progress = False
             self._close_bracket(
@@ -801,9 +816,8 @@ class CanonicalBracketManager(HardenedBracketManager):
 
         with self._lock:
             bracket.exit_in_progress = False
-            bracket.exit_order_id = None
-            bracket.pending_exit_order_id = None
-            bracket.last_exit_error = None
+        # Preserve the cancelled order identity until the inherited rescue
+        # submit helper independently validates signed broker residual.
         self._submit_rescue_exit(
             bracket,
             qty=qty,
