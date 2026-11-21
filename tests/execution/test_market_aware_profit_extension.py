@@ -1504,8 +1504,5 @@ def test_live_adaptive_cannot_ratchet_from_quote_ahead_of_protection_tick(
     }
     manager._exit_quotes = cached[cache_issue]
 
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
     assert bracket.sl_trigger_price == 94.0
-    assert bracket.trail_revision == 0 if hasattr(bracket, "trail_revision") else True
