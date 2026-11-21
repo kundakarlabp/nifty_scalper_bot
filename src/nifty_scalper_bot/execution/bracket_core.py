@@ -8,8 +8,8 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
-- _record_trade_quality_shadow captures bounded cached executable bid/ask
-  observations for research only; it never participates in live stop decisions.
+- _record_trade_quality_shadow separates cached top bids from same-tick
+  full-lot, timestamp-attested bid evidence for research only; never controls stops.
 - _range_vwap_underlying_exit_action reuses the existing protective/target exit
   dispatcher with a verified active futures cache and frozen session-VWAP
   invalidation/target carried through the canonical TradePlan provenance.
@@ -2219,11 +2219,19 @@ class BracketManager:
         self._sync_exchange_protective_stop(target_bracket)
         return True
 
-    def _record_trade_quality_shadow(self, bracket: BracketState, ltp: float) -> None:
-        """Capture bounded causal quote evidence; do not submit or modify orders.
+    def _record_trade_quality_shadow(
+        self,
+        bracket: BracketState,
+        ltp: float,
+        *,
+        tick: Mapping[str, Any] | None = None,
+        exchange_ts: float | None = None,
+    ) -> None:
+        """Store read-only bids; separately attest FULL, fresh, whole-lot depth.
 
-        Uses the canonical bid/ask cache. Unknown or stale quotes do not become
-        synthetic executable prices. Errors never interrupt hard-stop checks.
+        This uses only the SAME tick already entering the stop owner. A cached
+        bid or favorable LTP without attested depth remains observational only.
+        The method cannot block hard stops, submit orders or upgrade readiness.
         """
         try:
             price, source = self._executable_exit_price(bracket, ltp)
@@ -2245,7 +2253,6 @@ class BracketManager:
             ):
                 return
             if len(path) >= 2048:
-                # A truncated history cannot be promoted as a complete replay.
                 config["_research_executable_path_truncated"] = True
                 del path[:256]
             quote = self._exit_quotes.get(bracket.symbol)
@@ -2264,6 +2271,73 @@ class BracketManager:
                 if source == "bid" and quote is not None
                 else None
             )
+            required_qty = int(bracket.remaining_quantity or 0)
+            top_bid_qty = None
+            full_lot_proven = False
+            market_age_ms = None
+            # A genuine exchange event must carry the canonical aware clock;
+            # wall-clock receive time or a naive broker datetime cannot prove
+            # when the bid was available. Retain uncertainty as uncertainty.
+            if (
+                source == "bid"
+                and bracket.side == "BUY"
+                and isinstance(tick, Mapping)
+                and exchange_ts is not None
+                and tick.get("source_timestamp_valid") is True
+                and str(tick.get("timestamp_source") or "") in {
+                    "exchange_timestamp", "last_trade_time",
+                    "last_traded_time", "last_trade_timestamp",
+                    "exchange_update_time", "last_price_time",
+                }
+                and str(tick.get("source") or "").lower() in {
+                    "ws", "ws_full", "websocket", "websocket_full",
+                }
+                and normalize_symbol(str(tick.get("symbol") or ""))
+                == bracket.symbol
+            ):
+                stamp = tick.get("timestamp")
+                if isinstance(stamp, str):
+                    stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if isinstance(stamp, datetime) and stamp.tzinfo is not None:
+                    event_epoch = stamp.timestamp()
+                    market_age_ms = round((now - event_epoch) * 1000.0, 2)
+                    depth = tick.get("depth")
+                    buy = depth.get("buy") if isinstance(depth, Mapping) else None
+                    level = (
+                        buy[0]
+                        if isinstance(buy, list) and buy
+                        and isinstance(buy[0], Mapping)
+                        else None
+                    )
+                    if level is not None:
+                        try:
+                            top_bid_qty = float(level.get("quantity"))
+                            depth_bid = float(level.get("price"))
+                            tick_ltp = float(
+                                tick.get("ltp") or tick.get("last_price")
+                            )
+                            resolved_bid, resolved_ask, _, _ = (
+                                resolve_quote_bid_ask_spread(tick)
+                            )
+                            full_lot_proven = bool(
+                                required_qty > 0
+                                and top_bid_qty >= required_qty
+                                and math.isfinite(top_bid_qty)
+                                and depth_bid > 0
+                                and math.isfinite(depth_bid)
+                                and observed_bid is not None
+                                and observed_ask is not None
+                                and abs(depth_bid - observed_bid) < 0.001
+                                and resolved_bid is not None
+                                and resolved_ask is not None
+                                and abs(resolved_bid - observed_bid) < 0.001
+                                and abs(resolved_ask - observed_ask) < 0.001
+                                and abs(tick_ltp - ltp) < 0.001
+                                and abs(event_epoch - float(exchange_ts)) <= 0.001
+                                and 0 <= market_age_ms <= 2000.0
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            full_lot_proven = False
             observation = {
                 "ts": round(now, 4),
                 "bid": observed_bid,
@@ -2274,6 +2348,10 @@ class BracketManager:
                     if captured_at is not None
                     else None
                 ),
+                "market_age_ms": market_age_ms,
+                "full_lot_bid_proven": full_lot_proven,
+                "top_bid_qty": top_bid_qty,
+                "required_qty": required_qty,
                 "ltp": round(float(ltp), 4),
                 "virtual_stop": round(float(bracket.sl_trigger_price or 0.0), 4),
                 "exchange_stop": getattr(bracket, "exchange_stop_trigger_price", None),
@@ -2297,6 +2375,7 @@ class BracketManager:
         exchange_ts: float | None = None,
         *,
         defer_submission: bool = False,
+        tick: Mapping[str, Any] | None = None,
     ) -> None:
         """Process one tick through trailing and hard SL/TP evaluation.
 
@@ -2418,7 +2497,9 @@ class BracketManager:
                 old_committed_sl = float(bracket.sl_trigger_price or 0.0)
                 # Hot-path shadow capture is O(1), cache-only, and never
                 # feeds back into the broker/stop/target decision.
-                self._record_trade_quality_shadow(bracket, ltp)
+                self._record_trade_quality_shadow(
+                    bracket, ltp, tick=tick, exchange_ts=exchange_ts
+                )
 
                 # Update high/low water marks (atomic operations)
                 if bracket.side == "BUY":
@@ -3478,7 +3559,7 @@ class BracketManager:
                 return
             exchange_ts = tick_exchange_epoch(tick)
             self._capture_exit_quote(normalize_symbol(symbol), tick)
-            self.on_tick(symbol, float(ltp), exchange_ts)
+            self.on_tick(symbol, float(ltp), exchange_ts, tick=tick)
         except Exception as e:
             LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
 

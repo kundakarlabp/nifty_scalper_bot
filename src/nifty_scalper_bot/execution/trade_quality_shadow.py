@@ -1,7 +1,9 @@
 """Purpose: Evaluate hypothetical trade exits using causal executable quotes.
 
 Responsibilities: Replay prespecified stop-retention alternatives and sustained
-adverse order flow, explicitly marking missing observations and unresolved exits.
+adverse order flow using same-tick, depth-verified full-lot bid observations;
+compare an observed quote peak with the actual broker exit without claiming
+hypothetical fills. Missing or incomplete evidence remains unmeasured.
 Safety: Pure research; no live order authority, lookahead or assumed stop fills.
 """
 
@@ -22,17 +24,44 @@ def _number(value: Any) -> float | None:
 
 
 def _bid_path(samples: Any) -> list[tuple[float, float]]:
-    """Return time-ordered, verified, de-duplicated executable bid samples."""
+    """Return only timestamped, full-lot bid proofs from the same market tick.
+
+    A cached best bid or favorable option LTP is *not* sufficient evidence for
+    liquidating the actual position quantity. Older unlabelled records abstain.
+    """
     if not isinstance(samples, Sequence) or isinstance(samples, (str, bytes)):
         return []
     normalized: dict[float, float] = {}
     for observation in samples:
-        if not isinstance(observation, Mapping) or observation.get("source") != "bid":
+        if not isinstance(observation, Mapping):
+            continue
+        if (
+            observation.get("source") != "bid"
+            or observation.get("full_lot_bid_proven") is not True
+        ):
             continue
         timestamp = _number(observation.get("ts"))
         bid = _number(observation.get("bid"))
-        if timestamp is not None and timestamp > 0 and bid is not None and bid > 0:
-            normalized[timestamp] = bid
+        top_qty = _number(observation.get("top_bid_qty"))
+        required = _number(observation.get("required_qty"))
+        quote_age_ms = _number(observation.get("quote_age_ms"))
+        market_age_ms = _number(observation.get("market_age_ms"))
+        if (
+            timestamp is None
+            or timestamp <= 0
+            or bid is None
+            or bid <= 0
+            or top_qty is None
+            or required is None
+            or required <= 0
+            or top_qty < required
+            or quote_age_ms is None
+            or not 0 <= quote_age_ms <= 2000.0
+            or market_age_ms is None
+            or not 0 <= market_age_ms <= 2000.0
+        ):
+            continue
+        normalized[timestamp] = bid
     return sorted(normalized.items())
 
 
@@ -121,8 +150,12 @@ def compare_profit_retention(
     quantity: int,
     round_trip_cost: float,
     samples_truncated: bool = False,
+    entry_at: float | None = None,
+    exit_at: float | None = None,
+    realized_net_pnl: float | None = None,
+    cost_source: str | None = None,
 ) -> dict[str, Any]:
-    """Compare exact same quote path for five prespecified research policies."""
+    """Compare quote policies and measure only supported peak-to-fill giveback."""
     variants = {
         "retention_40pct": (0.40, 0.0),
         "retention_50pct": (0.50, 0.0),
@@ -134,30 +167,87 @@ def compare_profit_retention(
         return {
             "ready": False,
             "reason": "quote_path_truncated",
+            "quote_peak_retention": None,
             "policies": {},
             "policy": "research_only",
         }
+    path = _bid_path(samples)
+    if not path:
+        return {
+            "ready": False,
+            "reason": "full_lot_bid_path_unverified",
+            "policy": "research_only",
+            "policies": {},
+            "quote_peak_retention": None,
+        }
+    # Record the best VERIFIED, time-bounded full-size bid. Historical best
+    # prices cannot be retroactively filled; do not claim realized lost profit.
+    peak_report: dict[str, Any] | None = None
+    start = _number(entry_at)
+    end = _number(exit_at)
+    actual_net = _number(realized_net_pnl)
+    if (
+        start is not None
+        and end is not None
+        and 0 < start < end
+        and actual_net is not None
+        and quantity > 0
+        and entry > 0
+        and math.isfinite(round_trip_cost)
+        and round_trip_cost >= 0
+    ):
+        held = [(ts, bid) for ts, bid in path if start <= ts <= end]
+        if held:
+            peak_ts, peak_bid = max(held, key=lambda item: item[1])
+            peak_net_proxy = (peak_bid - entry) * quantity - round_trip_cost
+            gap = peak_net_proxy - actual_net
+            peak_report = {
+                "ready": True,
+                "provenance": "same_tick_full_lot_top_bid_observed_not_filled",
+                "peak_quote_epoch": peak_ts,
+                "peak_bid": round(peak_bid, 4),
+                "peak_bid_mfe_r": (
+                    round((peak_bid - entry) / (entry - initial_stop), 4)
+                    if entry > initial_stop
+                    else None
+                ),
+                "peak_net_using_actual_exit_costs_proxy": round(peak_net_proxy, 2),
+                "actual_ledger_net_pnl": round(actual_net, 2),
+                "recorded_cost_source": str(cost_source or "unverified"),
+                "broker_costs_verified": cost_source == "broker_virtual_contract_note",
+                "peak_to_realized_cash_gap_proxy": round(max(0.0, gap), 2),
+                "positive_quoted_profit_given_back_proxy": round(
+                    max(0.0, gap) if peak_net_proxy > 0 else 0.0, 2
+                ),
+                "observed_held_full_lot_samples": len(held),
+                "fill_feasibility_not_proven": True,
+                "future_movement_not_substituted": True,
+            }
+    policies = {
+        key: replay_stop_retention(
+            samples,
+            entry=entry,
+            initial_stop=initial_stop,
+            quantity=quantity,
+            round_trip_cost=round_trip_cost,
+            retention=retention,
+            min_lock_after_1p5_r=floor,
+        )
+        for key, (retention, floor) in variants.items()
+    }
     return {
-        "ready": True,
+        "ready": all(result["ready"] for result in policies.values()),
         "policy": "research_only",
+        "verified_full_lot_samples": len(path),
+        "quote_peak_retention": peak_report,
         "limitations": [
-            "sampled_executable_quotes_not_full_order_book",
+            "sampled_top_of_book_not_guaranteed_broker_fill",
             "historical_stop_modify_latency_not_replayed",
             "counterfactual_execution_not_broker_verified",
+            "constant_actual_exit_costs_used_for_peak_net_proxy",
             "not_full_live_trailing_parity",
         ],
-        "policies": {
-            key: replay_stop_retention(
-                samples,
-                entry=entry,
-                initial_stop=initial_stop,
-                quantity=quantity,
-                round_trip_cost=round_trip_cost,
-                retention=retention,
-                min_lock_after_1p5_r=floor,
-            )
-            for key, (retention, floor) in variants.items()
-        },
+        "policies": policies,
     }
 
 
