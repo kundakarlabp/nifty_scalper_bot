@@ -1321,9 +1321,7 @@ def _adaptive_executable_bid(
     if callable(live_probe) and live_probe():
         current_books = getattr(manager, "_exit_quotes", None)
         current = (
-            current_books.get(symbol)
-            if isinstance(current_books, Mapping)
-            else None
+            current_books.get(symbol) if isinstance(current_books, Mapping) else None
         )
         if not isinstance(current, (tuple, list)) or len(current) < 3:
             return None
