@@ -777,9 +777,7 @@ def build_session_research_report(
             "one_lot_default_units": _MODELED_QUANTITY_DEFAULT,
             "default_lot_size_is_assumption": True,
             "adverse_slippage_bps_per_side": _MODELED_ADVERSE_SLIPPAGE_BPS,
-            "range_vwap_adverse_slippage_bps_per_side": (
-                _RANGE_VWAP_SLIPPAGE_BPS
-            ),
+            "range_vwap_adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
             "implementation": "risk.cost_model.estimate_round_trip_cost",
             "fills_and_protective_stops_verified": False,
         },
