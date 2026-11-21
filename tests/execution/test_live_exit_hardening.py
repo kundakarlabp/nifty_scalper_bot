@@ -2091,3 +2091,97 @@ def test_escalation_never_sells_if_position_direction_or_snapshot_unknown(
 
     assert broker.cancel_calls == ["old-exit"]
     assert order_manager.place_calls == []
+
+
+def test_stale_rescue_does_not_close_filled_order_with_broker_residual() -> None:
+    """Rescue must use canonical fill reconciliation, not COMPLETE alone."""
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+
+    def filled_during_cancel(order_id: str, **_kwargs: Any) -> bool:
+        broker.cancel_calls.append(str(order_id))
+        broker.statuses[str(order_id)] = "COMPLETE"
+        return True
+
+    broker.cancel_order = filled_during_cancel
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.remaining_quantity > 0
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+    assert order_manager.place_calls == []
+
+
+def test_stale_rescue_replacement_uses_signed_residual_after_cancel() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["quantity"] == 35
+    assert bracket.remaining_quantity == 35
+
+
+@pytest.mark.parametrize("broker_quantity", [-30, None])
+def test_stale_rescue_never_sells_opposite_or_unknown_broker_position(
+    broker_quantity: int | None,
+) -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = (
+        None
+        if broker_quantity is None
+        else [{"symbol": SYMBOL, "quantity": broker_quantity}]
+    )
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+
+
+def test_stale_rescue_broker_status_error_does_not_lock_exit_in_progress(
+    monkeypatch,
+) -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+
+    def fail_status(_order_id: str) -> str:
+        raise RuntimeError("temporary broker status outage")
+
+    monkeypatch.setattr(manager, "_wait_for_cancel_or_fill", fail_status)
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+    assert bracket.exit_in_progress is False
+    assert bracket.exit_pending is True
+    assert order_manager.place_calls == []
