@@ -20,7 +20,8 @@ tick. The canonical BracketManager alone modifies exchange stop orders and
 owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
 Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
 quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
-ratchets require a recorded broker stop trigger and position-size coverage.
+adaptive quotes must agree with the canonical protected-tick bid/ask; ratchets
+require a recorded broker stop trigger and position-size coverage.
 A recorded trigger is NOT an orderbook-confirmed stop or guaranteed fill.
 No broker calls or competing exchange-stop owner are introduced here.
 Evidence comes from the already-wired IndicatorEngine and market-data cache.
@@ -1279,11 +1280,11 @@ def _adaptive_executable_bid(
     manager: Any, bracket: Any
 ) -> tuple[float, float, dict[str, Any]] | None:
     """Require recent FULL-size bid depth, not last-trade-price excursions."""
-    quote = _quote(manager, str(getattr(bracket, "symbol", "")))
+    symbol = str(getattr(bracket, "symbol", ""))
+    quote = _quote(manager, symbol)
     age = _quote_age_seconds(quote)
-    if age is None or age > _adaptive_positive_env(
-        "ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0
-    ):
+    max_age = _adaptive_positive_env("ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0)
+    if age is None or age > max_age:
         return None
     depth = quote.get("depth")
     if not isinstance(depth, Mapping):
@@ -1312,6 +1313,30 @@ def _adaptive_executable_bid(
         "ADAPTIVE_PROFIT_MAX_SPREAD_PCT", 1.5, 2.0
     ):
         return None
+
+    # WS arrival may publish a later FULL book before the serial protection
+    # callback evaluates its earlier tick. LIVE adaptive protection must use
+    # the same fresh bid/ask seen by the canonical bracket exit owner.
+    live_probe = getattr(manager, "_is_live_execution", None)
+    if callable(live_probe) and live_probe():
+        current_books = getattr(manager, "_exit_quotes", None)
+        current = (
+            current_books.get(symbol) if isinstance(current_books, Mapping) else None
+        )
+        if not isinstance(current, (tuple, list)) or len(current) < 3:
+            return None
+        current_bid = _positive(current[0])
+        current_ask = _positive(current[1])
+        captured_at = _as_float(current[2])
+        if (
+            current_bid is None
+            or current_ask is None
+            or captured_at is None
+            or not 0 <= time.time() - captured_at <= max_age
+            or abs(current_bid - bid) > _TICK_SIZE / 2
+            or abs(current_ask - ask) > _TICK_SIZE / 2
+        ):
+            return None
     return bid, spread, quote
 
 
