@@ -2179,6 +2179,10 @@ def test_stale_rescue_broker_status_error_does_not_lock_exit_in_progress(
         raise RuntimeError("temporary broker status outage")
 
     monkeypatch.setattr(manager, "_wait_for_cancel_or_fill", fail_status)
+    # The independent escalation readback must also be unavailable.
+    # If it authoritatively returns CANCELLED, a residual-sized replacement
+    # is permitted and this is no longer an unconfirmed-cancel scenario.
+    monkeypatch.setattr(manager, "_get_broker_order_status", fail_status)
     manager._rescue_stale_exit_order(
         bracket, order_id="old-exit", qty=65, status="OPEN"
     )
