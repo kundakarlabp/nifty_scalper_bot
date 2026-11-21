@@ -10,6 +10,8 @@ Runtime role:
   orphan/position resync.
 - _record_trade_quality_shadow separates cached top bids from same-tick
   full-lot, timestamp-attested bid evidence for research only; never controls stops.
+- _is_replayed_prefill_tick applies one fill-time veto to quote caching and
+  core evaluation, preventing delayed pre-entry bids from poisoning the watchdog.
 - _range_vwap_underlying_exit_action reuses the existing protective/target exit
   dispatcher with a verified active futures cache and frozen session-VWAP
   invalidation/target carried through the canonical TradePlan provenance.
@@ -2425,12 +2427,8 @@ class BracketManager:
                 # pre-fill/replayed signal tick — never evaluate it against
                 # this bracket. Bounded window so clock skew cannot suppress
                 # genuine SL/TP evaluation beyond the first seconds.
-                if (
-                    b is not None
-                    and exchange_ts is not None
-                    and b.entry_fill_ts is not None
-                    and exchange_ts < b.entry_fill_ts
-                    and (now_ts - b.entry_fill_ts) <= STALE_TICK_ARM_WINDOW_SEC
+                if b is not None and self._is_replayed_prefill_tick(
+                    b, exchange_ts, now_ts
                 ):
                     self._log_throttled(
                         "debug",
@@ -2683,8 +2681,44 @@ class BracketManager:
             )
             self._fire_exits_batch(exits_to_fire)
 
+    @staticmethod
+    def _is_replayed_prefill_tick(
+        bracket: BracketState, exchange_ts: float | None, now_ts: float
+    ) -> bool:
+        """Apply the same short pre-fill veto to quotes and exit evaluation."""
+        if exchange_ts is None or bracket.entry_fill_ts is None:
+            return False
+        try:
+            event_epoch = float(exchange_ts)
+            fill_epoch = float(bracket.entry_fill_ts)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return (
+            math.isfinite(event_epoch)
+            and math.isfinite(fill_epoch)
+            and event_epoch < fill_epoch
+            and now_ts - fill_epoch <= STALE_TICK_ARM_WINDOW_SEC
+        )
+
     def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> bool:
-        """Cache executable bid/ask from a full tick and report capture success."""
+        """Cache executable bid/ask only from an eligible post-fill event."""
+        # Cache receipt time alone cannot make an old exchange event safe:
+        # the watchdog consumes this quote even when core.on_tick rejects it.
+        event_epoch = tick_exchange_epoch(tick)
+        if event_epoch is not None:
+            now_ts = time.time()
+            with self._lock:
+                for entry_id in self._symbol_map.get(symbol, ()):
+                    bracket = self._brackets.get(entry_id)
+                    if (
+                        bracket is not None
+                        and bracket.entry_confirmed
+                        and bracket.remaining_quantity > 0
+                        and self._is_replayed_prefill_tick(
+                            bracket, event_epoch, now_ts
+                        )
+                    ):
+                        return False
         try:
             bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
         except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
