@@ -894,6 +894,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                     entry_at=opened_at,
                     exit_at=closed_at,
                     realized_net_pnl=net_pnl,
+                    cost_source=cost_source,
                 )
         # The original temporal OFI series comes from the already-running
         # strategy evaluation, not a broker poll or a fabricated quote.
