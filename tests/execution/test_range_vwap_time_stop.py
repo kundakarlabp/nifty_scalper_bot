@@ -69,6 +69,34 @@ def test_range_hard_time_stop_uses_existing_bracket_exit() -> None:
     assert manager._time_stop_action(old, 99.0)["type"] == "TIME_STOP"
 
 
+def test_range_hard_max_hold_is_independent_of_global_time_stop() -> None:
+    manager = object.__new__(BracketManager)
+    manager._time_stop_min_progress_r = 0.5
+    for global_seconds in (0, 30 * 60):
+        manager._time_stop_seconds = global_seconds
+        matured = _bracket(
+            setup="session_vwap_reentry_live",
+            held_seconds=16 * 60,
+            progress=12.0,
+        )
+        action = manager._time_stop_action(matured, 104.0)
+        assert action is not None
+        assert action["type"] == "TIME_STOP"
+        assert action["qty"] == 65
+        assert "RANGE_VWAP_MAX_HOLD" in action["reason"]
+        # The hard max cannot trigger before 15m, even with global timer off.
+        early = _bracket(
+            setup="session_vwap_reentry_live",
+            held_seconds=13 * 60,
+            progress=12.0,
+        )
+        assert manager._time_stop_action(early, 104.0) is None
+    # Disabling the shared policy still disables it for other strategies.
+    manager._time_stop_seconds = 0
+    other = _bracket(setup="vwap_continuation", held_seconds=16 * 60, progress=0)
+    assert manager._time_stop_action(other, 104.0) is None
+
+
 def test_futures_vwap_arrival_and_invalidation_use_shared_exit_dispatcher() -> None:
     manager = object.__new__(BracketManager)
     manager._exit_quotes = {}
