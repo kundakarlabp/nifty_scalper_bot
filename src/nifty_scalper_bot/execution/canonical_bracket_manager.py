@@ -5,7 +5,8 @@ adds only fill-integrity invariants:
 
 * confirmed entry slippage re-anchors every unexecuted target;
 * a broker FILLED exit cannot close local state while broker exposure remains;
-* a confirmed TP1 fill resumes protection for the residual position;
+* a confirmed TP1 fill resumes protection only for a broker-verified,
+  direction-matched residual position;
 * any other FILLED/non-flat mismatch fails closed and blocks new entries.
 
 Responsibility: Reconcile TP1 fills, residual positions and broker-flat truth.
@@ -171,6 +172,39 @@ class CanonicalBracketManager(HardenedBracketManager):
             residual_quantity >= previous_remaining
             or residual_quantity > expected_residual
         ):
+            return False
+
+        # Legacy flatness queries use absolute position quantities. A
+        # reversed short must not be treated as a surviving long TP1 lot.
+        try:
+            signed_residual = int(
+                self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown direction is not proof
+            _core.LOGGER.critical(
+                "PARTIAL_EXIT_RESIDUAL_DIRECTION_UNVERIFIED "
+                "bracket_id=%s symbol=%s error_type=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                type(exc).__name__,
+            )
+            return False
+        expected_signed = (
+            residual_quantity if bracket.side == "BUY" else -residual_quantity
+        )
+        if signed_residual != expected_signed:
+            _core.LOGGER.critical(
+                "PARTIAL_EXIT_RESIDUAL_DIRECTION_MISMATCH "
+                "bracket_id=%s symbol=%s side=%s broker_signed_qty=%s "
+                "expected_signed_qty=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                bracket.side,
+                signed_residual,
+                expected_signed,
+            )
             return False
 
         fill_price = self._extract_status_price(status_payload)
