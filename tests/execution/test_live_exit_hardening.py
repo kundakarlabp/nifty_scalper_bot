@@ -2185,3 +2185,25 @@ def test_stale_rescue_broker_status_error_does_not_lock_exit_in_progress(
     assert bracket.exit_in_progress is False
     assert bracket.exit_pending is True
     assert order_manager.place_calls == []
+
+
+def test_flat_broker_does_not_close_while_old_exit_cancel_unconfirmed() -> None:
+    """A flat snapshot cannot retire an unresolved active reducing order."""
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = []
+    manager._exit_fill_confirmation_grace_seconds = 0.0
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.exit_order_id == "old-exit"
+    assert bracket.position_flat_confirmed is False
+    assert order_manager.place_calls == []
