@@ -75,7 +75,7 @@ class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
     enable_conditional_center_tolerance: bool = True
     max_conditional_center_deviation_atr: float = 1.25
     min_failed_breakout_reentry_atr: float = 0.15
-    max_failed_breakout_recent_tr_ratio: float = 1.25
+    max_failed_breakout_recent_tr_ratio: float = 1.50
     min_conditional_option_ofi_3s: float = 0.20
     min_conditional_net_reward_risk: float = 1.75
     max_exchange_vwap_disagreement_atr: float = 0.50
