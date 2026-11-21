@@ -2005,3 +2005,47 @@ def test_unsettled_broker_trigger_readback_blocks_competing_ratchets(
         record["broker_confirmed"]
         for record in bracket.trailing_config["trail_history"]
     )
+
+
+def test_failed_stop_modify_reconciles_broker_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed client response can still represent an in-flight broker amend."""
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    bracket.last_ltp = 160.0
+    bracket.sl_trigger_price = 145.0
+
+    original_modify = order_manager.modify_order
+    attempts: list[str] = []
+
+    def uncertain_modify(order_id: str, **changes: Any) -> bool:
+        attempts.append(str(order_id))
+        if len(attempts) == 1:
+            return False  # Broker acceptance was not demonstrated either way.
+        return original_modify(order_id, **changes)
+
+    monkeypatch.setattr(order_manager, "modify_order", uncertain_modify)
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason == "modify_failed"
+    assert attempts == [stop_id]
+
+    # Pending orderbook evidence must NOT authorize a competing modify.
+    broker.statuses[stop_id] = "MODIFY PENDING"
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert attempts == [stop_id]
+    assert bracket.exchange_stop_degraded_reason is not None
+
+    # Only a fully verified old broker stop may be amended again.
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+    assert manager._sync_exchange_protective_stop(bracket)
+    assert attempts == [stop_id, stop_id]
+    assert bracket.exchange_stop_trigger_price == pytest.approx(145.0)
+    assert bracket.exchange_stop_degraded_reason is None
