@@ -453,3 +453,63 @@ or a tape lacks contract-token/depth/run provenance, output is missing or
 unlabelled rather than reconstructed. Volatility threshold tuning or a
 "relaxed" RANGE gate remains prohibited without independent out-of-sample
 execution evidence.
+
+## 21 November: conditional-center failed-breakout v2 — guarded hypothesis
+
+**Implementation status:** active only wherever the existing RangeVWAP
+LIVE pilot is already explicitly enabled. It does not enable RangeVWAP as
+a trigger, remove regime/direction/readiness protections, change orders,
+increase position risk, or create an independent contract selector.
+This is a bounded, user-authorized *mechanistic pilot*, not proven alpha.
+
+Original structural admission remains for center gap ≤1.0 futures ATR.
+A single bounded exception for **1.0 < gap ≤1.25 ATR** now requires:
+
+- Canonical sustained RANGE, prior 25-bar efficiency ≤0.35, session VWAP
+  slope ≤1.2 bps/min and 30-bar range width **1.5–6 ATR** unchanged.
+- An exterior completed futures close beyond the frozen session band
+  by at least 0.05 ATR, followed by a completed opposite-body reclaim
+  inside the original band by at least 0.15 ATR and directional recovery
+  of at least 0.15 ATR, without a fresh outside extreme or significant
+  5m volatility expansion (5m/14m true-range ratio ≤1.50). The short
+  5m directional efficiency is *diagnostic only*: a true failed breakout
+  can follow a strong directional run.
+- Existing exact-candidate, original quote-version, age, 3-second OFI,
+  positive 1-second OFI, optional book-depth and holdoff checks; the
+  exception additionally needs **3-second normalized option OFI ≥0.20**.
+- Existing exact-option quote, spread, delta, spot/futures basis, IV,
+  theta, adverse gap and session-VWAP provenance. For conditional entries
+  the reward model is capped at the **nearer rolling-center barrier**,
+  never extended beyond the confirmed session VWAP or older close.
+  A passed barrier is *not* a new opportunity. Minimum stressed net
+  R:R **1.75** (baseline remains **1.5**), modeled one-lot stop risk
+  **≤₹773**, and all canonical broker checks remain binding.
+- Existing `TradeCandidateSelector` continues to rank eligible option
+  contracts by net economics, spread, freshness and ATM distance.
+  `option_cost_risk.net_cash_surplus_above_1_5r` and the conditional
+  status in signal metadata make the additional profitability cushion
+  inspectable. These numbers are **model forecasts, not realized P&L**.
+
+The new configuration fields in
+`RangeVWAPReclaimStrategyConfig` are the small rollback surface:
+set `enable_conditional_center_tolerance=False` to restore exactly the
+previous **1.0 ATR** limit without disabling the underlying strategy
+or touching broker protection. The 1.25 limit is hard capped in
+structural code even if a configuration is accidentally broadened.
+
+The existing post-close canonical excursion report now prices
+**RangeVWAP** original-option ask/bid outcomes using the **25-bps
+per-side default live slippage stress**, rather than the generic
+minute-sampled 5-bps stress. Both include the canonical costs, but
+observed quotes are not broker fills, and rejected opportunities often
+lack independent original-time risk calculations. Markouts and v2
+candidate labels do not authorize further live threshold promotion.
+
+**Uncertainty:** The 1.25 ATR, reentry-depth, 1.50 TR-ratio,
+0.20 OFI and 1.75 net R:R settings are prespecified conservative
+engineering hypotheses extrapolated from broader mean-reversion and
+market-microstructure principles. There is no independent chronological
+NIFTY options holdout showing improved expectancy. Track rejected
+and admitted excursions, restarts, actual brokerage and realized
+protection before increasing scope.
+
