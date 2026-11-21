@@ -37,6 +37,8 @@ Safe-edit notes:
 - An ambiguous failed stop amend requires broker readback before another modify.
 - Linked-portfolio group exits are currently broker-truth diagnostic only;
   this owner never blindly submits a portfolio leg or claims flat by intent.
+- Every ordered protection tick is assessed even when second-resolution Kite
+  exchange timestamps repeat; a failed deferred exit must not kill the worker.
 """
 
 from __future__ import annotations
@@ -2486,8 +2488,10 @@ class BracketManager:
             time_stop_progress_crossed = False
             # Keep all bracket field mutations atomic against watchdog reads.
             with self._lock:
-                if tick_id is not None and bracket.last_processed_tick_id == tick_id:
-                    continue
+                # Kite FULL exchange timestamps are second-resolution: a
+                # changed price or depth update within the same second is a
+                # new protective event, not a duplicate. Existing exit latches
+                # and monotonic broker ratchets own idempotency.
                 if tick_id is not None:
                     bracket.last_processed_tick_id = tick_id
                 # Track previous tick for jump/cross stop-loss detection.
@@ -3003,6 +3007,28 @@ class BracketManager:
                 except Exception as exc:  # noqa: BLE001 - exits remain mandatory
                     self._mark_persistence_degraded("exit_trigger_persist_failed", exc)
                 self._process_exit_state(bracket, action, now=time.time())
+            except Exception as exc:  # noqa: BLE001 - preserve exit worker liveness
+                # A broker lookup can raise before or after an order request.
+                # Keep its intent unresolved; never assume flat or retry an
+                # uncertain broker submission merely because a callback failed.
+                if item is not None:
+                    failed_bracket = item[0]
+                    with self._lock:
+                        failed_bracket.exit_pending = True
+                        failed_bracket.last_exit_error = (
+                            f"exit_dispatch_exception:{type(exc).__name__}"
+                        )
+                        failed_bracket.updated_at = time.time()
+                    self._log_throttled(
+                        "error",
+                        f"exit_dispatch_exception:{failed_bracket.bracket_id}",
+                        5.0,
+                        "BRACKET_EXIT_DISPATCH_FAILED bracket_id=%s symbol=%s "
+                        "error_type=%s unresolved=True",
+                        failed_bracket.bracket_id,
+                        failed_bracket.symbol,
+                        type(exc).__name__,
+                    )
             finally:
                 if item is not None:
                     with self._lock:
