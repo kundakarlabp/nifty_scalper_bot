@@ -513,3 +513,32 @@ NIFTY options holdout showing improved expectancy. Track rejected
 and admitted excursions, restarts, actual brokerage and realized
 protection before increasing scope.
 
+## 21 November: baseline first-local-center payoff correction
+
+**Engineering correctness, not alpha validation.** The normal admission route
+(center gap <=1.0 futures ATR) had the same potential local obstruction as the
+higher-quality conditional route, but only the latter capped modeled option
+profit at the *forward* rolling 20-minute center. That asymmetry could admit
+a normal-range trade with a claimed >=1.5 net R:R based on futures travel
+through an intervening local price barrier. Both routes now conservatively
+limit the entry *model* to the lesser of confirmed-close remaining VWAP travel,
+fresh futures-to-VWAP travel and the next still-ahead rolling center. A rolling
+center already passed is not borrowed as a forward opportunity; the stricter
+conditional route retains its existing passed-center rejection.
+
+The canonical session VWAP remains the original directional thesis and
+unchanged underlying-exit reference. The option bracket target already uses
+the resulting stressed option reward price; the correction does not create
+an early-exit algorithm, second target owner or broker request. Evidence
+includes `first_local_center_barrier_points`,
+`local_center_binds_modeled_payoff` and
+`modeled_futures_reward_points` in existing `option_cost_risk`.
+All other regime, flow, lot, spread, stop, cost, ₹773 risk, expiry,
+rearm and broker gates are unchanged. A closer first barrier is a conservative
+economic *constraint*, not proof that price will reverse there or that the
+resulting option premium can be sold at its modeled bid.
+
+There is no observed independent NIFTY option sample establishing that this
+reduces drawdown or improves net expectancy. The revision should be judged
+first on deterministic safety/causality tests and thereafter on recorded
+broker-filled option outcomes; no live-activation inference is made.
