@@ -34,6 +34,7 @@ Owns / does NOT own:
 Safe-edit notes:
 - Live money and thread-sensitive (RLock-guarded). Preserve locking and the
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
+- An ambiguous failed stop amend requires broker readback before another modify.
 - Linked-portfolio group exits are currently broker-truth diagnostic only;
   this owner never blindly submits a portfolio leg or claims flat by intent.
 """
@@ -6192,7 +6193,7 @@ class BracketManager:
             # before another modification can be sent to this order ID.
             unsettled_broker_stop = str(
                 bracket.exchange_stop_degraded_reason or ""
-            ).startswith("broker_stop_")
+            ).startswith(("broker_stop_", "modify_failed"))
             recorded_qty = int(bracket.exchange_stop_quantity or 0)
             quantity_repair_needed = (
                 recorded_qty > 0
