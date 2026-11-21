@@ -105,10 +105,7 @@ def test_adverse_flow_pe_reverses_sign_and_rejects_stale_context() -> None:
 
 
 def test_cached_best_bid_without_actual_full_lot_depth_abstains() -> None:
-    samples = [
-        {"ts": float(i + 1), "bid": 150.3, "source": "bid"}
-        for i in range(8)
-    ]
+    samples = [{"ts": float(i + 1), "bid": 150.3, "source": "bid"} for i in range(8)]
     result = compare_profit_retention(
         samples,
         entry=145.35,
@@ -164,14 +161,25 @@ def test_retention_proxy_requires_actual_fills_and_full_lot_quote_proof() -> Non
 def test_peak_gap_is_unknown_without_actual_net_or_with_truncated_path() -> None:
     samples = _quotes(101.0, 104.0, 110.0, 108.0, 106.0)
     missing = compare_profit_retention(
-        samples, entry=100.0, initial_stop=95.0, quantity=65,
-        round_trip_cost=65.0, entry_at=1.0, exit_at=6.0,
+        samples,
+        entry=100.0,
+        initial_stop=95.0,
+        quantity=65,
+        round_trip_cost=65.0,
+        entry_at=1.0,
+        exit_at=6.0,
     )
     assert missing["quote_peak_retention"] is None
     truncated = compare_profit_retention(
-        samples, entry=100.0, initial_stop=95.0, quantity=65,
-        round_trip_cost=65.0, entry_at=1.0, exit_at=6.0,
-        realized_net_pnl=300.0, samples_truncated=True,
+        samples,
+        entry=100.0,
+        initial_stop=95.0,
+        quantity=65,
+        round_trip_cost=65.0,
+        entry_at=1.0,
+        exit_at=6.0,
+        realized_net_pnl=300.0,
+        samples_truncated=True,
     )
     assert truncated["ready"] is False
     assert truncated["quote_peak_retention"] is None
