@@ -183,7 +183,9 @@ def test_shadow_records_full_lot_bid_only_with_same_tick_exchange_proof() -> Non
         )
         tick["depth"]["buy"][0]["quantity"] = depth_qty
         manager._record_trade_quality_shadow(
-            bracket, 105.1, tick=tick,
+            bracket,
+            105.1,
+            tick=tick,
             exchange_ts=stamp.timestamp() + event_offset,
         )
         return bracket.trailing_config["_research_executable_path"][-1]
@@ -205,5 +207,3 @@ def test_shadow_records_full_lot_bid_only_with_same_tick_exchange_proof() -> Non
     tick["source_timestamp_valid"] = False
     stale_clock = sample(65, 0.0)
     assert stale_clock["full_lot_bid_proven"] is False
-
-
