@@ -7,6 +7,8 @@ Key responsibilities:
     - Resolve live-mode consistently before durable bracket-state enforcement.
     - Surface position/reconciliation lifecycle blockers to the native entry gate.
     - Keep active virtual brackets supplied with fresh canonical market data.
+    - Forward the original protection tick to read-only full-lot research
+      without introducing another quote cache or stop authority.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
@@ -195,6 +197,7 @@ class BoundBracketManager(RuntimeBracketManager):
             ltp,
             exchange_ts,
             defer_submission=defer_submission,
+            tick=tick,
         )
 
     def _evaluate_exit_fast(
