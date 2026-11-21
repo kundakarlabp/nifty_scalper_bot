@@ -167,6 +167,7 @@ def compare_profit_retention(
         return {
             "ready": False,
             "reason": "quote_path_truncated",
+            "quote_peak_retention": None,
             "policies": {},
             "policy": "research_only",
         }
