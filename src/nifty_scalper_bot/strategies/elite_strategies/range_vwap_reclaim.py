@@ -432,9 +432,7 @@ def assess_range_vwap_reclaim(
         # A wider center is *not* a generic signal. Only the original 1.0
         # to 1.25 ATR interval is eligible, with completed-bar exhaustion
         # evidence and every unchanged range, data and broker risk gate.
-        conditional_upper_gap = min(
-            config.max_conditional_center_deviation_atr, 1.25
-        )
+        conditional_upper_gap = min(config.max_conditional_center_deviation_atr, 1.25)
         conditional = bool(
             config.enable_conditional_center_tolerance
             and config.max_secondary_center_deviation_atr >= 1.0
