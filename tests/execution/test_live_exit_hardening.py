@@ -2049,3 +2049,45 @@ def test_failed_stop_modify_reconciles_broker_before_retry(
     assert attempts == [stop_id, stop_id]
     assert bracket.exchange_stop_trigger_price == pytest.approx(145.0)
     assert bracket.exchange_stop_degraded_reason is None
+
+
+def test_escalation_market_exit_uses_broker_residual_after_partial_fill() -> None:
+    """After cancellation, 35 held contracts must never generate a 65 SELL."""
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "partial_exit_then_cancel")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["order_type"] == "MARKET"
+    assert order_manager.place_calls[0]["quantity"] == 35
+
+
+@pytest.mark.parametrize("position_quantity", [-30, None])
+def test_escalation_never_sells_if_position_direction_or_snapshot_unknown(
+    position_quantity: int | None,
+) -> None:
+    """An opposite position or missing position proof must fail closed."""
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    if position_quantity is None:
+        broker.positions = None
+    else:
+        broker.positions = [{"symbol": SYMBOL, "quantity": position_quantity}]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "unproven_residual")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
