@@ -465,6 +465,13 @@ def _adaptive_market(manager, *, bid=115.0, quantity=65, spread=0.2, age=0.0):
             "received_at": time() - age,
         }
     )
+    live_probe = getattr(manager, "_is_live_execution", None)
+    if callable(live_probe) and live_probe() and not hasattr(
+        manager, "_exit_quotes"
+    ):
+        # A real BoundBracketManager already captures this exact tick.
+        # Test doubles need equivalent current-tick evidence for LIVE cases.
+        manager._exit_quotes = {SYMBOL: (bid, bid + spread, time())}
     return quote
 
 
