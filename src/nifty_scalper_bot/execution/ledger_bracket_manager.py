@@ -9,6 +9,8 @@ Responsibilities:
 - Apply cumulative entry VWAP revisions to the existing ledger entry identity,
   then update the active bracket without a second entry activation.
 - Keep trading ledger persistence distinct from the live protective mechanism.
+- Attribute broker-realized net P&L separately from observed full-lot option
+  bid peaks; quote-to-fill gaps are research proxies, never missed fills.
 
 Boundaries: BoundBracket/core remain authoritative for protective broker actions.
 Safety: Ledger failure cannot suppress SL/TP exits; uncertain fills block new entries.
@@ -889,6 +891,9 @@ class LedgerBracketManager(CanonicalBracketManager):
                     samples_truncated=bool(
                         research_config.get("_research_executable_path_truncated")
                     ),
+                    entry_at=opened_at,
+                    exit_at=closed_at,
+                    realized_net_pnl=net_pnl,
                 )
         # The original temporal OFI series comes from the already-running
         # strategy evaluation, not a broker poll or a fabricated quote.
@@ -1083,6 +1088,15 @@ class LedgerBracketManager(CanonicalBracketManager):
                 ),
                 "quote_samples": len(quality_path),
                 "verified_bid_samples": len(bid_path),
+                "full_lot_bid_samples": sum(
+                    1 for item in bid_path
+                    if item.get("full_lot_bid_proven") is True
+                ),
+                "top_bid_without_full_lot_proof": sum(
+                    1 for item in bid_path
+                    if item.get("full_lot_bid_proven") is not True
+                ),
+                "best_bid_not_a_full_lot_fill": True,
                 "first_sample_epoch": (
                     quality_path[0].get("ts") if quality_path else None
                 ),
