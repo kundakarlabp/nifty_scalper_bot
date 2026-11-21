@@ -10,6 +10,7 @@ Key responsibilities:
     - Forward the original protection tick to read-only full-lot research
       without introducing another quote cache or stop authority.
     - Discard prior-tick exit quotes when a new tick has no matching BBO.
+    - Preserve the prior valid quote when the core rejects a delayed pre-fill event.
     - Count optional trail assessments in existing per-bracket state to
       distinguish missed dispatch from a legitimate no-ratchet decision.
 
@@ -194,6 +195,28 @@ class BoundBracketManager(RuntimeBracketManager):
     ) -> None:
         """Never evaluate a new protection tick using a previous tick's BBO."""
         normalized = normalize_symbol(symbol)
+        # An old exchange event can arrive just after a broker-confirmed fill.
+        # The canonical core rejects its price; do not let that same event
+        # overwrite (or clear) the watchdog's previously valid quote first.
+        now_ts = time.time()
+        with self._lock:
+            rejected_prefill = any(
+                bracket is not None
+                and bracket.entry_confirmed
+                and bracket.remaining_quantity > 0
+                and self._is_replayed_prefill_tick(bracket, exchange_ts, now_ts)
+                for entry_id in self._symbol_map.get(normalized, ())
+                if (bracket := self._brackets.get(entry_id)) is not None
+            )
+        if rejected_prefill:
+            super().on_tick(
+                symbol,
+                ltp,
+                exchange_ts,
+                defer_submission=defer_submission,
+                tick=tick,
+            )
+            return
         captured = False
         if isinstance(tick, Mapping):
             tick_symbol = tick.get("symbol")
