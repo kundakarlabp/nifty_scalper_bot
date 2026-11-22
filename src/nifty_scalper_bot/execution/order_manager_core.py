@@ -23,6 +23,8 @@ Safe-edit notes:
   do not confuse the two.
 - Reference midpoints and live entry depth require finite, uncrossed bid/ask
   evidence; malformed depth quantities cannot bypass entry preflight.
+- Quote age prefers exchange event time over receipt time. Explicit invalid,
+  receipt-only, or future market timestamps cannot prove LIVE entry freshness.
 - Fast fill confirmation accepts only matching broker order identity (when
   present), positive filled quantity and finite positive execution price.
 - Out-of-order broker statuses cannot reopen terminal orders. Genuine
@@ -4768,12 +4770,13 @@ class OrderManager:
         ts_raw = None
         ts_key = None
         for key in (
-            "received_at",
-            "wallclock",
             "exchange_timestamp",
             "timestamp",
-            "ts",
             "last_trade_time",
+            "timestamp_ms",
+            "ts",
+            "received_at",
+            "wallclock",
         ):
             val = quote.get(key)
             if val not in (None, ""):
@@ -4837,8 +4840,20 @@ class OrderManager:
                 else:
                     parsed_ts = parsed_dt.timestamp()
             if parsed_ts is not None:
-                age_ms = max(0.0, (time.time() - float(parsed_ts)) * 1000.0)
+                event_age_ms = (time.time() - float(parsed_ts)) * 1000.0
+                if math.isfinite(event_age_ms) and event_age_ms >= -1000.0:
+                    age_ms = max(0.0, event_age_ms)
         except Exception:
+            age_ms = None
+        # Arrival time is not exchange-time proof when the upstream payload
+        # explicitly labels its market timestamp as unusable/receipt-only.
+        timestamp_source = str(quote.get("timestamp_source") or "").strip().lower()
+        timestamp_quality = str(quote.get("timestamp_quality") or "").strip().lower()
+        if (
+            quote.get("source_timestamp_valid") is False
+            or timestamp_source in {"received_at", "received_ts", "received_time"}
+            or timestamp_quality in {"synthetic", "invalid", "unknown"}
+        ):
             age_ms = None
         return {
             "bid": bid,
@@ -4850,6 +4865,7 @@ class OrderManager:
             "ask_qty": ask_qty,
             "depth_qty": bid_qty + ask_qty,
             "age_ms": age_ms,
+            "timestamp_key": ts_key,
         }
 
     def _trade_plan_rejection_details(
