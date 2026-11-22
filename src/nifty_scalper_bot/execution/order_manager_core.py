@@ -12146,50 +12146,36 @@ class OrderManager:
             planned_product: str, validity: str, variety: str
         ) -> tuple[bool, str | None, str | None]:
             nonlocal last_details
-            overrides = {
-                "product": planned_product,
-                "validity": validity,
-                "variety": variety,
-            }
+            # The public owner alone holds the durable exit reservation and
+            # broker-state deduplication. The old direct _place_single_order
+            # call bypassed those cross-path protections.
             try:
-                last_details = self._place_single_order(
+                order_id = self.place_order(
                     symbol=symbol,
                     side=side,
                     quantity=quantity,
                     order_type=OrderType.MARKET,
                     price=None,
                     product=planned_product,
+                    variety=variety,
                     tag=tag,
-                    payload_overrides=overrides,
+                    check_risk=False,
+                    intent="EXIT",
+                    strategy_name="legacy_protective_exit",
                 )
-            except OrderPlacementError as exc:
+            except Exception as exc:  # noqa: BLE001 - uncertain stays reserved
                 self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_attempt_failed",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                        "product": planned_product,
-                        "validity": validity,
-                        "variety": variety,
-                    },
+                    "LEGACY_EXIT_NATIVE_SUBMISSION_ERROR symbol=%s error_type=%s",
+                    symbol,
+                    type(exc).__name__,
                 )
                 return False, None, str(exc)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_unexpected",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                    },
-                )
-                return False, None, str(exc)
-            return True, last_details.order_id, None
+            if not order_id:
+                return False, None, "native_exit_owner_blocked"
+            last_details = self._orders.get(str(order_id))
+            if last_details is None:
+                return False, None, "native_exit_order_not_registered"
+            return True, str(order_id), None
 
         try:
             result = plan_and_send_exit(
