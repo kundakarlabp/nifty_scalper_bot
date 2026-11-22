@@ -59,6 +59,13 @@ def test_no_after_close_amo_for_overday_position() -> None:
     assert result.reason is BrokerReject.MARKET_CLOSED
 
 
+def test_success_without_order_id_does_not_claim_order_accepted() -> None:
+    result, calls = _route(time(14, 30), "MIS", (True, None, None))
+    assert not result.ok
+    assert result.reason is BrokerReject.UNKNOWN
+    assert len(calls) == 1
+
+
 def test_normal_open_market_exit_keeps_broker_product() -> None:
     result, calls = _route(time(14, 30), "NRML", (True, "exit-65", None))
 
