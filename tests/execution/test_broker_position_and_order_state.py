@@ -75,6 +75,15 @@ def test_negative_quantity_is_non_flat():
     assert evidence.net_quantity == -65
 
 
+def test_missing_quantity_never_proves_flatness():
+    evidence = evidence_from_positions(
+        "NFO:NIFTY2670124000CE",
+        [{"tradingsymbol": "NIFTY2670124000CE", "product": "MIS"}],
+    )
+    assert evidence.state is BrokerPositionState.UNKNOWN
+    assert evidence.net_quantity is None
+
+
 def test_malformed_positions_are_unknown_not_flat():
     evidence = evidence_from_positions(
         "NFO:NIFTY2670124000CE",
