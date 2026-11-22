@@ -273,7 +273,9 @@ def flatten_all(
             prior = initial.get(symbol)
             product = str(_field(row, "product") or "").upper()
             if prior is None:
-                failed.append({"symbol": symbol, "reason": "new_or_unsupported_exposure"})
+                failed.append(
+                    {"symbol": symbol, "reason": "new_or_unsupported_exposure"}
+                )
                 continue
             old_qty, old_product, lot = prior
             if (
@@ -288,7 +290,9 @@ def flatten_all(
                 order for order in remote_orders if _symbol(order) == symbol
             ]
             terminal = {"COMPLETE", "CANCELLED", "CANCELED", "REJECTED"}
-            if any(_order_status(order) not in terminal for order in same_symbol_orders):
+            if any(
+                _order_status(order) not in terminal for order in same_symbol_orders
+            ):
                 failed.append({"symbol": symbol, "reason": "cancel_unconfirmed"})
                 continue
             cancelled_ids = set(cancel_result.get("cancelled", []))
