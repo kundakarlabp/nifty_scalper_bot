@@ -857,6 +857,7 @@ class BracketManager:
                 "modify_unavailable",
                 "cancel_unconfirmed",
                 "cancel_unavailable",
+                "cancel_preflight_unverified",
             )
         )
         return bool(
@@ -3279,6 +3280,7 @@ class BracketManager:
             qty,
             reason,
         )
+        decision_before = getattr(self.order_manager, "_last_order_decision", None)
         submit = self.submit_exit_order(
             symbol=symbol,
             qty=qty,
@@ -3454,6 +3456,73 @@ class BracketManager:
                         submit.error_message,
                     )
                     self._escalate_exit_locked(bracket, "fatal_or_retry_exhausted")
+
+        # The old exchange stop was retired before this alternative exit.
+        # Only a proven *pre-broker* rejection permits restoring protection:
+        # an attempted/uncertain broker exit may still execute, so rearming
+        # then could create a second SELL and reverse the position.
+        decision_raw = getattr(self.order_manager, "_last_order_decision", None)
+        decision = decision_raw if isinstance(decision_raw, Mapping) else {}
+        if (
+            not submit.accepted
+            and decision_raw is not decision_before
+            and decision.get("broker_attempted") is False
+            and self._is_live_execution()
+            and self._exchange_protective_stop_enabled
+            and not bracket.exchange_stop_order_id
+            and bracket.exit_state
+            != BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            and not getattr(bracket, "_market_escalation_fired", False)
+        ):
+            try:
+                signed_qty = self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol, product=bracket.product
+                )
+                expected_qty = int(bracket.remaining_quantity) * (
+                    1 if bracket.side == "BUY" else -1
+                )
+                if signed_qty != expected_qty or expected_qty == 0:
+                    raise PositionSnapshotError("residual_quantity_or_side_unverified")
+                broker = getattr(self.order_manager, "_broker", None)
+                fetch_orders = getattr(broker, "get_orders", None)
+                orders = fetch_orders() if callable(fetch_orders) else None
+                if not isinstance(orders, list) or any(
+                    not isinstance(order, Mapping) for order in orders
+                ):
+                    raise ValueError("broker_orderbook_unavailable_for_rearm")
+                reducing_side = "SELL" if bracket.side == "BUY" else "BUY"
+                for order in orders:
+                    order_symbol = normalize_symbol(
+                        str(order.get("tradingsymbol") or order.get("symbol") or "")
+                    )
+                    order_product = str(order.get("product") or "").upper()
+                    order_side = str(
+                        order.get("transaction_type") or order.get("side") or ""
+                    ).upper()
+                    status = str(order.get("status") or "").upper()
+                    if (
+                        order_symbol == normalize_symbol(bracket.symbol)
+                        and order_product in {"", str(bracket.product).upper()}
+                        and order_side == reducing_side
+                        and status not in {
+                            "COMPLETE", "CANCELLED", "CANCELED", "REJECTED"
+                        }
+                    ):
+                        raise ValueError("competing_reducing_order_prevents_rearm")
+                rearmed = bool(self._ensure_exchange_protective_stop(bracket))
+                if not rearmed:
+                    LOGGER.critical(
+                        "EXIT_PREBROKER_REARM_UNVERIFIED bracket_id=%s symbol=%s",
+                        bracket.bracket_id,
+                        bracket.symbol,
+                    )
+            except Exception as exc:  # noqa: BLE001 - never infer protection
+                LOGGER.critical(
+                    "EXIT_PREBROKER_REARM_BLOCKED bracket_id=%s symbol=%s error_type=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    type(exc).__name__,
+                )
         self._reconcile_exit_state(bracket, requested_by="post_submit")
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
@@ -5119,7 +5188,15 @@ class BracketManager:
         )
         result: Mapping[str, Any] = {}
         if callable(getter):
-            history = getter(order_id)
+            try:
+                history = getter(order_id)
+            except Exception as exc:  # noqa: BLE001 - orderbook may still prove state
+                LOGGER.warning(
+                    "BROKER_ORDER_HISTORY_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                history = None
             if isinstance(history, Mapping):
                 result = history
                 state = str(history.get("status") or "").strip().upper()
@@ -5148,7 +5225,15 @@ class BracketManager:
                         return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
-            orders = getter()
+            try:
+                orders = getter()
+            except Exception as exc:  # noqa: BLE001 - unknown is not terminal
+                LOGGER.warning(
+                    "BROKER_ORDERBOOK_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                return result
             # Broker orderbooks are lists; a missing/malformed response is not
             # proof of cancellation or of a fill (also protects mock adapters).
             if not isinstance(orders, (list, tuple)):
@@ -6489,11 +6574,14 @@ class BracketManager:
             )
         with self._lock:
             if modified:
+                # An accepted modify response is not exchange protection.
+                # Keep the stop explicitly degraded until exact orderbook proof
+                # promotes this revision in _confirm_exchange_protective_stop.
                 bracket.exchange_stop_quantity = desired_quantity
                 bracket.exchange_stop_trigger_price = trigger
                 bracket.exchange_stop_limit_price = limit_price
                 bracket.exchange_stop_modify_count = modify_count + 1
-                bracket.exchange_stop_degraded_reason = None
+                bracket.exchange_stop_degraded_reason = "broker_stop_modify_unverified"
             else:
                 bracket.exchange_stop_degraded_reason = "modify_failed"
             bracket.updated_at = time.time()
@@ -6710,6 +6798,22 @@ class BracketManager:
             )
             return "filled"
 
+        # Do not disarm an exchange stop when neither history nor the exact
+        # broker orderbook proves that it is presently working.  An unknown
+        # status followed by a successful cancel can create a naked position.
+        if status_text not in {"OPEN", "TRIGGER PENDING"}:
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    f"cancel_preflight_unverified:{status_text or 'unknown'}"
+                )
+            LOGGER.critical(
+                "EXCHANGE_STOP_CANCEL_PREFLIGHT_UNVERIFIED order_id=%s symbol=%s status=%s",
+                order_id,
+                bracket.symbol,
+                status_text or "UNKNOWN",
+            )
+            return "unresolved"
+
         cancel = getattr(self.order_manager, "cancel_order", None)
         if not callable(cancel):
             with self._lock:
@@ -6833,6 +6937,26 @@ class BracketManager:
                 self._clear_exchange_stop_locked(bracket)
                 bracket.updated_at = time.time()
             return False
+
+        # A rearmed stop remains the sole reducing order during exit backoff,
+        # but its broker fill must still be recognized immediately.
+        with self._lock:
+            waiting_for_exit = not (
+                bracket.exit_order_id or bracket.pending_exit_order_id
+            ) and (
+                (
+                    bracket.next_exit_attempt_at is not None
+                    and now < float(bracket.next_exit_attempt_at)
+                )
+                or (
+                    bracket.exit_state
+                    == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                    and not self._exit_continue_retry_after_escalation
+                )
+            )
+            if waiting_for_exit:
+                self._log_exit_pending_summary_locked(bracket, now)
+                return True
 
         upper_reason = str(reason or "").upper()
         hard_stop = any(

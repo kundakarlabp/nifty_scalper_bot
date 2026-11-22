@@ -64,6 +64,7 @@ class _Manager:
     def __init__(self, broker: _Broker) -> None:
         self._broker = broker
         self._logger = logging.getLogger(__name__)
+        self._orders = {"stop-1": {"order_id": "stop-1"}}
         self.sent: list[dict] = []
 
     def is_live_mode(self) -> bool:
@@ -191,6 +192,58 @@ def test_confirmed_stop_fill_cannot_cause_second_exit() -> None:
 
     assert not manager.sent
     assert result["submitted"] == []
+
+
+def test_unowned_same_symbol_nifty_stop_is_not_cancelled_or_flattened() -> None:
+    class MixedBroker(_Broker):
+        def get_orders(self):
+            return super().get_orders() + [
+                {
+                    "order_id": "manual-nifty-stop",
+                    "tradingsymbol": SYMBOL,
+                    "status": "TRIGGER PENDING",
+                    "transaction_type": "SELL",
+                }
+            ]
+
+    broker = MixedBroker()
+    manager = _Manager(broker)
+    result = flatten_all(manager)
+
+    assert broker.cancel_calls == []
+    assert manager.sent == []
+    assert result["failed"][0]["reason"] == "broker_proof_unavailable:ValueError"
+
+
+def test_cancel_pending_orders_does_not_cancel_unknown_broker_status() -> None:
+    from nifty_scalper_bot.execution.operator_control import cancel_pending_orders
+
+    broker = _Broker()
+    manager = _Manager(broker)
+    broker.status = ""
+    outcome = cancel_pending_orders(manager)
+    assert outcome["cancelled"] == []
+    assert broker.cancel_calls == []
+
+
+def test_cancel_pending_orders_keeps_untracked_same_symbol_order() -> None:
+    from nifty_scalper_bot.execution.operator_control import cancel_pending_orders
+
+    class MixedBroker(_Broker):
+        def get_orders(self):
+            return super().get_orders() + [
+                {
+                    "order_id": "manual-nifty-stop",
+                    "tradingsymbol": SYMBOL,
+                    "status": "TRIGGER PENDING",
+                }
+            ]
+
+    broker = MixedBroker()
+    manager = _Manager(broker)
+    outcome = cancel_pending_orders(manager)
+    assert outcome["cancelled"] == ["stop-1"]
+    assert broker.cancel_calls == ["stop-1"]
 
 
 def test_emergency_preserves_unrelated_account_stops() -> None:

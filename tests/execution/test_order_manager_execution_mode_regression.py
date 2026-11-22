@@ -651,6 +651,9 @@ def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
         def __init__(self) -> None:
             self.payload = None
 
+        def get_orders(self):
+            return []
+
         def get_positions(self):
             return {
                 "net": [

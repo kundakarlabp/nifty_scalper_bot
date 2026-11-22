@@ -392,6 +392,55 @@ def test_native_exit_refuses_duplicate_while_broker_reduction_working(
     assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
 
 
+def test_live_exit_blocks_working_broker_order_missing_from_local_memory(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    assert not manager._orders
+    broker.working_orders = [
+        {
+            "order_id": "broker-only-exit",
+            "tradingsymbol": SYMBOL.split(":", 1)[-1],
+            "status": "TRIGGER PENDING",
+            "transaction_type": "SELL",
+            "product": "MIS",
+        }
+    ]
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+    assert result is None
+    assert broker.orders == []
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
+def test_live_exit_blocks_unreadable_broker_book_without_local_pending(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    broker.get_orders = lambda: None
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+    assert result is None
+    assert broker.orders == []
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
 def test_native_exit_fails_closed_when_existing_reduction_book_unreadable(
     monkeypatch, tmp_path
 ) -> None:

@@ -3,6 +3,7 @@
 Responsibilities:
 - Accept RuntimeOrderManager operator requests without a parallel trading owner.
 - Validate LIVE net exposure, contract lots, and terminal cancellation readback.
+- Scope cancellation to tracked bot-owned order IDs; refuse unknown active orders.
 Boundaries: All order submissions use RuntimeOrderManager.place_order.
 Safety: Unknown broker position, lot or working stop holds replacement exits.
 """
@@ -126,7 +127,8 @@ def _quantity(row: Any) -> int:
 
 
 def _order_id(row: Any) -> str:
-    return str(_field(row, "order_id", "id", "exchange_order_id") or "").strip()
+    # Broker cancellations require a Kite order ID, never an exchange-order ID.
+    return str(_field(row, "order_id", "id") or "").strip()
 
 
 def _order_status(row: Any) -> str:
@@ -157,11 +159,40 @@ def _cancel_order(self: Any, order_id: str) -> bool:
     return False
 
 
+def _owned_order_ids(self: Any) -> set[str]:
+    """Gather explicit bot order identities; symbols and tags are not ownership."""
+    owned: set[str] = set()
+    local_orders = getattr(self, "_orders", None)
+    if isinstance(local_orders, Mapping):
+        for key, order in local_orders.items():
+            order_id = _order_id(order) or str(key or "").strip()
+            if order_id:
+                owned.add(order_id)
+    bracket_manager = getattr(self, "_bracket_manager", None)
+    brackets = getattr(bracket_manager, "_brackets", None)
+    if isinstance(brackets, Mapping):
+        for bracket in brackets.values():
+            for field in (
+                "exchange_stop_order_id",
+                "exit_order_id",
+                "pending_exit_order_id",
+                "entry_order_id",
+            ):
+                order_id = str(getattr(bracket, field, "") or "").strip()
+                if order_id:
+                    owned.add(order_id)
+            for value in getattr(bracket, "linked_exit_order_ids", ()) or ():
+                if value:
+                    owned.add(str(value))
+    return owned
+
+
 def cancel_pending_orders(self: Any) -> dict[str, Any]:
     cancelled: list[str] = []
     failed: list[str] = []
     checker = getattr(self, "is_live_mode", None)
     live = bool(checker()) if callable(checker) else False
+    owned_ids = _owned_order_ids(self) if live else set()
     if live:
         # Local in-memory open orders can omit exchange-resident stops.
         # In LIVE only the broker's complete orderbook may select cancellations.
@@ -182,10 +213,12 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
             if not symbol.startswith("NFO:NIFTY") or not symbol.endswith(("CE", "PE")):
                 continue
         status = _order_status(row)
-        if status and status not in _OPEN_ORDER_STATUSES:
+        if live and status not in _OPEN_ORDER_STATUSES:
+            continue
+        if not live and status and status not in _OPEN_ORDER_STATUSES:
             continue
         order_id = _order_id(row)
-        if not order_id:
+        if not order_id or (live and order_id not in owned_ids):
             continue
         if _cancel_order(self, order_id):
             cancelled.append(order_id)
@@ -271,6 +304,17 @@ def flatten_all(
                     # two different broker product positions at once.
                     raise ValueError("broker_position_product_ambiguous")
                 initial[symbol] = (qty, product, lot)
+            owned_ids = _owned_order_ids(self)
+            for order in pre_orders:
+                if not isinstance(order, Mapping):
+                    raise ValueError("broker_orderbook_row_malformed")
+                if (
+                    _symbol(order) in initial
+                    and _order_status(order)
+                    not in {"COMPLETE", "CANCELLED", "CANCELED", "REJECTED"}
+                    and _order_id(order) not in owned_ids
+                ):
+                    raise ValueError("unowned_nifty_order_prevents_safe_flatten")
         if cancel_first:
             cancel_result = cancel_pending_orders(self)
         if live:
