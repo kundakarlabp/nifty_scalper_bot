@@ -91,7 +91,10 @@ class _OrderManager:
         self.place_calls.append(dict(kwargs))
         order_id = f"rescue-{self._next_id}"
         self._next_id += 1
-        self._broker.statuses[order_id] = "OPEN"
+        # A resting broker SL is TRIGGER PENDING, not the triggered OPEN limit.
+        self._broker.statuses[order_id] = (
+            "TRIGGER PENDING" if kwargs.get("order_type") == "SL" else "OPEN"
+        )
         self._broker.quantities[order_id] = int(kwargs["quantity"])
         if (
             kwargs.get("order_type") == "SL"
