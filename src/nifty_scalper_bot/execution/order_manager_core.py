@@ -12110,6 +12110,14 @@ class OrderManager:
         )
         if quantity <= 0:
             raise OrderPlacementError("Exit quantity must be positive")
+        # Legacy panic/force-stop/reduce-only routes call _place_single_order
+        # directly. Apply the same broker-backed guard as public place_order.
+        if normalize_symbol(symbol).endswith(("CE", "PE")):
+            blocked = self._validate_option_exit_quantity(symbol, side, quantity, "EXIT")
+            if blocked is not None:
+                raise OrderPlacementError(
+                    f"Exit preflight blocked ({blocked['reason']})"
+                )
 
         refresh: Callable[[str], None] | None = None
         market_data = self._market_data
