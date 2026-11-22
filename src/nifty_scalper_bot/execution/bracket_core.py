@@ -857,6 +857,7 @@ class BracketManager:
                 "modify_unavailable",
                 "cancel_unconfirmed",
                 "cancel_unavailable",
+                "cancel_preflight_unverified",
             )
         )
         return bool(
