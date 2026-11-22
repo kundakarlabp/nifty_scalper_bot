@@ -108,7 +108,8 @@ def plan_and_send_exit(
     reason = BrokerReject.UNKNOWN
     if now_time >= _dt.time(hour=15, minute=30):
         logger.error(
-            "EXIT_ROUTER_MARKET_CLOSED symbol=%s product=%s reason=no_immediate_flatten",
+            "EXIT_ROUTER_MARKET_CLOSED symbol=%s product=%s "
+            "reason=no_immediate_flatten",
             symbol,
             product,
         )
