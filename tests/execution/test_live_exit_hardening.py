@@ -1880,6 +1880,31 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     assert broker.cancel_calls == []
 
 
+def test_unknown_broker_stop_status_never_cancels_exchange_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+
+    def unavailable(*_args: Any) -> None:
+        raise RuntimeError("broker readback outage")
+
+    monkeypatch.setattr(broker, "get_order_status", unavailable)
+    monkeypatch.setattr(broker, "get_orders", unavailable, raising=False)
+    assert manager._retire_exchange_protective_stop(
+        bracket, reason="PROFIT_TARGET"
+    ) == "unresolved"
+    assert broker.cancel_calls == []
+    assert bracket.exchange_stop_order_id == stop_id
+    assert bracket.exchange_stop_degraded_reason is not None
+
+
 def test_confirming_stop_modify_observes_unverified_state_until_broker_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
