@@ -1399,7 +1399,9 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
         # Broker flat, order status lagging: force the authoritative flat view
         # and the strict-live reconcile path (the branch production runs).
         status["flat"] = True
-        monkeypatch.setattr(type(bm), "_position_flat_for_symbol", lambda self, s: True)
+        monkeypatch.setattr(
+            type(bm), "_position_flat_for_symbol", lambda self, s, **_kw: True
+        )
         records: list = []
 
         class _Cap(logging.Handler):
