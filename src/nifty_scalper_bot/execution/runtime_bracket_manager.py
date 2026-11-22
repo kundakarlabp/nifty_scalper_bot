@@ -2,8 +2,9 @@
 
 LIVE execution uses the durable ledger release gate. PAPER/SHADOW/SIMULATION
 retain legacy close and hook behaviour so tests, dry runs and dashboards do not
-lose functionality when broker fill identity is intentionally absent. Broker
-exit-fill callbacks require integral quantities and finite positive prices.
+lose functionality when broker fill identity is intentionally absent.
+Safety: Broker exit-fill callbacks must have integral quantities and finite
+positive prices before bracket state can be correlated or closed.
 """
 
 from __future__ import annotations
