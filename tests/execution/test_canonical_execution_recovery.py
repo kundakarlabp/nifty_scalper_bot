@@ -128,6 +128,44 @@ def test_valid_empty_net_never_falls_through_to_day(tmp_path, monkeypatch) -> No
     assert manager._broker_position_quantity(SYMBOL) == 0
 
 
+
+def test_bracket_flatness_uses_exact_product_without_cross_product_netting(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = SimpleNamespace(
+        get_positions=lambda: [
+            {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
+            {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
+        ]
+    )
+    manager = BracketManager(order_manager=SimpleNamespace(_broker=broker))
+    stop(manager)
+
+    assert manager._broker_position_quantity(SYMBOL) is None
+    assert manager._broker_position_quantity(SYMBOL, product="MIS") == 0
+    assert manager._position_flat_for_symbol(SYMBOL, product="MIS") is True
+    assert manager._verify_position_closed(SYMBOL, product="MIS") is True
+    assert manager._position_flat_for_symbol(SYMBOL, product="NRML") is False
+    evidence = manager._broker_position_evidence(SYMBOL, product="MIS")
+    assert evidence.state.name == "FLAT_CONFIRMED"
+
+
+def test_missing_broker_product_does_not_prove_live_bracket_flatness(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = SimpleNamespace(
+        get_positions=lambda: [{"symbol": SYMBOL, "quantity": 0}]
+    )
+    manager = BracketManager(order_manager=SimpleNamespace(_broker=broker))
+    stop(manager)
+
+    assert manager._broker_position_quantity(SYMBOL, product="MIS") is None
+    assert manager._position_flat_for_symbol(SYMBOL, product="MIS") is False
+    assert manager._verify_position_closed(SYMBOL, product="MIS") is False
+
+
 def test_persist_failure_keeps_protection_and_freezes_new_entries(
     tmp_path, monkeypatch
 ) -> None:
