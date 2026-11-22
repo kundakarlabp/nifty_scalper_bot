@@ -11,7 +11,7 @@ Key responsibilities:
       without introducing another quote cache or stop authority.
     - Discard prior-tick exit quotes when a new tick has no matching BBO.
     - Preserve the prior valid quote when core rejects pre-fill or older
-      exchange-time events, without retaining BBO on unidentifiable ticks.
+      exchange-time events; clear BBO for an explicit new quote-less tick.
     - Count optional trail assessments in existing per-bracket state to
       distinguish missed dispatch from a legitimate no-ratchet decision.
 
