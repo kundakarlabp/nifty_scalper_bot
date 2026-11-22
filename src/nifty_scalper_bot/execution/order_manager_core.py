@@ -4851,8 +4851,8 @@ class OrderManager:
         timestamp_quality = str(quote.get("timestamp_quality") or "").strip().lower()
         if (
             quote.get("source_timestamp_valid") is False
-            or timestamp_source in {"received_at", "received_ts", "received_time"}
-            or timestamp_quality in {"synthetic", "invalid", "unknown"}
+            or timestamp_source.startswith("received_")
+            or timestamp_quality in {"synthetic", "invalid", "unknown", "received_at"}
         ):
             age_ms = None
         return {
