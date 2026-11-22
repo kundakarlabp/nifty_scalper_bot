@@ -1319,6 +1319,9 @@ def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, fa
         quote.pop("depth")
     elif failure == "old_exchange":
         quote["exchange_timestamp"] = time() - 30
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=30)
+        ).isoformat()
     elif failure == "wide_spread":
         quote["ask"] = quote["bid"] + 5.0
     elif failure == "unmatched_tick":
