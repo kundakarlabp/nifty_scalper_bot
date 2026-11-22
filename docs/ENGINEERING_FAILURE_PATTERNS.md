@@ -273,7 +273,7 @@ GitHub final-head CI remains authoritative before merge.
 
 ## Controlled learning from CI
 
-Failed CI runs are summarized by `.github/workflows/failure-memory-candidates.yml`. The workflow feeds failed log lines to `scripts/agent_failure_learn.py`, which only reports known-pattern candidates. It never edits this document automatically.
+On recurring CI failures, classify downloaded failed-job logs with the existing `scripts/agent_failure_learn.py`. Do not run a separate workflow after every successful CI run. The classifier reports candidates but never edits this document automatically.
 
 Use repeated candidates as evidence to add or strengthen an executable guard first. Promote a new prose pattern only after root-cause review.
 
