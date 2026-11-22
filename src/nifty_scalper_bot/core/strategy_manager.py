@@ -2983,15 +2983,10 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
-                    # A raw detector denial is observational in adaptive mode;
-                    # the effective fallback scale is only known AFTER the
-                    # stable/raw policy is reconciled below. Do not emit a
-                    # fictitious pre-fallback scale=1.0 decision.
-                    self._observability_counters["regime_gate_denials_observed"] += 1
-                if not allowed:
                     # This method handles tradable options; context symbols
-                    # returned through _generate_context_only above. A failed
-                    # canonical regime gate is never a sizing-only approval.
+                    # returned through _generate_context_only above. Adaptive
+                    # weighting must never override the canonical safety veto.
+                    self._observability_counters["regime_gate_denials_observed"] += 1
                     self._observability_counters["signals_blocked_by_regime"] += 1
                     _log_reject(
                         "regime_gate_block",
