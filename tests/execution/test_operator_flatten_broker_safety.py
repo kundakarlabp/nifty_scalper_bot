@@ -276,3 +276,39 @@ def test_post_cancel_readback_outage_reports_unverified_protection(caplog) -> No
     assert result["failed"]
     assert manager.sent == []
     assert "OPERATOR_FLATTEN_PROTECTION_UNVERIFIED" in caplog.text
+
+
+def test_multi_product_nifty_positions_keep_both_exchange_stops() -> None:
+    class TwoProductBroker(_Broker):
+        def get_positions(self):
+            return {
+                "net": [
+                    {"tradingsymbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                    {"tradingsymbol": SYMBOL, "quantity": -65, "product": "NRML"},
+                ]
+            }
+
+        def get_orders(self):
+            return [
+                {
+                    "order_id": "mis-stop",
+                    "tradingsymbol": SYMBOL,
+                    "status": "TRIGGER PENDING",
+                    "product": "MIS",
+                },
+                {
+                    "order_id": "nrml-stop",
+                    "tradingsymbol": SYMBOL,
+                    "status": "TRIGGER PENDING",
+                    "product": "NRML",
+                },
+            ]
+
+    broker = TwoProductBroker()
+    manager = _Manager(broker)
+    result = flatten_all(manager)
+
+    assert result["failed"]
+    assert result["failed"][0]["reason"] == "broker_proof_unavailable:ValueError"
+    assert not broker.cancel_calls
+    assert not manager.sent
