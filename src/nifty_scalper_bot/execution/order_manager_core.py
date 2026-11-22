@@ -14524,14 +14524,37 @@ class OrderManager:
                 if not callable(fetcher):
                     raise ValueError("broker_position_fetcher_unavailable")
                 snapshot = decode_position_snapshot(fetcher())
-                net_qty = snapshot.quantity_for(symbol)
-                broker_product = next(
-                    (
-                        str(row.raw.get("product") or "").strip().upper()
-                        for row in snapshot.rows
-                        if row.symbol == normalize_symbol(symbol)
-                    ),
-                    "",
+                matching_rows = [
+                    row
+                    for row in snapshot.rows
+                    if row.symbol == normalize_symbol(symbol)
+                ]
+                expected_product = str(product or "").strip().upper()
+                broker_products = {
+                    str(row.raw.get("product") or "").strip().upper()
+                    for row in matching_rows
+                }
+                if matching_rows and (
+                    not expected_product or "" in broker_products
+                ):
+                    return {
+                        "reason": "exit_broker_product_unavailable",
+                        "symbol": symbol,
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                if matching_rows and expected_product not in broker_products:
+                    return {
+                        "reason": "exit_broker_product_mismatch",
+                        "symbol": symbol,
+                        "broker_product": ",".join(sorted(broker_products)),
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                net_qty = snapshot.quantity_for(
+                    symbol, product=expected_product or None
                 )
             except Exception as exc:  # noqa: BLE001 - unknown is not flat
                 return {
@@ -14539,20 +14562,6 @@ class OrderManager:
                     "symbol": symbol,
                     "requested_exit_units": quantity,
                     "error_type": type(exc).__name__,
-                    "intent": intent,
-                }
-            expected_product = str(product or "").strip().upper()
-            if (
-                broker_product
-                and expected_product
-                and broker_product != expected_product
-            ):
-                return {
-                    "reason": "exit_broker_product_mismatch",
-                    "symbol": symbol,
-                    "broker_product": broker_product,
-                    "requested_product": expected_product,
-                    "requested_exit_units": quantity,
                     "intent": intent,
                 }
             open_units = abs(net_qty)
