@@ -27,9 +27,6 @@ RuntimeOrderManager = _runtime.RuntimeOrderManager
 # Preserve the existing helper import without a wrapper or runtime mutation.
 _enrich_trade_plan_exit_provenance = _runtime._enrich_trade_plan_exit_provenance
 
-_original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
-
-
 OrderManager = RuntimeOrderManager
 
 __all__ = sorted(
