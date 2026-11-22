@@ -6815,6 +6815,22 @@ class BracketManager:
             )
             return "filled"
 
+        # Do not disarm an exchange stop when neither history nor the exact
+        # broker orderbook proves that it is presently working.  An unknown
+        # status followed by a successful cancel can create a naked position.
+        if status_text not in {"OPEN", "TRIGGER PENDING"}:
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    f"cancel_preflight_unverified:{status_text or 'unknown'}"
+                )
+            LOGGER.critical(
+                "EXCHANGE_STOP_CANCEL_PREFLIGHT_UNVERIFIED order_id=%s symbol=%s status=%s",
+                order_id,
+                bracket.symbol,
+                status_text or "UNKNOWN",
+            )
+            return "unresolved"
+
         cancel = getattr(self.order_manager, "cancel_order", None)
         if not callable(cancel):
             with self._lock:
