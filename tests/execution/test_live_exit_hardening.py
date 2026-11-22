@@ -1880,6 +1880,94 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     assert broker.cancel_calls == []
 
 
+def test_confirming_stop_modify_observes_unverified_state_until_broker_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, _broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    bracket.sl_trigger_price = 145.0
+    seen: list[str | None] = []
+
+    def readback(_bracket: Any) -> bool:
+        seen.append(bracket.exchange_stop_degraded_reason)
+        return False
+
+    monkeypatch.setattr(manager, "_confirm_exchange_protective_stop", readback)
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+    assert seen == ["broker_stop_modify_unverified"]
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_modify_unverified"
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+
+
+def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    broker.positions = [
+        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"}
+    ]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    original_stop = bracket.exchange_stop_order_id
+    assert original_stop is not None
+
+    def current_orders() -> list[dict[str, Any]]:
+        return [
+            {
+                "order_id": order_id,
+                "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+                "status": status,
+                "product": "MIS",
+                "transaction_type": "SELL",
+            }
+            for order_id, status in broker.statuses.items()
+            if order_id.startswith("rescue-")
+        ]
+
+    monkeypatch.setattr(broker, "get_orders", current_orders, raising=False)
+    order_manager._last_order_decision = {"broker_attempted": False}
+    monkeypatch.setattr(
+        manager,
+        "submit_exit_order",
+        lambda **_kwargs: SimpleNamespace(
+            accepted=False,
+            order_id=None,
+            retryable=True,
+            error_type="local_guard",
+            error_message="prebroker rejection",
+            status="REJECTED",
+            broker_payload=None,
+        ),
+    )
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+    assert original_stop in broker.cancel_calls
+    assert bracket.exchange_stop_order_id is not None
+    assert bracket.exchange_stop_order_id != original_stop
+    assert bracket.exchange_stop_degraded_reason is None
+    cancel_count = len(broker.cancel_calls)
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+    assert len(broker.cancel_calls) == cancel_count
+
+
 def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
