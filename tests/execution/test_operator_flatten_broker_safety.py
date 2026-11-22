@@ -215,6 +215,17 @@ def test_unowned_same_symbol_nifty_stop_is_not_cancelled_or_flattened() -> None:
     assert result["failed"][0]["reason"] == "broker_proof_unavailable:ValueError"
 
 
+def test_cancel_pending_orders_does_not_cancel_unknown_broker_status() -> None:
+    from nifty_scalper_bot.execution.operator_control import cancel_pending_orders
+
+    broker = _Broker()
+    manager = _Manager(broker)
+    broker.status = ""
+    outcome = cancel_pending_orders(manager)
+    assert outcome["cancelled"] == []
+    assert broker.cancel_calls == []
+
+
 def test_cancel_pending_orders_keeps_untracked_same_symbol_order() -> None:
     from nifty_scalper_bot.execution.operator_control import cancel_pending_orders
 
