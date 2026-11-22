@@ -178,6 +178,23 @@ class SimulatedBroker:
     def query_positions(self) -> dict[str, int]:
         return dict(self.positions)
 
+    def get_positions(self) -> list[dict[str, Any]]:
+        """Mirror the production net-position contract for LIVE simulation."""
+        return [
+            {
+                "tradingsymbol": symbol,
+                "quantity": quantity,
+                "product": "MIS",
+                "average_price": float(self._entry_cost.get(symbol, 0.0)),
+                "last_price": float(
+                    self._last_quotes.get(symbol, (0.0, 0.0, 0.0))[2]
+                    or self._entry_cost.get(symbol, 0.0)
+                ),
+            }
+            for symbol, quantity in self.positions.items()
+            if quantity != 0
+        ]
+
     def query_holdings(self) -> list[Any]:
         return []
 
