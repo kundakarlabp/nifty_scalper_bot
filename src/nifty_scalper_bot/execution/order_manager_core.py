@@ -31,6 +31,8 @@ Safe-edit notes:
   the existing entry gate stays blocked pending broker reconciliation.
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
+- Selected-option bid/ask admission applies to entry, not protective reductions;
+  an attached canonical bracket exclusively owns stop-triggered exits.
 - Parent-level broker margin screens reuse the existing PositionManager and
   RiskManager. They never place linked children or authorize LIVE baskets.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
@@ -3171,6 +3173,7 @@ class OrderManager:
             raise RuntimeError("Blocked non-NIFTY instrument")
         if (
             self._execution_mode_env() == "LIVE"
+            and normalized_intent not in {"EXIT", "REDUCE"}
             and self._is_selected_option_for_live_execution(normalized_symbol)
         ):
             quote = self._get_latest_quote_safe(normalized_symbol) or {}
@@ -9689,7 +9692,12 @@ class OrderManager:
         self._logger.info("Order monitoring thread stopped")
 
     def _check_force_stop_losses(self) -> None:
-        """Args: None. Returns: None. Raises: Exception."""
+        """Legacy stop fallback; canonical brackets alone own protected exits."""
+        # The bracket manager evaluates executable stops and reconciles exchange
+        # protection. A second LTP-only owner can race the resting stop.
+        canonical = getattr(self, "_bracket_manager", None)
+        if callable(getattr(canonical, "register_virtual_bracket", None)):
+            return
         self._logger.debug(
             "Entered OrderManager._check_force_stop_losses",
             extra={"event": "order_manager_force_sl_enter"},
@@ -9705,7 +9713,10 @@ class OrderManager:
                 stop_loss = getattr(pos, "stop_loss", None)
                 if qty <= 0 or stop_loss is None or float(stop_loss) <= 0:
                     continue
-                if getattr(pos, "state", None) == "force_closed_by_sl":
+                if getattr(pos, "state", None) in {
+                    "force_closed_by_sl",
+                    "force_exit_submitted",
+                }:
                     continue
                 ltp = None
                 _src = self._data_hub or self._market_data
@@ -9724,19 +9735,6 @@ class OrderManager:
                 )
                 if not sl_hit:
                     continue
-                pos.state = "force_closed_by_sl"
-                try:
-                    self._positions.save_state()
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in OrderManager._check_force_stop_losses: %s",
-                        exc,
-                        extra={
-                            "event": "order_manager_force_sl_state_error",
-                            "symbol": symbol,
-                        },
-                        exc_info=exc,
-                    )
                 self._logger.info(
                     f"❌ STOP LOSS HIT → FORCE EXIT | symbol={symbol} "
                     f"entry={float(getattr(pos, 'entry_price', 0.0)):.2f} "
@@ -9753,13 +9751,28 @@ class OrderManager:
                 )
                 exit_side = "SELL" if side == "LONG" else "BUY"
                 try:
-                    self._place_exit_order(
+                    exit_details = self._place_exit_order(
                         symbol=symbol,
                         side=exit_side,
                         quantity=abs(qty),
                         product=getattr(pos, "product", "MIS"),
                         tag="FORCE_SL_EXIT",
                     )
+                    if not str(getattr(exit_details, "order_id", "") or "").strip():
+                        self._logger.error(
+                            "LEGACY_FORCE_SL_NO_BROKER_ORDER_ID symbol=%s", symbol
+                        )
+                        continue
+                    # Broker acknowledgement is not a fill or a flat position.
+                    pos.state = "force_exit_submitted"
+                    try:
+                        self._positions.save_state()
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.error(
+                            "LEGACY_FORCE_SL_PENDING_PERSIST_FAILED symbol=%s error=%s",
+                            symbol,
+                            exc,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in OrderManager._check_force_stop_losses: %s",
