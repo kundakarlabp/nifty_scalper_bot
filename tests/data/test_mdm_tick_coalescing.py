@@ -2480,6 +2480,7 @@ def test_open_position_also_survives_basket_subscription_replacement() -> None:
     assert result["protected_tokens_retained"] == 1
     assert mdm._desired_tokens == {1001, 1002}
 
+
 def test_fast_arrival_rejects_retired_option_before_cache_publication() -> None:
     mdm = MarketDataManager(kite=None)
     mapping = _wire_symbols(mdm)

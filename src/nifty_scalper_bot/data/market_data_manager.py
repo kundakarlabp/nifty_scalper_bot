@@ -8331,10 +8331,9 @@ class MarketDataManager:
                 # Ordered normalization owns authoritative quote publication.
                 # Do not overwrite a previously verified quote with raw arrival.
                 current = self._tick_cache.get(canonical)
-                if isinstance(current, Mapping) and current.get(
-                    "source_timestamp_valid"
-                ) is True:
-                    return
+                if isinstance(current, Mapping):
+                    if current.get("source_timestamp_valid") is True:
+                        return
                 if token is not None:
                     token_int = int(token)
                     self._set_symbol_token_mapping(

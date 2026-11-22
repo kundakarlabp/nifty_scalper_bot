@@ -117,6 +117,7 @@ def test_depthless_untimestamped_protection_event_clears_prior_bid() -> None:
 
     assert manager._executable_exit_price(bracket, 110.0)[1] != "bid"
 
+
 def test_delayed_first_prefill_tick_remains_rejected_after_arming_grace() -> None:
     manager, bracket = _manager()
     bracket.entry_fill_ts = time.time() - 20.0
