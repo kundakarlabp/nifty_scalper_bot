@@ -345,6 +345,7 @@ def test_orphan_keeps_entry_block_when_durable_clear_fails() -> None:
     assert "old-bracket" in manager._ledger_blocked
     assert manager._release_store.cleared == []
 
+
 def test_flat_orphan_does_not_release_with_resting_exchange_stop() -> None:
     broker = _Broker(
         [],
