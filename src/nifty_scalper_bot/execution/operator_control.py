@@ -1,8 +1,10 @@
-"""Broker-aware operator control helpers for the canonical order runtime.
+"""Purpose: Broker-safe operator cancellation and emergency flattening.
 
-RuntimeOrderManager exposes explicit native methods that delegate here. Keeping
-the broker interaction helpers separate avoids import-time method replacement
-while preserving one order-entry and protective-exit authority.
+Responsibilities:
+- Accept RuntimeOrderManager operator requests without a parallel trading owner.
+- Validate LIVE net exposure, contract lots, and terminal cancellation readback.
+Boundaries: All order submissions use RuntimeOrderManager.place_order.
+Safety: Unknown broker position, lot or working stop holds replacement exits.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from contextlib import suppress
 from typing import Any, Iterable, Mapping
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
+from nifty_scalper_bot.execution.position_snapshot import decode_position_snapshot
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _OPEN_ORDER_STATUSES = {
@@ -144,19 +147,34 @@ def _cancel_order(self: Any, order_id: str) -> bool:
             ((), {"variety": "regular", "order_id": order_id}),
         ):
             try:
-                cancel(*args, **kwargs)
-                return True
+                # An explicit false/empty cancellation result is not success.
+                # Do not retry a potentially accepted call via another owner.
+                return bool(cancel(*args, **kwargs))
             except TypeError:
                 continue
             except Exception:
-                break
+                return False
     return False
 
 
 def cancel_pending_orders(self: Any) -> dict[str, Any]:
     cancelled: list[str] = []
     failed: list[str] = []
-    for row in _order_rows(self):
+    checker = getattr(self, "is_live_mode", None)
+    live = bool(checker()) if callable(checker) else False
+    if live:
+        # Local in-memory open orders can omit exchange-resident stops.
+        # In LIVE only the broker's complete orderbook may select cancellations.
+        broker = _broker(self)
+        fetcher = getattr(broker, "get_orders", None)
+        if not callable(fetcher):
+            raise ValueError("broker_orderbook_fetcher_unavailable")
+        rows = fetcher()
+        if not isinstance(rows, list):
+            raise ValueError("broker_orderbook_unavailable")
+    else:
+        rows = _order_rows(self)
+    for row in rows:
         status = _order_status(row)
         if status and status not in _OPEN_ORDER_STATUSES:
             continue
@@ -180,7 +198,9 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
     return {"cancelled": cancelled, "failed": failed}
 
 
-def _place_flatten_order(self: Any, symbol: str, qty: int) -> str | None:
+def _place_flatten_order(
+    self: Any, symbol: str, qty: int, *, product: str = "MIS"
+) -> str | None:
     side = "SELL" if qty > 0 else "BUY"
     quantity = abs(int(qty))
     if quantity <= 0 or not symbol:
@@ -192,7 +212,7 @@ def _place_flatten_order(self: Any, symbol: str, qty: int) -> str | None:
         order_type="MARKET",
         tag="EXIT_FLATTEN_TELEGRAM",
         check_risk=False,
-        product="MIS",
+        product=product,
         intent="REDUCE",
         strategy_name="operator_flatten",
     )
@@ -211,21 +231,94 @@ def flatten_all(
         trading_switch().pause()
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = (
-        cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
-    )
-
     submitted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    cancel_result: dict[str, Any] = {"cancelled": [], "failed": []}
+    checker = getattr(self, "is_live_mode", None)
+    try:
+        live = bool(checker()) if callable(checker) else False
+        broker = _broker(self)
+        initial: dict[str, tuple[int, str, int]] = {}
+        if live:
+            # Preflight FIRST: do not cancel a protected stop if broker truth,
+            # held product or authoritative instrument lot cannot be proven.
+            order_fetch = getattr(broker, "get_orders", None)
+            position_fetch = getattr(broker, "get_positions", None)
+            if not callable(order_fetch) or not callable(position_fetch):
+                raise ValueError("broker_readback_unavailable")
+            pre_orders = order_fetch()
+            if not isinstance(pre_orders, list):
+                raise ValueError("broker_orders_unavailable")
+            for row in decode_position_snapshot(position_fetch()).raw_rows():
+                symbol = _symbol(row)
+                qty = _quantity(row)
+                if qty == 0 or not symbol.startswith("NFO:NIFTY"):
+                    continue
+                if not symbol.endswith(("CE", "PE")):
+                    continue
+                product = str(_field(row, "product") or "").upper()
+                lot = int(self._lot_size_for_symbol(symbol))
+                if product not in {"MIS", "NRML"} or lot <= 0 or abs(qty) % lot:
+                    raise ValueError("broker_position_lot_or_product_invalid")
+                initial[symbol] = (qty, product, lot)
+        if cancel_first:
+            cancel_result = cancel_pending_orders(self)
+        if live:
+            remote_orders = order_fetch() if callable(order_fetch) else None
+            if not isinstance(remote_orders, list):
+                raise ValueError("broker_orders_unavailable_after_cancel")
+            snapshot = position_fetch() if callable(position_fetch) else None
+            positions = decode_position_snapshot(snapshot).raw_rows()
+        else:
+            remote_orders = []
+            positions = _position_rows(self)
+    except Exception as exc:
+        failed.append({"reason": f"broker_proof_unavailable:{type(exc).__name__}"})
+        return {"cancel": cancel_result, "submitted": submitted, "failed": failed}
+
     seen: set[str] = set()
-    for row in _position_rows(self):
+    for row in positions:
         symbol = _symbol(row)
         qty = _quantity(row)
         if not symbol or qty == 0 or symbol in seen:
             continue
         seen.add(symbol)
+        product = "MIS"
+        if live:
+            prior = initial.get(symbol)
+            product = str(_field(row, "product") or "").upper()
+            if prior is None:
+                failed.append(
+                    {"symbol": symbol, "reason": "new_or_unsupported_exposure"}
+                )
+                continue
+            old_qty, old_product, lot = prior
+            if (
+                product != old_product
+                or (old_qty > 0) != (qty > 0)
+                or abs(qty) > abs(old_qty)
+                or abs(qty) % lot
+            ):
+                failed.append({"symbol": symbol, "reason": "broker_residual_mismatch"})
+                continue
+            same_symbol_orders = [
+                order for order in remote_orders if _symbol(order) == symbol
+            ]
+            terminal = {"COMPLETE", "CANCELLED", "CANCELED", "REJECTED"}
+            if any(
+                _order_status(order) not in terminal for order in same_symbol_orders
+            ):
+                failed.append({"symbol": symbol, "reason": "cancel_unconfirmed"})
+                continue
+            cancelled_ids = set(cancel_result.get("cancelled", []))
+            if any(
+                _order_id(order) in cancelled_ids and _order_status(order) == "COMPLETE"
+                for order in same_symbol_orders
+            ):
+                failed.append({"symbol": symbol, "reason": "stop_filled_sync_pending"})
+                continue
         try:
-            order_id = _place_flatten_order(self, symbol, qty)
+            order_id = _place_flatten_order(self, symbol, qty, product=product)
         except Exception as exc:  # noqa: BLE001 - operator control boundary
             failed.append(
                 {
@@ -265,8 +358,8 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
         trading_switch().pause()
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = cancel_pending_orders(self)
-    flatten_result = flatten_all(self, reason=reason, cancel_first=False)
+    flatten_result = flatten_all(self, reason=reason, cancel_first=True)
+    cancel_result = flatten_result["cancel"]
     _logger(self).critical(
         "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s "
         "flattened=%s flatten_failed=%s",
