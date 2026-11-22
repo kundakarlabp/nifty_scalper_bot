@@ -8,6 +8,8 @@ Runtime role:
 - Computes the canonical readiness/arming decision (history + quote freshness)
   and pushes it to the runner, synchronizing DataHub and regime indicator
   readiness as genuine selected-option history becomes sufficient or regresses.
+- Requires both selected sides for evaluation, but permits execution only on
+  the separately verified side when the opposite option quote is unusable.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
@@ -10130,18 +10132,16 @@ async def _recompute_and_push_runtime_readiness(
     if selected_pe:
         execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
     selected_options_data_exec_ready = bool(
-        ce_market_exec_ready and pe_market_exec_ready
+        ce_market_exec_ready or pe_market_exec_ready
     )
-    all_selected_options_exec_ready = bool(
-        selected_options_data_exec_ready and execution_capacity_ready
-    )
+    selected_option_exec_ready = bool(ce_exec_ready or pe_exec_ready)
     live_orders_armed = bool(
         live_mode
         and market_open
         and evaluation_ready
         and context_exec_ready
         and broker_ready
-        and all_selected_options_exec_ready
+        and selected_option_exec_ready
         and not pipeline_overloaded
     )
     missing = []
@@ -10203,18 +10203,22 @@ async def _recompute_and_push_runtime_readiness(
             missing.append("ce_exec_bars_missing")
         if pe_bars < option_execution_min_bars:
             missing.append("pe_exec_bars_missing")
-    if ce_status and not ce_status.tradable_quote:
-        missing.append("selected_ce_quote_missing")
-    if pe_status and not pe_status.tradable_quote:
-        missing.append("selected_pe_quote_missing")
-    if ce_status and not ce_status.depth_available:
-        missing.append("selected_ce_depth_missing")
-    if pe_status and not pe_status.depth_available:
-        missing.append("selected_pe_depth_missing")
-    if (ce_status and not ce_status.tradable_quote) or (
-        pe_status and not pe_status.tradable_quote
-    ):
-        missing.append("selected_option_bid_ask_missing")
+    # A failed quote on the opposite side cannot disable a fully verified
+    # candidate. Its symbol-specific readiness stays False, and final order
+    # preflight still independently rejects that option's stale/absent quote.
+    if not selected_option_exec_ready:
+        if ce_status and not ce_status.tradable_quote:
+            missing.append("selected_ce_quote_missing")
+        if pe_status and not pe_status.tradable_quote:
+            missing.append("selected_pe_quote_missing")
+        if ce_status and not ce_status.depth_available:
+            missing.append("selected_ce_depth_missing")
+        if pe_status and not pe_status.depth_available:
+            missing.append("selected_pe_depth_missing")
+        if (ce_status and not ce_status.tradable_quote) or (
+            pe_status and not pe_status.tradable_quote
+        ):
+            missing.append("selected_option_bid_ask_missing")
     if not runner_running:
         missing.append("runner_not_running")
     if live_mode:
@@ -10282,7 +10286,7 @@ async def _recompute_and_push_runtime_readiness(
         },
         live_mode=live_mode,
         evaluation_ready=evaluation_ready,
-        execution_ready=all_selected_options_exec_ready
+        execution_ready=selected_option_exec_ready
         and context_exec_ready
         and broker_ready
         and not pipeline_overloaded
@@ -10360,7 +10364,7 @@ async def _recompute_and_push_runtime_readiness(
         normalized_decision.secondary_blockers,
         bool(data_hard_ready),
         bool(evaluation_ready),
-        bool(all_selected_options_exec_ready),
+        bool(selected_option_exec_ready),
         bool(live_orders_armed),
         extra={
             "event": "READINESS_BLOCKER_SUMMARY",
@@ -10373,7 +10377,7 @@ async def _recompute_and_push_runtime_readiness(
             "market_mode": get_runtime_market_mode(),
             "data_hard_ready": bool(data_hard_ready),
             "evaluation_ready": bool(evaluation_ready),
-            "execution_ready": bool(all_selected_options_exec_ready),
+            "execution_ready": bool(selected_option_exec_ready),
             "live_orders_armed": bool(live_orders_armed),
         },
     )
