@@ -266,6 +266,10 @@ def flatten_all(
                 lot = int(self._lot_size_for_symbol(symbol))
                 if product not in {"MIS", "NRML"} or lot <= 0 or abs(qty) % lot:
                     raise ValueError("broker_position_lot_or_product_invalid")
+                if symbol in initial:
+                    # A symbol-keyed flatten cannot safely disarm and reduce
+                    # two different broker product positions at once.
+                    raise ValueError("broker_position_product_ambiguous")
                 initial[symbol] = (qty, product, lot)
         if cancel_first:
             cancel_result = cancel_pending_orders(self)
