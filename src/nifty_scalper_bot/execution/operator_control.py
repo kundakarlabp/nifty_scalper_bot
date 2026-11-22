@@ -1,8 +1,10 @@
-"""Broker-aware operator control helpers for the canonical order runtime.
+"""Purpose: Broker-safe operator cancellation and emergency flattening.
 
-RuntimeOrderManager delegates operator requests here; LIVE flatten uses broker
-net positions and terminal orderbook proof before replacing an exchange stop.
-Unverified, odd-lot or wrong-product exposure never authorizes a new exit.
+Responsibilities:
+- Accept RuntimeOrderManager operator requests without a parallel trading owner.
+- Validate LIVE net exposure, contract lots, and terminal cancellation readback.
+Boundaries: All order submissions use RuntimeOrderManager.place_order.
+Safety: Unknown broker position, lot or working stop holds replacement exits.
 """
 
 from __future__ import annotations
