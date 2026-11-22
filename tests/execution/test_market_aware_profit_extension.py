@@ -1347,7 +1347,12 @@ def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
         for record in caplog.records
         if "ADAPTIVE_PROFIT_LOCK_SKIP" in record.message
     ]
-    assert len(lines) == 1
+    assert len(lines) == 1, (
+        f"trace_state={bracket.trailing_config.get('_adaptive_skip_reasons')} "
+        f"logger_enabled={profit_extension.LOGGER.isEnabledFor(logging.WARNING)} "
+        f"global_disable={logging.root.manager.disable} "
+        f"quote={manager._exit_quotes.get(SYMBOL)}"
+    )
     assert "reason=full_size_quote_unqualified" in lines[0]
     assert "top_bid_qty=20.0 required_qty=65" in lines[0]
     assert "top_bid_quantity_sufficient=False" in lines[0]
