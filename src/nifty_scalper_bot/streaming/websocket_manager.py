@@ -2,6 +2,7 @@
 
 Runtime role:
 - WebSocket token transport: set_tokens/subscribe/unsubscribe/reconnect replay.
+- Preserve KiteTicker host-local naive event time as an aware instant at ingress.
 - Consumes clean token sets from MDM.
 - Must not contain futures/options business logic."""
 
@@ -845,6 +846,27 @@ class WebSocketManager:
         if not isinstance(ticks, list):
             self._logger.error("Invalid ticks payload type: %s", type(ticks))
             return
+
+        # KiteTicker builds naive datetimes with datetime.fromtimestamp(),
+        # representing the host's LOCAL time, not necessarily NSE/IST time.
+        # Make their instant explicit before shared market-time normalization.
+        # Copy only affected ticks so raw packet evidence stays unchanged.
+        normalized_ticks = ticks
+        for index, tick in enumerate(ticks):
+            if not isinstance(tick, dict):
+                continue
+            corrected = tick
+            for field in ("exchange_timestamp", "last_trade_time", "timestamp"):
+                stamp = tick.get(field)
+                if isinstance(stamp, datetime) and stamp.tzinfo is None:
+                    if corrected is tick:
+                        corrected = tick.copy()
+                    corrected[field] = stamp.astimezone()
+            if corrected is not tick:
+                if normalized_ticks is ticks:
+                    normalized_ticks = list(ticks)
+                normalized_ticks[index] = corrected
+        ticks = normalized_ticks
 
         market_data_manager = getattr(self, "_market_data_manager", None)
         process_ticks = getattr(market_data_manager, "process_ticks", None)
