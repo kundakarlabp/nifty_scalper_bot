@@ -14490,7 +14490,11 @@ class OrderManager:
                     break
         open_units = abs(int(getattr(position, "quantity", 0) or 0))
         position_side = str(getattr(position, "side", "") or "").upper()
-        live = self.is_live_mode()
+        try:
+            live = bool(self.is_live_mode())
+        except AttributeError:
+            # Partially initialized recovery/test owners have no live authority.
+            live = False
         if live:
             # A locally held one-lot position can already be flat at Kite.
             # Read the signed broker NET position before any reducing order.
