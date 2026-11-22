@@ -14520,9 +14520,7 @@ class OrderManager:
                     str(row.raw.get("product") or "").strip().upper()
                     for row in matching_rows
                 }
-                if matching_rows and (
-                    not expected_product or "" in broker_products
-                ):
+                if matching_rows and (not expected_product or "" in broker_products):
                     return {
                         "reason": "exit_broker_product_unavailable",
                         "symbol": symbol,
