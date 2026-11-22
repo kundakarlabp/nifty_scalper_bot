@@ -6109,6 +6109,36 @@ class BracketManager:
                                 record["broker_confirmed_at"] = time.time()
                                 trail_proven = True
                             break
+        if confirmed:
+            # Only an exact broker-orderbook readback may promote an adaptive
+            # virtual proposal to the owner of acknowledged protection.
+            with self._lock:
+                config = getattr(bracket, "trailing_config", None)
+                pending = (
+                    config.get("_adaptive_profit_pending_confirmation")
+                    if isinstance(config, dict)
+                    else None
+                )
+                if (
+                    isinstance(pending, Mapping)
+                    and str(pending.get("order_id") or "") == order_id
+                    and bracket.exchange_stop_trigger_price is not None
+                ):
+                    try:
+                        proposed = float(pending.get("stop"))
+                        proven = float(bracket.exchange_stop_trigger_price)
+                    except (TypeError, ValueError):
+                        proposed = 0.0
+                        proven = 0.0
+                    if proposed > 0 and proven + 1e-6 >= proposed:
+                        config["_adaptive_profit_has_ratcheted"] = True
+                        config["_adaptive_profit_confirmed_order_id"] = order_id
+                        config.pop("_adaptive_profit_pending_confirmation", None)
+                        provenance = getattr(bracket, "trade_provenance", None)
+                        if isinstance(provenance, dict):
+                            trace = provenance.get("adaptive_profit_lock")
+                            if isinstance(trace, dict):
+                                trace["broker_orderbook_confirmed_stop"] = proven
         if confirmed and (prior_reason or trail_proven):
             LOGGER.info(
                 "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=%s symbol=%s "
