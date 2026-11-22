@@ -3283,8 +3283,9 @@ class OrderManager:
                 if o.symbol == normalized_symbol
                 and o.side == side
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
-                # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
-                # This prevents getting stuck forever if an order is lost in limbo
+                # Old local entry intents expire from dedup after 45 seconds.
+                # A reducing order remains blocked if the broker still shows
+                # a working same-side reduction, regardless of local age.
                 and (
                     is_system_exit
                     or current_time - self._timestamp_seconds(o.timestamp) < 45
