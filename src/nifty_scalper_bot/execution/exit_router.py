@@ -115,70 +115,69 @@ def plan_and_send_exit(
         )
         return ExitResult(False, None, BrokerReject.MARKET_CLOSED, attempts)
 
-    for attempt in range(1, max(retry_max, 1) + 1):
-        planned_product = product or "MIS"
-        validity = "IOC"
-        variety = "regular"
-        amo = False
-        note = "market"
-        if now_time >= mis_cutoff_time and planned_product == "MIS":
-            note = "mis_cutoff_reduction"
-        elif now_time >= eod_time:
-            note = "eod_reduction"
-        attempt_meta = ExitAttempt(
-            attempt=attempt,
-            product=planned_product,
-            validity=validity,
-            variety=variety,
-            is_amo=amo,
-            note=note,
-        )
-        attempts.append(attempt_meta)
+    attempt = 1  # retry_max is retained for API compatibility, not resubmission.
+    planned_product = product or "MIS"
+    validity = "IOC"
+    variety = "regular"
+    amo = False
+    note = "market"
+    if now_time >= mis_cutoff_time and planned_product == "MIS":
+        note = "mis_cutoff_reduction"
+    elif now_time >= eod_time:
+        note = "eod_reduction"
+    attempt_meta = ExitAttempt(
+        attempt=attempt,
+        product=planned_product,
+        validity=validity,
+        variety=variety,
+        is_amo=amo,
+        note=note,
+    )
+    attempts.append(attempt_meta)
+    logger.info(
+        "Condition met: exit_plan attempt=%s product=%s validity=%s variety=%s",
+        attempt,
+        planned_product,
+        validity,
+        variety,
+        extra={
+            "event": "plan_and_send_exit_attempt",
+            "symbol": symbol,
+            "attempt": attempt,
+            "product": planned_product,
+            "validity": validity,
+            "variety": variety,
+            "amo": amo,
+        },
+    )
+    ok, order_id, error_text = submit(planned_product, validity, variety)
+    if ok and order_id:
         logger.info(
-            "Condition met: exit_plan attempt=%s product=%s validity=%s variety=%s",
-            attempt,
-            planned_product,
-            validity,
-            variety,
+            "Condition met: exit_ok order_id=%s",
+            order_id,
             extra={
-                "event": "plan_and_send_exit_attempt",
+                "event": "plan_and_send_exit_success",
                 "symbol": symbol,
                 "attempt": attempt,
-                "product": planned_product,
-                "validity": validity,
-                "variety": variety,
-                "amo": amo,
+                "order_id": order_id,
             },
         )
-        ok, order_id, error_text = submit(planned_product, validity, variety)
-        if ok and order_id:
-            logger.info(
-                "Condition met: exit_ok order_id=%s",
-                order_id,
-                extra={
-                    "event": "plan_and_send_exit_success",
-                    "symbol": symbol,
-                    "attempt": attempt,
-                    "order_id": order_id,
-                },
-            )
-            return ExitResult(True, order_id, BrokerReject.UNKNOWN, attempts)
-        reason = parse_broker_error(error_text)
-        logger.warning(
-            "exit_retry reason=%s attempt=%s",
-            reason.value,
-            attempt,
-            extra={
-                "event": "plan_and_send_exit_retry",
-                "symbol": symbol,
-                "attempt": attempt,
-                "reason": reason.value,
-                "error": error_text,
-            },
-        )
-        # Neither a timeout nor a broker rejection proves the first order
-        # was absent. Canonical reconciliation must precede any replacement.
-        break
+        return ExitResult(True, order_id, BrokerReject.UNKNOWN, attempts)
+    reason = parse_broker_error(error_text)
+    logger.warning(
+        "exit_retry reason=%s attempt=%s",
+        reason.value,
+        attempt,
+        extra={
+            "event": "plan_and_send_exit_retry",
+            "symbol": symbol,
+            "attempt": attempt,
+            "reason": reason.value,
+            "error": error_text,
+        },
+    )
+    # Neither a timeout nor a broker rejection proves the first order
+    # was absent. Canonical reconciliation must precede any replacement.
     logger.error(
         "Failure in plan_and_send_exit: attempts_exhausted",
         extra={
