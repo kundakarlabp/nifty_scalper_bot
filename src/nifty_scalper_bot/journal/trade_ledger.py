@@ -5,6 +5,7 @@ one query-friendly row per trade_id from events already accepted by TradeJournal
 and writes that row in the same SQLite transaction.
 A validated bracket decision_ts supplies the causal signal time when approval
 journaling is delayed, independent of broker acknowledgment and fill times.
+Safety: this read model neither admits trades nor modifies broker order state.
 """
 
 from __future__ import annotations
