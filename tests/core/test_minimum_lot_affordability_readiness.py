@@ -255,7 +255,9 @@ async def test_both_selected_quotes_unusable_keep_live_orders_disarmed(
             )
         return original_snapshot(symbol)
 
-    monkeypatch.setattr(ctx.market_data_manager, "get_symbol_snapshot", no_option_quotes)
+    monkeypatch.setattr(
+        ctx.market_data_manager, "get_symbol_snapshot", no_option_quotes
+    )
     await app._recompute_and_push_runtime_readiness(ctx, reason="both_quotes_missing")
 
     assert ctx.evaluation_ready is True
