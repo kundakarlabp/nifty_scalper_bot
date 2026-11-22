@@ -6505,11 +6505,14 @@ class BracketManager:
             )
         with self._lock:
             if modified:
+                # An accepted modify response is not exchange protection.
+                # Keep the stop explicitly degraded until exact orderbook proof
+                # promotes this revision in _confirm_exchange_protective_stop.
                 bracket.exchange_stop_quantity = desired_quantity
                 bracket.exchange_stop_trigger_price = trigger
                 bracket.exchange_stop_limit_price = limit_price
                 bracket.exchange_stop_modify_count = modify_count + 1
-                bracket.exchange_stop_degraded_reason = None
+                bracket.exchange_stop_degraded_reason = "broker_stop_modify_unverified"
             else:
                 bracket.exchange_stop_degraded_reason = "modify_failed"
             bracket.updated_at = time.time()
