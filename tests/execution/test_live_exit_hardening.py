@@ -1181,7 +1181,9 @@ def test_flat_reconcile_never_clears_unproven_exchange_stop(
 
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
     assert manager.get_bracket("entry-1") is bracket
-    assert broker.cancel_calls == ["stop-unresolved"]
+    assert broker.cancel_calls == (
+        ["stop-unresolved"] if mismatch == "broker_reports_open" else []
+    )
 
 
 def test_actual_fill_resynchronizes_trailing_watermarks() -> None:
