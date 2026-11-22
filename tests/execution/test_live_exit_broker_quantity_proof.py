@@ -314,3 +314,33 @@ def test_legacy_exit_uses_the_native_durable_submission_owner(
     assert calls[0]["check_risk"] is False
     assert calls[0]["product"] == "MIS"
     assert calls[0]["quantity"] == 65
+
+
+def test_symbol_keyed_position_manager_refuses_dual_product_overwrite(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _broker = _manager(monkeypatch, tmp_path)
+    existing = manager._positions.get_position(SYMBOL)
+    assert existing is not None
+
+    with pytest.raises(PositionSnapshotError, match="multiple broker products"):
+        manager._positions._synchronize_managed_positions_from_broker(
+            [
+                {
+                    "symbol": SYMBOL,
+                    "quantity": 65,
+                    "product": "MIS",
+                    "average_price": 145.0,
+                    "last_price": 145.0,
+                },
+                {
+                    "symbol": SYMBOL,
+                    "quantity": -65,
+                    "product": "NRML",
+                    "average_price": 145.0,
+                    "last_price": 145.0,
+                },
+            ]
+        )
+
+    assert manager._positions.get_position(SYMBOL) is existing
