@@ -83,6 +83,42 @@ def _depth_quote(
     }
 
 
+def test_runtime_owns_quote_methods_without_facade_monkey_patching() -> None:
+    from nifty_scalper_bot.execution import order_manager_core
+    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
+
+    assert OrderManager is RuntimeOrderManager
+    for name in ("_extract_quote_diagnostics", "_get_latest_quote_safe"):
+        method = RuntimeOrderManager.__dict__[name]
+        assert method.__module__ == "nifty_scalper_bot.execution.runtime_order_manager"
+        assert method is not getattr(order_manager_core.OrderManager, name)
+
+
+def test_direct_runtime_quote_preflight_uses_cached_full_book_without_pull() -> None:
+    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
+
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = object.__new__(RuntimeOrderManager)
+    manager._data_hub = data_hub
+    manager.data_hub = None
+    manager._market_data = None
+    manager._market_data_manager = _TickProvider(
+        _depth_quote(symbol, bid_qty=130, ask_qty=195)
+    )
+    manager.market_data_manager = None
+
+    selected = manager._get_latest_quote_safe(symbol)
+    assert selected is not None
+    assert selected["depth"]["sell"][0]["quantity"] == 195
+    diagnostics = manager._extract_quote_diagnostics(selected)
+    assert diagnostics["bid"] == 99.90
+    assert diagnostics["ask"] == 100.10
+    assert diagnostics["bid_qty"] == 130
+    assert diagnostics["ask_qty"] == 195
+    assert data_hub.pull_attempts == 0
+
+
 def test_order_preflight_uses_freshest_cached_provider_quote() -> None:
     symbol = "NFO:NIFTY26AUG24050PE"
     manager = _manager(
