@@ -9,6 +9,8 @@ import sys
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 import nifty_scalper_bot.execution as execution
 from nifty_scalper_bot.execution import bracket_core, bracket_manager
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
@@ -235,6 +237,44 @@ def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) 
     assert bracket.exit_order_id == "EXIT-1"
     assert "EXIT-1" in bracket.linked_exit_order_ids
     assert manager.has_unresolved_exit() is False
+
+
+@pytest.mark.parametrize(
+    ("filled_quantity", "fill_price"),
+    [
+        (65.5, 95.0),
+        (float("inf"), 95.0),
+        (float("nan"), 95.0),
+        (65, float("inf")),
+        (65, float("nan")),
+        (65, -1.0),
+    ],
+)
+def test_malformed_broker_fill_never_claims_exit_completion(
+    tmp_path, monkeypatch, filled_quantity, fill_price
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    broker.statuses["EXIT-BAD"] = {"status": "COMPLETE", "average_price": 95.0}
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-BAD",
+        symbol=symbol,
+        side="SELL",
+        filled_quantity=filled_quantity,
+        fill_price=fill_price,
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    assert (
+        manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-BAD"]) is False
+    )
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_order_id is None
+    assert bracket.exit_executed is False
 
 
 def test_duplicate_managed_exit_fill_is_idempotent(tmp_path, monkeypatch) -> None:

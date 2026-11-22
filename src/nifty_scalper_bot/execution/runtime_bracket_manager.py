@@ -3,16 +3,22 @@
 LIVE execution uses the durable ledger release gate. PAPER/SHADOW/SIMULATION
 retain legacy close and hook behaviour so tests, dry runs and dashboards do not
 lose functionality when broker fill identity is intentionally absent.
+Safety: Broker exit-fill callbacks must have integral quantities and finite
+positive prices before bracket state can be correlated or closed.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from contextlib import suppress
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_core as _core
+from nifty_scalper_bot.execution.broker_position_evidence import (
+    normalize_authoritative_quantity,
+)
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
 
 
@@ -343,20 +349,13 @@ class RuntimeBracketManager(LedgerBracketManager):
             return True
 
         payload = payload if isinstance(payload, Mapping) else {}
-        try:
-            quantity = max(
-                0,
-                int(
-                    float(
-                        getattr(order, "filled_quantity", 0)
-                        or payload.get("filled_quantity")
-                        or payload.get("filled")
-                        or 0
-                    )
-                ),
-            )
-        except (TypeError, ValueError):
-            quantity = 0
+        raw_quantity = (
+            getattr(order, "filled_quantity", 0)
+            or payload.get("filled_quantity")
+            or payload.get("filled")
+        )
+        # Do not truncate a fractional broker fill to an apparently valid lot.
+        quantity = normalize_authoritative_quantity(raw_quantity)
         try:
             fill_price = float(
                 getattr(order, "fill_price", None)
@@ -365,9 +364,14 @@ class RuntimeBracketManager(LedgerBracketManager):
                 or payload.get("fill_price")
                 or 0.0
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             fill_price = 0.0
-        if quantity <= 0 or fill_price <= 0:
+        if (
+            quantity is None
+            or quantity <= 0
+            or not math.isfinite(fill_price)
+            or fill_price <= 0
+        ):
             _core.LOGGER.warning(
                 "EXIT_FILL_EVIDENCE_INCOMPLETE order_id=%s symbol=%s "
                 "filled_qty=%s fill_price=%s",
