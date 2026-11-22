@@ -5,7 +5,8 @@
 
 Responsibilities:
 - LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
-- Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Reconcile confirmed fills, exit state and product-qualified LIVE broker-flat
+  evidence before rearming.
 - Apply cumulative entry VWAP revisions to the existing ledger entry identity,
   then update the active bracket without a second entry activation.
 - Keep trading ledger persistence distinct from the live protective mechanism.
@@ -1413,7 +1414,10 @@ class LedgerBracketManager(CanonicalBracketManager):
                 return False
 
             if bracket.exit_state == _core.BracketExitLifecycle.CLOSED.value:
-                if not self._safe_position_flat(bracket.symbol):
+                if not self._safe_position_flat(
+                    bracket.symbol,
+                    product=bracket.product if self._is_live_execution() else None,
+                ):
                     return False
                 if self._fill_ledger is None:
                     return False
