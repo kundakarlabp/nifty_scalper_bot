@@ -6,8 +6,8 @@ lose functionality when broker fill identity is intentionally absent.
 Safety: Broker exit-fill callbacks require consistent lifecycle identity,
 valid fill evidence, and matching explicit broker product before correlation.
 LIVE managed exits reconcile against their bracket's exact broker product;
-restart-orphan release requires both exact broker-flat and durable fill-ledger
-completion, and retains product identity when available.
+restart-orphan release requires broker-flat, complete durable fills and a
+fresh broker orderbook without unresolved reducing orders.
 """
 
 from __future__ import annotations
@@ -139,6 +139,52 @@ class RuntimeBracketManager(LedgerBracketManager):
                 },
             )
             return False
+
+        # Flat exposure does not make a resting exchange stop harmless:
+        # after a restart the lost bracket can no longer cancel it safely.
+        # Require an uncached LIVE orderbook proving no working order for
+        # this exact symbol/product before lifting the entry freeze.
+        broker = getattr(self.order_manager, "_broker", None)
+        get_orders = getattr(broker, "get_orders", None)
+        if not callable(get_orders):
+            return False
+        try:
+            orders = (
+                get_orders(allow_cache_fallback=False)
+                if self._is_live_execution()
+                else get_orders()
+            )
+        except Exception as exc:  # noqa: BLE001 - stale/unknown is not proof
+            _core.LOGGER.error(
+                "FILL_LEDGER_ORPHAN_ORDERBOOK_UNAVAILABLE bracket_id=%s error=%s",
+                bracket_id,
+                exc,
+            )
+            return False
+        if not isinstance(orders, (list, tuple)) or any(
+            not isinstance(order, Mapping) for order in orders
+        ):
+            return False
+        target_symbol = _core.normalize_symbol(symbol)
+        for order in orders:
+            order_symbol = _core.normalize_symbol(
+                str(order.get("symbol") or order.get("tradingsymbol") or "")
+            )
+            if target_symbol and order_symbol and order_symbol != target_symbol:
+                continue
+            order_product = str(order.get("product") or "").strip().upper()
+            if product and order_product and order_product != product:
+                continue
+            status = str(order.get("status") or "").strip().upper()
+            if status not in _core._FILLED_STATUSES | _core._CANCELLED_STATUSES:
+                _core.LOGGER.warning(
+                    "FILL_LEDGER_ORPHAN_WORKING_ORDER_UNRESOLVED "
+                    "bracket_id=%s order_id=%s status=%s",
+                    bracket_id,
+                    str(order.get("order_id") or order.get("id") or ""),
+                    status or "UNKNOWN",
+                )
+                return False
 
         if self._release_store is None:
             return False
