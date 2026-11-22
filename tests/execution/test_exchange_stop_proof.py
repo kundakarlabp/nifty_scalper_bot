@@ -44,11 +44,8 @@ def _verify(evidence: dict) -> tuple[bool, str | None]:
     )
 
 
-@pytest.mark.parametrize("status", ["OPEN", "TRIGGER PENDING"])
-def test_exact_broker_orderbook_identity_proves_stop(status: str) -> None:
-    order = _valid_order()
-    order["status"] = status
-    assert _verify(order) == (True, None)
+def test_exact_pending_broker_orderbook_identity_proves_stop() -> None:
+    assert _verify(_valid_order()) == (True, None)
 
 
 @pytest.mark.parametrize(
@@ -76,6 +73,7 @@ def test_exact_broker_orderbook_identity_proves_stop(status: str) -> None:
         ("price", 104.0, "broker_stop_limit_mismatch"),
         ("price", 109.2, "broker_stop_limit_mismatch"),
         ("price", None, "broker_stop_limit_mismatch"),
+        ("status", "OPEN", "broker_stop_status_unverified:OPEN"),
         ("status", "MODIFY PENDING", "broker_stop_status_unverified:MODIFY PENDING"),
         ("status", "CANCELLED", "broker_stop_status_unverified:CANCELLED"),
     ],
