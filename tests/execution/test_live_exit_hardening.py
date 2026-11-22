@@ -1897,9 +1897,10 @@ def test_unknown_broker_stop_status_never_cancels_exchange_protection(
 
     monkeypatch.setattr(broker, "get_order_status", unavailable)
     monkeypatch.setattr(broker, "get_orders", unavailable, raising=False)
-    assert manager._retire_exchange_protective_stop(
-        bracket, reason="PROFIT_TARGET"
-    ) == "unresolved"
+    assert (
+        manager._retire_exchange_protective_stop(bracket, reason="PROFIT_TARGET")
+        == "unresolved"
+    )
     assert broker.cancel_calls == []
     assert bracket.exchange_stop_order_id == stop_id
     assert bracket.exchange_stop_degraded_reason is not None
@@ -1939,9 +1940,7 @@ def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
     manager._exchange_protective_stop_enabled = True
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
     monkeypatch.setattr(manager, "save_state", lambda: None)
-    broker.positions = [
-        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"}
-    ]
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65, "product": "MIS"}]
     bracket = manager.get_bracket("entry-1")
     assert bracket is not None
     assert manager._ensure_exchange_protective_stop(bracket)
@@ -1962,6 +1961,7 @@ def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
         ]
 
     monkeypatch.setattr(broker, "get_orders", current_orders, raising=False)
+
     def prebroker_reject(**_kwargs: Any) -> SimpleNamespace:
         order_manager._last_order_decision = {"broker_attempted": False}
         return SimpleNamespace(
