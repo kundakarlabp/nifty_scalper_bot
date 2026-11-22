@@ -328,3 +328,50 @@ def test_smc_does_not_invent_event_timestamp_for_external_structure_flag() -> No
     )
     assert enriched["bos_confirmed"] is True
     assert enriched.get("bos_ts_epoch") is None
+
+
+class _EmptyIndicatorEngine:
+    def history_count(self, _symbol):
+        return 0
+
+    def get_history(self, _symbol):
+        return []
+
+    def get_indicators(self, _symbol, _names=None):
+        return {}
+
+
+class _DeniedRegime:
+    def can_trade(self, **_kwargs):
+        return False
+
+    def get_filter_reasons(self):
+        return ("regime_unknown",)
+
+    def get_latest_snapshot(self):
+        return None
+
+
+def test_adaptive_regime_mode_cannot_override_explicit_canonical_veto() -> None:
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
+    )
+    manager._use_regime_adaptive = True
+
+    assert manager.generate_signal("NFO:NIFTY26NOV25700CE", 100.0) is None
+    assert manager._observability_counters["signals_blocked_by_regime"] == 1
+    assert manager._observability_counters["regime_gate_denials_observed"] == 1
+
+
+def test_regime_provider_failure_never_generates_option_signal() -> None:
+    class FailingRegime(_DeniedRegime):
+        def can_trade(self, **_kwargs):
+            raise RuntimeError("unavailable")
+
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=FailingRegime()
+    )
+    manager._use_regime_adaptive = True
+
+    assert manager.generate_signal("NFO:NIFTY26NOV25700CE", 100.0) is None
+    assert manager._observability_counters["signals_blocked_by_regime"] == 1

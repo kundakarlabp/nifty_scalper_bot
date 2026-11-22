@@ -211,3 +211,99 @@ async def test_stale_or_unfinished_history_never_proves_range() -> None:
     await manager.refresh_from_indicators()
     assert manager.get_raw_snapshot().regime == "unknown"
     assert manager.get_raw_snapshot().reason == "range_evidence_unverified"
+
+
+def test_raw_low_activity_blocks_while_stable_trend_is_held() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="confirmed_trend",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="low_activity",
+            confidence=0.75,
+            reason="current_low_activity",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_raw_snapshot().regime == "low_activity"
+    assert manager.can_trade(record_decision=False) is False
+    assert "regime_low_activity" in manager.get_filter_reasons()
+
+
+def test_raw_event_threshold_causes_immediate_safety_transition() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="confirmed_trend",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="event",
+            confidence=0.9,
+            reason="fresh_event",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.get_latest_snapshot().regime == "event"
+    assert manager.get_raw_snapshot().regime == "event"
+    assert manager.can_trade(record_decision=False) is False
+    assert any(
+        reason.startswith("regime_block_") for reason in manager.get_filter_reasons()
+    )
+
+
+@pytest.mark.parametrize("invalid_time", ("future", "nan"))
+def test_invalid_raw_regime_timestamp_fails_closed(invalid_time: str) -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    timestamp = time.time() + 3600.0 if invalid_time == "future" else float("nan")
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="unverified_clock",
+            updated_at=timestamp,
+            adjustments={},
+        )
+    )
+
+    assert manager.can_trade(record_decision=False) is False
+    assert "regime_timestamp_invalid" in manager.get_filter_reasons()
+
+
+def test_nonfinite_raw_regime_confidence_fails_closed() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=float("nan"),
+            reason="unverified_confidence",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.can_trade(record_decision=False) is False
+    assert "confidence_invalid" in manager.get_filter_reasons()
