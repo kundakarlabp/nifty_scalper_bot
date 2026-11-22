@@ -4,6 +4,7 @@
 Key responsibilities:
     - Re-export public order models and helpers from ``order_manager_core``.
     - Expose ``RuntimeOrderManager`` as the single production ``OrderManager``.
+    - Leave bracket provenance enrichment in the canonical runtime module.
 
 Operational constraints:
     - This facade must not add a second execution path or duplicate order state.
@@ -26,30 +27,9 @@ from nifty_scalper_bot.execution import (  # noqa: E402,I001
     runtime_order_manager as _runtime,
 )
 
-_original_enrich_trade_plan_exit_provenance = (
-    _runtime._enrich_trade_plan_exit_provenance
-)
-
-
-def _enrich_trade_plan_exit_provenance(plan):
-    """Carry the TradePlan bracket anchor contract into durable provenance."""
-    plan = _original_enrich_trade_plan_exit_provenance(plan)
-    try:
-        provenance = dict(getattr(plan, "trade_provenance", {}) or {})
-    except (TypeError, ValueError):
-        provenance = {}
-    provenance.setdefault(
-        "bracket_anchor_mode",
-        str(getattr(plan, "bracket_anchor_mode", "distance") or "distance"),
-    )
-    setattr(plan, "trade_provenance", provenance)
-    return plan
-
-
-# RuntimeOrderManager methods resolve this module-global helper at call time.
-# Patch that one helper rather than introducing a second submission path.
-_runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
 RuntimeOrderManager = _runtime.RuntimeOrderManager
+# Preserve the existing helper import without a wrapper or runtime mutation.
+_enrich_trade_plan_exit_provenance = _runtime._enrich_trade_plan_exit_provenance
 
 _original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
 

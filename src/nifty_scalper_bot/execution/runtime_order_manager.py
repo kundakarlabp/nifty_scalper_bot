@@ -5,6 +5,7 @@ Key responsibilities:
     - Apply unresolved-exit entry blocking before broker submission.
     - Run bounded entry recovery and finalize partial-entry reconciliation.
     - Reject costly VWAP continuation retries against durable first-attempt prices.
+    - Own bracket-anchor provenance directly without public-facade monkey-patching.
     - Delegate unchanged order operations to ``order_manager_core``.
 
 Operational constraints:
@@ -494,7 +495,14 @@ def _maybe_reprice_open_entry(
 
 
 def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
-    """Persist lot-aligned TP1/trailing inputs in TradePlan provenance."""
+    """Persist one canonical bracket-anchor and TP1/trailing provenance."""
+    provenance = getattr(plan, "trade_provenance", {})
+    enriched = dict(provenance) if isinstance(provenance, Mapping) else {}
+    enriched.setdefault(
+        "bracket_anchor_mode",
+        str(getattr(plan, "bracket_anchor_mode", "distance") or "distance"),
+    )
+    setattr(plan, "trade_provenance", enriched)
     if str(getattr(plan, "intent", "ENTRY") or "ENTRY").upper() not in {
         "ENTRY",
         "SCALE_IN",
@@ -502,8 +510,6 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     }:
         return plan
 
-    provenance = getattr(plan, "trade_provenance", {})
-    enriched = dict(provenance) if isinstance(provenance, Mapping) else {}
     quantity = _positive_int(getattr(plan, "quantity", 0))
     lot_size = _positive_int(getattr(plan, "resolved_lot_size", 0))
     entry = _positive_float(getattr(plan, "entry_price", None))
