@@ -416,3 +416,43 @@ def test_native_exit_fails_closed_when_existing_reduction_book_unreadable(
     assert result is None
     assert not broker.orders
     assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
+def test_exit_complete_but_position_snapshot_lag_never_reverses_exposure(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["filled-awaiting-positions"] = SimpleNamespace(
+        order_id="filled-awaiting-positions",
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc),
+    )
+    # Broker order is terminal, but a stale NET snapshot still reports 65.
+    broker.working_orders = [
+        {
+            "order_id": "filled-awaiting-positions",
+            "tradingsymbol": SYMBOL.split(":", 1)[-1],
+            "status": "COMPLETE",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "product": "MIS",
+        }
+    ]
+
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert not broker.orders
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
