@@ -72,3 +72,27 @@ def test_normal_open_market_exit_keeps_broker_product() -> None:
     assert result.ok
     assert result.order_id == "exit-65"
     assert calls == [("NRML", "IOC", "regular")]
+
+
+def test_retry_max_is_compatibility_only_and_never_resubmits() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def submit(product: str, validity: str, variety: str):
+        calls.append((product, validity, variety))
+        return False, None, "read timeout"
+
+    for retry_max in (0, 1, 999):
+        calls.clear()
+        result = plan_and_send_exit(
+            symbol=SYMBOL,
+            quantity=65,
+            product="MIS",
+            now_time=time(14, 30),
+            submit=submit,
+            logger=logging.getLogger(__name__),
+            retry_max=retry_max,
+        )
+        assert result.ok is False
+        assert calls == [("MIS", "IOC", "regular")]
+        assert len(result.attempts) == 1
+        assert result.attempts[0].attempt == 1
