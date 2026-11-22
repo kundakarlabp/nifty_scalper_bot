@@ -982,11 +982,7 @@ def _ratchet_stop(
         bracket.last_trail_price = float(ltp)
         bracket.trail_revision = int(getattr(bracket, "trail_revision", 0) or 0) + 1
         live_probe = getattr(manager, "_is_live_execution", None)
-        if (
-            reason == "adaptive_profit_lock"
-            and callable(live_probe)
-            and live_probe()
-        ):
+        if reason == "adaptive_profit_lock" and callable(live_probe) and live_probe():
             config = getattr(bracket, "trailing_config", None)
             if isinstance(config, dict):
                 config["_adaptive_profit_pending_confirmation"] = {
@@ -1845,9 +1841,10 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
             if isinstance(ownership_proof, Mapping)
             else None
         )
-        if isinstance(proof, Mapping) and _positive(
-            proof.get("broker_orderbook_confirmed_stop")
-        ) is not None:
+        if (
+            isinstance(proof, Mapping)
+            and _positive(proof.get("broker_orderbook_confirmed_stop")) is not None
+        ):
             return False
     if (
         str(getattr(bracket, "side", "")).upper() != "BUY"
