@@ -78,9 +78,12 @@ class CanonicalBracketManager(HardenedBracketManager):
     ) -> int | None:
         """Return product-qualified quantity, or ``None`` when exposure is unknown."""
         try:
-            if product is None:
-                return self._authoritative_position_quantity(symbol)
-            return self._authoritative_position_quantity(symbol, product=product)
+            quantity = (
+                self._authoritative_position_quantity(symbol)
+                if product is None
+                else self._authoritative_position_quantity(symbol, product=product)
+            )
+            return normalize_authoritative_quantity(quantity)
         except Exception as exc:  # noqa: BLE001
             _core.LOGGER.error(
                 "BROKER_POSITION_QUANTITY_UNKNOWN symbol=%s error=%s",
