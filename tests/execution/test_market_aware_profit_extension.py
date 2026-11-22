@@ -1511,3 +1511,23 @@ def test_live_adaptive_cannot_ratchet_from_quote_ahead_of_protection_tick(
 
     assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
     assert bracket.sl_trigger_price == 94.0
+
+def test_adaptive_does_not_discard_changed_book_with_same_second_timestamp(
+    monkeypatch,
+) -> None:
+    """Kite seconds do not uniquely identify two distinct option quote updates."""
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115.0)
+    timestamp = time()
+    quote.pop("received_at", None)
+    quote["exchange_timestamp"] = timestamp
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    first = bracket.trailing_config["_adaptive_profit_last_sample"]
+
+    _adaptive_market(manager, bid=116.0)
+    quote.pop("received_at", None)
+    quote["exchange_timestamp"] = timestamp
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 116.0)
+    assert bracket.trailing_config["_adaptive_profit_last_sample"] != first
