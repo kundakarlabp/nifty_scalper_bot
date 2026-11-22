@@ -1327,8 +1327,8 @@ def _trace_adaptive_no_ratchet(
                 "symbol": symbol,
             },
         )
-    except Exception:  # TEMPORARY DRAFT-ONLY diagnostic; restore before merge
-        raise
+    except Exception:  # noqa: BLE001 - telemetry must never affect protection
+        return
 
 
 def _adaptive_executable_bid(
