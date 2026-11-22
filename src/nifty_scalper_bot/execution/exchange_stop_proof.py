@@ -6,7 +6,7 @@ Responsibilities:
 - Return fixed diagnostic reason tokens without leaking broker payloads.
 
 Boundaries: Pure validation only; never queries brokers, submits, or modifies orders.
-Safety: A submitted/modified order ID alone is not protection proof.
+Safety: Only TRIGGER PENDING proves a resting stop; an OPEN order may already be triggered.
 """
 
 from __future__ import annotations
@@ -56,8 +56,10 @@ def verify_exchange_stop_order(
 ) -> tuple[bool, str | None]:
     """Return broker-confirmed protection or a fixed fail-closed reason code."""
     state = str(evidence.get("status") or "").strip().upper()
-    if state not in {"OPEN", "TRIGGER PENDING"}:
-        known = {"MODIFY PENDING", "CANCELLED", "REJECTED", "COMPLETE", "OPEN PENDING"}
+    if state != "TRIGGER PENDING":
+        # An OPEN SL may already have triggered into an unfilled limit order.
+        # Never promote it to evidence of a resting exchange stop.
+        known = {"OPEN", "MODIFY PENDING", "CANCELLED", "REJECTED", "COMPLETE", "OPEN PENDING"}
         safe_state = state if state in known else "UNKNOWN"
         return False, "broker_stop_status_unverified:" + safe_state
     broker_id = str(evidence.get("order_id") or evidence.get("id") or "").strip()
