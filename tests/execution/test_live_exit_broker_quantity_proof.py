@@ -111,7 +111,10 @@ def test_trusted_entry_instrument_lot_survives_temporary_resolver_outage(
 
     monkeypatch.setattr(manager, "_lot_size_for_symbol", offline)
 
-    assert manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS") is None
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
+        is None
+    )
 
 
 def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
