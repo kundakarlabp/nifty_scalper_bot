@@ -476,10 +476,10 @@ def test_matching_product_exit_callback_preserves_normal_closure(
         trade_lifecycle_id="ENTRY-1",
     )
 
-    assert manager.reconcile_filled_exit_order(
+    closed = manager.reconcile_filled_exit_order(
         order, {"status": "COMPLETE", "product": "MIS"}
-    ) is True
+    )
+    assert closed is True
     bracket = manager.get_bracket("ENTRY-1")
     assert bracket is not None
     assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
-
