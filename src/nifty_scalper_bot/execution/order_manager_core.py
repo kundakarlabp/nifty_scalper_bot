@@ -3284,14 +3284,19 @@ class OrderManager:
                 and o.side == side
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                 # Old local entry intents expire from dedup after 45 seconds.
-                # A reducing order remains blocked if the broker still shows
-                # a working same-side reduction, regardless of local age.
+                # A reducing order remains blocked on broker working reduction
+                # or a completed, still-unreconciled same-side exit.
                 and (
                     is_system_exit
                     or current_time - self._timestamp_seconds(o.timestamp) < 45
                 )
             ]
 
+            # A broker COMPLETE can precede its position-snapshot update.
+            # Keep that exact local pending exit frozen until it reconciles.
+            pending_ids = {
+                str(getattr(order, "order_id", "") or "") for order in pending_orders
+            }
             broker_has_live_pending = False
             if pending_orders:
                 broker_orders_fetch = getattr(self._broker, "get_orders", None)
@@ -3302,16 +3307,24 @@ class OrderManager:
                             raise ValueError("broker_orderbook_unavailable")
                         broker_has_live_pending = any(
                             isinstance(order, Mapping)
-                            and str(order.get("status") or "").upper()
-                            in {
-                                "OPEN",
-                                "OPEN PENDING",
-                                "TRIGGER PENDING",
-                                "PENDING",
-                                "VALIDATION PENDING",
-                                "PUT ORDER REQ RECEIVED",
-                                "MODIFY PENDING",
-                            }
+                            and (
+                                str(order.get("status") or "").upper()
+                                in {
+                                    "OPEN",
+                                    "OPEN PENDING",
+                                    "TRIGGER PENDING",
+                                    "PENDING",
+                                    "VALIDATION PENDING",
+                                    "PUT ORDER REQ RECEIVED",
+                                    "MODIFY PENDING",
+                                }
+                                or (
+                                    is_system_exit
+                                    and str(order.get("status") or "").upper()
+                                    in {"COMPLETE", "FILLED"}
+                                    and str(order.get("order_id") or "") in pending_ids
+                                )
+                            )
                             and (
                                 str(order.get("tradingsymbol") or "").upper()
                                 == normalized_symbol.split(":", 1)[-1]
