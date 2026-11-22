@@ -3305,7 +3305,9 @@ class OrderManager:
                 if callable(broker_orders_fetch):
                     try:
                         broker_orders = broker_orders_fetch()
-                        if not isinstance(broker_orders, list):
+                        if not isinstance(broker_orders, list) or any(
+                            not isinstance(row, Mapping) for row in broker_orders
+                        ):
                             raise ValueError("broker_orderbook_unavailable")
                         broker_has_live_pending = any(
                             isinstance(order, Mapping)
