@@ -3487,6 +3487,9 @@ class BracketManager:
             and self._is_live_execution()
             and self._exchange_protective_stop_enabled
             and not bracket.exchange_stop_order_id
+            and bracket.exit_state
+            != BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            and not getattr(bracket, "_market_escalation_fired", False)
         ):
             try:
                 signed_qty = self._authoritative_position_snapshot().quantity_for(
