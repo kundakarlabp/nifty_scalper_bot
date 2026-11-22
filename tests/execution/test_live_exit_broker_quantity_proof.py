@@ -22,6 +22,7 @@ class _Broker:
 
     def __init__(self, quantity: int = 65) -> None:
         self.quantity = quantity
+        self.position_product = "MIS"
         self.orders: list[dict] = []
         self.reply: dict = {"order_id": "new-order", "status": "SUBMITTED"}
         self.position_outage = False
@@ -29,7 +30,15 @@ class _Broker:
     def get_positions(self):
         if self.position_outage:
             raise RuntimeError("broker outage")
-        return {"net": [{"tradingsymbol": SYMBOL, "quantity": self.quantity}]}
+        return {
+            "net": [
+                {
+                    "tradingsymbol": SYMBOL,
+                    "quantity": self.quantity,
+                    "product": self.position_product,
+                }
+            ]
+        }
 
     def place_order(self, **kwargs):
         self.orders.append(dict(kwargs))
@@ -124,6 +133,32 @@ def test_legacy_exit_router_cannot_bypass_live_signed_broker_position_check(
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
     with pytest.raises(OrderPlacementError, match="Exit preflight blocked"):
+        manager._place_exit_order(
+            symbol=SYMBOL,
+            side="SELL",
+            quantity=65,
+            product="MIS",
+            tag="FORCE_SL_EXIT",
+        )
+
+    assert not broker.orders
+
+
+def test_live_exit_rejects_mismatched_broker_product_in_both_routes(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    broker.position_product = "NRML"
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    blocked = manager._validate_option_exit_quantity(
+        SYMBOL, "SELL", 65, "EXIT", "MIS"
+    )
+    assert blocked is not None
+    assert blocked["reason"] == "exit_broker_product_mismatch"
+    assert blocked["broker_product"] == "NRML"
+
+    with pytest.raises(OrderPlacementError, match="exit_broker_product_mismatch"):
         manager._place_exit_order(
             symbol=SYMBOL,
             side="SELL",
