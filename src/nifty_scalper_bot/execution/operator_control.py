@@ -127,7 +127,8 @@ def _quantity(row: Any) -> int:
 
 
 def _order_id(row: Any) -> str:
-    return str(_field(row, "order_id", "id", "exchange_order_id") or "").strip()
+    # Broker cancellations require a Kite order ID, never an exchange-order ID.
+    return str(_field(row, "order_id", "id") or "").strip()
 
 
 def _order_status(row: Any) -> str:
@@ -212,7 +213,9 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
             if not symbol.startswith("NFO:NIFTY") or not symbol.endswith(("CE", "PE")):
                 continue
         status = _order_status(row)
-        if status and status not in _OPEN_ORDER_STATUSES:
+        if live and status not in _OPEN_ORDER_STATUSES:
+            continue
+        if not live and status and status not in _OPEN_ORDER_STATUSES:
             continue
         order_id = _order_id(row)
         if not order_id or (live and order_id not in owned_ids):
