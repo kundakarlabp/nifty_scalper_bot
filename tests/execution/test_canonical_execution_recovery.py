@@ -128,7 +128,6 @@ def test_valid_empty_net_never_falls_through_to_day(tmp_path, monkeypatch) -> No
     assert manager._broker_position_quantity(SYMBOL) == 0
 
 
-
 def test_bracket_flatness_uses_exact_product_without_cross_product_netting(
     tmp_path, monkeypatch
 ) -> None:
@@ -155,9 +154,7 @@ def test_missing_broker_product_does_not_prove_live_bracket_flatness(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    broker = SimpleNamespace(
-        get_positions=lambda: [{"symbol": SYMBOL, "quantity": 0}]
-    )
+    broker = SimpleNamespace(get_positions=lambda: [{"symbol": SYMBOL, "quantity": 0}])
     manager = BracketManager(order_manager=SimpleNamespace(_broker=broker))
     stop(manager)
 
