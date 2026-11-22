@@ -191,3 +191,88 @@ def test_confirmed_stop_fill_cannot_cause_second_exit() -> None:
 
     assert not manager.sent
     assert result["submitted"] == []
+
+
+def test_emergency_preserves_unrelated_account_stops() -> None:
+    class MixedBroker(_Broker):
+        def get_orders(self):
+            return super().get_orders() + [
+                {
+                    "order_id": "unrelated-equity-stop",
+                    "tradingsymbol": "RELIANCE",
+                    "status": "TRIGGER PENDING",
+                    "transaction_type": "SELL",
+                },
+                {
+                    "order_id": "unrelated-banknifty-stop",
+                    "tradingsymbol": "BANKNIFTY26NOV45000CE",
+                    "status": "TRIGGER PENDING",
+                    "transaction_type": "SELL",
+                },
+            ]
+
+    broker = MixedBroker()
+    manager = _Manager(broker)
+
+    result = emergency_stop(manager, reason="nifty-only")
+
+    assert result["flatten"]["failed"] == []
+    assert broker.cancel_calls == ["stop-1"]
+    assert len(manager.sent) == 1
+    assert manager.sent[0]["symbol"] == SYMBOL
+
+
+def test_no_nifty_position_cannot_disarm_other_instrument() -> None:
+    class OtherOnlyBroker(_Broker):
+        def get_positions(self):
+            return {
+                "net": [
+                    {
+                        "tradingsymbol": "RELIANCE",
+                        "quantity": 100,
+                        "product": "MIS",
+                    }
+                ]
+            }
+
+        def get_orders(self):
+            return [
+                {
+                    "order_id": "equity-stop",
+                    "tradingsymbol": "RELIANCE",
+                    "status": "TRIGGER PENDING",
+                }
+            ]
+
+    broker = OtherOnlyBroker()
+    manager = _Manager(broker)
+    result = emergency_stop(manager, reason="nifty-only")
+
+    assert result["cancel"]["cancelled"] == []
+    assert result["flatten"]["submitted"] == []
+    assert broker.cancel_calls == []
+    assert manager.sent == []
+
+
+def test_post_cancel_readback_outage_reports_unverified_protection(caplog) -> None:
+    class ReadbackOutageBroker(_Broker):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def get_orders(self):
+            self.reads += 1
+            if self.reads == 3:
+                raise RuntimeError("broker orders unavailable after cancel")
+            return super().get_orders()
+
+    broker = ReadbackOutageBroker()
+    manager = _Manager(broker)
+
+    with caplog.at_level(logging.CRITICAL):
+        result = flatten_all(manager)
+
+    assert result["cancel"]["cancelled"] == ["stop-1"]
+    assert result["failed"]
+    assert manager.sent == []
+    assert "OPERATOR_FLATTEN_PROTECTION_UNVERIFIED" in caplog.text
