@@ -284,9 +284,7 @@ def flatten_all(
                 or abs(qty) > abs(old_qty)
                 or abs(qty) % lot
             ):
-                failed.append(
-                    {"symbol": symbol, "reason": "broker_residual_mismatch"}
-                )
+                failed.append({"symbol": symbol, "reason": "broker_residual_mismatch"})
                 continue
             same_symbol_orders = [
                 order for order in remote_orders if _symbol(order) == symbol
