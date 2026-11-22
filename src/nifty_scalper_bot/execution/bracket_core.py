@@ -6927,8 +6927,19 @@ class BracketManager:
         if not order_id:
             return False
 
-        # One owner decides whether a resting stop may be retired.  Both
-        # hardened and core exit paths enter here before a competing exit.
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            self._promote_filled_exchange_stop(bracket, reason=reason)
+            return True
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            return False
+
+        # A rearmed stop remains the sole reducing order during exit backoff,
+        # but its broker fill must still be recognized immediately.
         with self._lock:
             waiting_for_exit = not (
                 bracket.exit_order_id or bracket.pending_exit_order_id
@@ -6946,17 +6957,6 @@ class BracketManager:
             if waiting_for_exit:
                 self._log_exit_pending_summary_locked(bracket, now)
                 return True
-
-        status = self._get_broker_order_status(order_id)
-        status_text = str((status or {}).get("status") or "").strip().upper()
-        if status_text in _FILLED_STATUSES:
-            self._promote_filled_exchange_stop(bracket, reason=reason)
-            return True
-        if status_text in _CANCELLED_STATUSES:
-            with self._lock:
-                self._clear_exchange_stop_locked(bracket)
-                bracket.updated_at = time.time()
-            return False
 
         upper_reason = str(reason or "").upper()
         hard_stop = any(
