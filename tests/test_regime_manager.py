@@ -242,7 +242,7 @@ def test_raw_low_activity_blocks_while_stable_trend_is_held() -> None:
     assert "regime_low_activity" in manager.get_filter_reasons()
 
 
-def test_raw_event_threshold_vetoes_older_stable_trend() -> None:
+def test_raw_event_threshold_causes_immediate_safety_transition() -> None:
     manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
     manager.ingest_snapshot(
         RegimeSnapshot(
@@ -265,7 +265,7 @@ def test_raw_event_threshold_vetoes_older_stable_trend() -> None:
         )
     )
 
-    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_latest_snapshot().regime == "event"
     assert manager.get_raw_snapshot().regime == "event"
     assert manager.can_trade(record_decision=False) is False
     assert any(
