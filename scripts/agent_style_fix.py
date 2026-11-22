@@ -172,7 +172,7 @@ def _fix_legacy_lines(root: Path, *, base_ref: str, path: str, tool: str) -> boo
         if tag != "equal"
     )
     if any(
-        not any(max(first, start) <= min(last, end) for start, end in ranges)
+        not any(start <= first and last <= end for start, end in ranges)
         for first, last in changes
     ):
         target.write_text(original, encoding="utf-8")
