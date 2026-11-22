@@ -5,8 +5,9 @@ in-memory price history, stabilise regime transitions, and explain the accepted
 regime evidence in throttled runtime diagnostics.
 
 Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
-cannot inherit trade permission from an older stable regime. Raw EVENT/VOLATILE thresholds
-are checked at the latest observation, while hysteresis remains diagnostic.
+cannot inherit trade permission from an older stable regime. Raw EVENT and
+VOLATILE thresholds are checked at the latest observation; hysteresis remains
+diagnostic.
 A low ATR alone cannot license mean-reversion entries. Risk and broker gates
 remain owned by their execution components.
 """
