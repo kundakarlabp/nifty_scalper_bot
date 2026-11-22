@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from nifty_scalper_bot.data.time_contract import normalize_market_tick_timestamp
 from nifty_scalper_bot.streaming.market_data_hardening import (
     install_websocket_market_data_hardening,
 )
@@ -58,6 +59,59 @@ def test_ws_batch_ingress_suppresses_legacy_callback_when_mdm_present() -> None:
     assert mdm.processed == [[tick]]
     assert mdm.authoritative == [[tick]]
     assert callback_ticks == []
+
+
+def test_kite_sdk_naive_exchange_datetime_preserves_host_local_instant() -> None:
+    manager = WebSocketManager(
+        "api_key", "access_token", trading_window_enabled=False
+    )
+    mdm = _BatchMdm()
+    manager._market_data_manager = mdm
+
+    # The SDK uses datetime.fromtimestamp(epoch), producing host-local naive
+    # exchange timestamps. UTC hosts must NOT reinterpret them as IST.
+    epoch = datetime(2026, 11, 20, 8, 10, tzinfo=timezone.utc).timestamp()
+    naive = datetime.fromtimestamp(epoch)
+    raw = {
+        "instrument_token": 101,
+        "last_price": 123.45,
+        "exchange_timestamp": naive,
+        "last_trade_time": naive,
+    }
+    manager._on_ticks(object(), [raw])
+
+    delivered = mdm.processed[0][0]
+    assert delivered is not raw
+    assert raw["exchange_timestamp"].tzinfo is None
+    assert delivered["exchange_timestamp"].tzinfo is not None
+    assert delivered["exchange_timestamp"].timestamp() == epoch
+    assert delivered["last_trade_time"].timestamp() == epoch
+    assert normalize_market_tick_timestamp(delivered).timestamp.timestamp() == epoch
+    assert mdm.authoritative[0][0] is delivered
+
+
+def test_kite_sdk_already_aware_and_numeric_times_remain_unchanged() -> None:
+    manager = WebSocketManager(
+        "api_key", "access_token", trading_window_enabled=False
+    )
+    mdm = _BatchMdm()
+    manager._market_data_manager = mdm
+    aware = datetime(2026, 11, 20, 13, 40, tzinfo=ZoneInfo("Asia/Kolkata"))
+    aware_tick = {
+        "instrument_token": 101,
+        "last_price": 123.45,
+        "exchange_timestamp": aware,
+    }
+    epoch_tick = {
+        "instrument_token": 102,
+        "last_price": 124.45,
+        "exchange_timestamp": aware.timestamp(),
+    }
+    manager._on_ticks(object(), [aware_tick, epoch_tick])
+
+    assert mdm.processed[0] == [aware_tick, epoch_tick]
+    assert mdm.processed[0][0] is aware_tick
+    assert mdm.processed[0][1] is epoch_tick
 
 
 def test_ws_legacy_callback_still_runs_without_mdm_batch_ingress() -> None:
