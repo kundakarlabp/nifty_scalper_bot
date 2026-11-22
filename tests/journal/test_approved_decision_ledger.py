@@ -125,14 +125,10 @@ def test_bracket_decision_timestamp_must_be_finite_and_causally_recent() -> None
         "timestamp": 1_790_232_050.0,
     }
     for untrusted in (None, "nan", "inf", 1_790_232_051.0, 1_790_231_700.0):
-        row = _build_trade_row(
-            {**event, "meta": {"decision_ts": untrusted}}
-        )
+        row = _build_trade_row({**event, "meta": {"decision_ts": untrusted}})
         assert row is not None
         assert row["decision_at"] is None
 
-    approved = _build_trade_row(
-        {**event, "event_name": "candidate.approved"}
-    )
+    approved = _build_trade_row({**event, "event_name": "candidate.approved"})
     assert approved is not None
     assert approved["decision_at"] == event["timestamp"]
