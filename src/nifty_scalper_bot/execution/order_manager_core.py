@@ -14497,9 +14497,7 @@ class OrderManager:
                     "intent": intent,
                 }
             open_units = abs(net_qty)
-            position_side = "LONG" if net_qty > 0 else (
-                "SHORT" if net_qty < 0 else ""
-            )
+            position_side = "LONG" if net_qty > 0 else ("SHORT" if net_qty < 0 else "")
         elif open_units <= 0:
             broker_positions = getattr(self._broker, "query_positions", None)
             if callable(broker_positions):
