@@ -72,7 +72,7 @@ def normalize_authoritative_quantity(value: object) -> int | None:
 
 
 def _row_qty(row: Mapping[str, Any]) -> int | None:
-    value = row.get("quantity", row.get("net_quantity", row.get("net", 0)))
+    value = row.get("quantity", row.get("net_quantity", row.get("net")))
     return normalize_authoritative_quantity(value)
 
 
