@@ -1336,12 +1336,8 @@ def test_adaptive_skip_trace_names_undersized_depth_without_relaxing_stop(
             lines.append(format_string % args)
 
     monkeypatch.setattr(profit_extension.LOGGER, "warning", capture_warning)
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
 
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
@@ -1370,9 +1366,7 @@ def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
             lines.append(format_string % args)
 
     monkeypatch.setattr(profit_extension.LOGGER, "warning", capture_warning)
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
 
     assert len(lines) == 1
     assert "reason=full_size_quote_unqualified" in lines[0]
