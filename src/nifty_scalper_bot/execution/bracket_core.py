@@ -21,6 +21,7 @@ Runtime role:
   without resetting the original trade clock, protective ratchet or exit state.
 - Broker order completion cannot close a residual position; emergency market
   flatten verifies signed net residual after terminal cancellation.
+- LIVE bracket-specific flatness checks require exact broker product identity.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
   ghost cleanup: journal a proven protective exit before removing the bracket;
   defer on missing fill or unresolved ledger accounting.
@@ -1289,7 +1290,10 @@ class BracketManager:
         )
         if not (terminal_unfilled or authoritatively_absent):
             return
-        if not self._position_flat_for_symbol(bracket.symbol):
+        if not self._position_flat_for_symbol(
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        ):
             return
         LOGGER.warning(
             "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s "
@@ -5055,7 +5059,10 @@ class BracketManager:
                             self._escalate_exit_locked(
                                 bracket, "broker_order_rejected_or_cancelled"
                             )
-            flat = self._position_flat_for_symbol(bracket.symbol)
+            flat = self._position_flat_for_symbol(
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
         except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
             with self._lock:
                 bracket.last_exit_error = f"reconcile_failed:{type(exc).__name__}:{exc}"
@@ -5304,10 +5311,12 @@ class BracketManager:
         except (TypeError, ValueError, OverflowError):
             return 0
 
-    def _position_flat_for_symbol(self, symbol: str) -> bool:
+    def _position_flat_for_symbol(
+        self, symbol: str, *, product: str | None = None
+    ) -> bool:
         """Return flatness only from the canonical authoritative snapshot."""
         try:
-            return self._authoritative_position_quantity(symbol) == 0
+            return self._authoritative_position_quantity(symbol, product=product) == 0
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "EXIT_POSITION_SNAPSHOT_INVALID symbol=%s error=%s",
@@ -5513,11 +5522,13 @@ class BracketManager:
             status="FILLED" if closed else result.status.upper(),
         )
 
-    def _verify_position_closed(self, symbol: str) -> bool:
+    def _verify_position_closed(
+        self, symbol: str, *, product: str | None = None
+    ) -> bool:
         """Return true only when a complete authoritative snapshot proves flatness."""
         normalized = normalize_symbol(symbol)
         try:
-            return self._authoritative_position_quantity(normalized) == 0
+            return self._authoritative_position_quantity(normalized, product=product) == 0
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "POSITION_FLAT_VERIFY_FAILED symbol=%s error=%s",
@@ -5589,7 +5600,10 @@ class BracketManager:
                         True, False, str(order_id), 0, reason, status="UNFILLED"
                     )
 
-            position_closed = self._verify_position_closed(bracket.symbol)
+            position_closed = self._verify_position_closed(
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
             if not position_closed:
                 LOGGER.critical(
                     "MARKET_FALLBACK_POSITION_OPEN symbol=%s order_id=%s",
@@ -6707,7 +6721,9 @@ class BracketManager:
                 for value in timestamps
             ):
                 return False
-            if self._authoritative_position_quantity(bracket.symbol) != 0:
+            if self._authoritative_position_quantity(
+                bracket.symbol, product=bracket.product
+            ) != 0:
                 return False
             orders = get_orders(allow_cache_fallback=False)
         except Exception:  # noqa: BLE001 - missing broker proof is not expiry
@@ -7054,9 +7070,11 @@ class BracketManager:
             raise PositionSnapshotError("broker get_positions is unavailable")
         return decode_position_snapshot(getter())
 
-    def _authoritative_position_quantity(self, symbol: str) -> int:
+    def _authoritative_position_quantity(
+        self, symbol: str, *, product: str | None = None
+    ) -> int:
         snapshot = self._authoritative_position_snapshot()
-        return abs(int(snapshot.quantity_for(normalize_symbol(symbol))))
+        return abs(int(snapshot.quantity_for(normalize_symbol(symbol), product=product)))
 
     def _decode_restored_bracket(
         self,
