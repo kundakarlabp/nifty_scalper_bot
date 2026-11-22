@@ -3140,26 +3140,6 @@ class BracketManager:
         if not symbol or qty <= 0:
             return
 
-        # A retry backoff or terminal escalation must not cancel a freshly
-        # rearmed broker stop before a replacement exit is eligible to submit.
-        with self._lock:
-            waiting_for_exit = not (
-                bracket.exit_order_id or bracket.pending_exit_order_id
-            ) and (
-                (
-                    bracket.next_exit_attempt_at is not None
-                    and now < float(bracket.next_exit_attempt_at)
-                )
-                or (
-                    bracket.exit_state
-                    == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
-                    and not self._exit_continue_retry_after_escalation
-                )
-            )
-            if waiting_for_exit and bracket.exchange_stop_order_id:
-                self._log_exit_pending_summary_locked(bracket, now)
-                return
-
         if self._prepare_exchange_stop_for_exit(
             bracket,
             reason=reason,
@@ -6943,6 +6923,26 @@ class BracketManager:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
         if not order_id:
             return False
+
+        # One owner decides whether a resting stop may be retired.  Both
+        # hardened and core exit paths enter here before a competing exit.
+        with self._lock:
+            waiting_for_exit = not (
+                bracket.exit_order_id or bracket.pending_exit_order_id
+            ) and (
+                (
+                    bracket.next_exit_attempt_at is not None
+                    and now < float(bracket.next_exit_attempt_at)
+                )
+                or (
+                    bracket.exit_state
+                    == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                    and not self._exit_continue_retry_after_escalation
+                )
+            )
+            if waiting_for_exit:
+                self._log_exit_pending_summary_locked(bracket, now)
+                return True
 
         status = self._get_broker_order_status(order_id)
         status_text = str((status or {}).get("status") or "").strip().upper()
