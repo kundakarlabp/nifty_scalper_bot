@@ -59,7 +59,14 @@ def verify_exchange_stop_order(
     if state != "TRIGGER PENDING":
         # An OPEN SL may already have triggered into an unfilled limit order.
         # Never promote it to evidence of a resting exchange stop.
-        known = {"OPEN", "MODIFY PENDING", "CANCELLED", "REJECTED", "COMPLETE", "OPEN PENDING"}
+        known = {
+            "OPEN",
+            "MODIFY PENDING",
+            "CANCELLED",
+            "REJECTED",
+            "COMPLETE",
+            "OPEN PENDING",
+        }
         safe_state = state if state in known else "UNKNOWN"
         return False, "broker_stop_status_unverified:" + safe_state
     broker_id = str(evidence.get("order_id") or evidence.get("id") or "").strip()
