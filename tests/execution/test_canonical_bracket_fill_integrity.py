@@ -416,7 +416,6 @@ def test_live_tp1_does_not_resume_using_another_or_unlabeled_product(
     assert order_manager.place_calls == []
 
 
-
 def test_live_tp1_reconciles_mis_residual_despite_distinct_nrml_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
