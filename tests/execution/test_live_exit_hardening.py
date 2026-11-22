@@ -1903,6 +1903,7 @@ def test_unknown_broker_stop_status_never_cancels_exchange_protection(
     assert broker.cancel_calls == []
     assert bracket.exchange_stop_order_id == stop_id
     assert bracket.exchange_stop_degraded_reason is not None
+    assert manager.has_unresolved_exit()
 
 
 def test_confirming_stop_modify_observes_unverified_state_until_broker_proof(
