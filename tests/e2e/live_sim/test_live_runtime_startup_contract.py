@@ -784,6 +784,13 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 failure_message=f"startup tick did not reach DataHub for {sym}",
             )
         _pump_runtime(loop, ctx, iterations=20)
+        # This isolated RSI routing fixture does not construct an authoritative
+        # regime observation. Bypass only this regime gate in the test; the
+        # dedicated regime safety tests still enforce fail-closed production.
+        assert ctx.strategy_manager._regime_manager is not None  # noqa: SLF001
+        ctx.strategy_manager._regime_manager.set_regime_filter_bypass(
+            True
+        )  # noqa: SLF001
         # Runtime ownership is established by explicit registration above; start only after it.
         ctx.strategy_runner.start()
         _pump_runtime(loop, ctx, iterations=2)
