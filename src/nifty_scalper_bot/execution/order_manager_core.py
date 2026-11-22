@@ -3294,11 +3294,13 @@ class OrderManager:
 
             # A broker COMPLETE can precede its position-snapshot update.
             # Keep that exact local pending exit frozen until it reconciles.
+            # Also inspect LIVE broker orders when local memory has no pending
+            # record (restart, lost callback, or externally submitted reduction).
             pending_ids = {
                 str(getattr(order, "order_id", "") or "") for order in pending_orders
             }
             broker_has_live_pending = False
-            if pending_orders:
+            if pending_orders or (is_system_exit and self.is_live_mode()):
                 broker_orders_fetch = getattr(self._broker, "get_orders", None)
                 if callable(broker_orders_fetch):
                     try:
@@ -3317,6 +3319,11 @@ class OrderManager:
                                     "VALIDATION PENDING",
                                     "PUT ORDER REQ RECEIVED",
                                     "MODIFY PENDING",
+                                    "MODIFY VALIDATION PENDING",
+                                    "CANCEL PENDING",
+                                    "PARTIALLY FILLED",
+                                    "",
+                                    "UNKNOWN",
                                 }
                                 or (
                                     is_system_exit
@@ -3349,6 +3356,8 @@ class OrderManager:
                     except Exception:
                         broker_has_live_pending = True
                 elif is_system_exit and self.is_live_mode():
+                    # No complete broker book means no proof that an independent
+                    # reducing order is absent.  Do not send a second exit.
                     broker_has_live_pending = True
 
             if pending_orders and broker_has_live_pending and not is_system_exit:
@@ -3364,7 +3373,7 @@ class OrderManager:
                     allowed=False, block_reason="fresh_pending_order_exists"
                 )
                 return None
-            elif pending_orders and is_system_exit and broker_has_live_pending:
+            elif is_system_exit and broker_has_live_pending:
                 # A second SELL/BUY exit can reverse a still-working reduction.
                 # Retry only after broker-confirmed terminal cancellation or fill.
                 self._logger.critical(
