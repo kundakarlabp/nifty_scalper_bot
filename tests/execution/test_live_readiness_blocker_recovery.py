@@ -113,6 +113,7 @@ def test_runtime_block_persists_restart_reconciliation_identity(monkeypatch) -> 
         bracket_id="entry-1",
         exit_state="CLOSED",
         remaining_quantity=0,
+        product="MIS",
     )
 
     manager._block_ledger_release(
@@ -127,6 +128,7 @@ def test_runtime_block_persists_restart_reconciliation_identity(monkeypatch) -> 
         "bracket_id": "entry-1",
         "exit_state": "CLOSED",
         "remaining_quantity": 0,
+        "product": "MIS",
     }
 
 
@@ -175,6 +177,81 @@ def test_legacy_orphan_without_symbol_retains_block_for_open_position() -> None:
     manager = _orphan_manager(
         payload={},
         broker=_Broker({"net": [{"symbol": SYMBOL, "quantity": 50}]}),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_product_qualified_orphan_releases_without_waiting_for_other_product() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
+            ]
+        ),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert manager._ledger_blocked == {}
+    assert manager._release_store.cleared == ["old-bracket"]
+
+
+def test_product_qualified_orphan_keeps_block_when_its_position_is_open() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 65},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 0},
+            ]
+        ),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_product_qualified_orphan_rejects_unlabeled_broker_position() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker([{"symbol": SYMBOL, "quantity": 0}]),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_legacy_orphan_does_not_net_across_products() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL},
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
+            ]
+        ),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_orphan_with_invalid_persisted_product_remains_blocked() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "INVALID"},
+        broker=_Broker([]),
     )
 
     manager._retry_blocked_releases()
