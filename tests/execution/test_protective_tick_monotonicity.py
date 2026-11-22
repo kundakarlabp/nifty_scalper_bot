@@ -107,6 +107,12 @@ def test_depthless_untimestamped_protection_event_clears_prior_bid() -> None:
         tick=_full_tick(110.0, 109.8, now),
         defer_submission=True,
     )
-    manager.on_tick(SYMBOL, 110.0, exchange_ts=None, defer_submission=True)
+    manager.on_tick(
+        SYMBOL,
+        110.0,
+        exchange_ts=None,
+        defer_submission=True,
+        tick={"symbol": SYMBOL, "ltp": 110.0},
+    )
 
     assert manager._executable_exit_price(bracket, 110.0)[1] != "bid"
