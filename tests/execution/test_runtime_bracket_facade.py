@@ -392,3 +392,93 @@ def test_external_exit_does_not_steal_bracket_while_broker_nonflat(
     assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
     assert bracket.exit_order_id is None
     assert bracket.exit_reason is None
+
+@pytest.mark.parametrize(
+    ("bracket_id", "linked_entry_order_id", "trade_lifecycle_id"),
+    [
+        ("OTHER", "ENTRY-1", "ENTRY-1"),
+        ("ENTRY-1", "OTHER", "ENTRY-1"),
+        ("ENTRY-1", "ENTRY-1", "OTHER"),
+    ],
+)
+def test_conflicting_exit_identity_never_correlates_filled_bracket(
+    tmp_path,
+    monkeypatch,
+    bracket_id: str,
+    linked_entry_order_id: str,
+    trade_lifecycle_id: str,
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-CONFLICT",
+        symbol=symbol,
+        side="SELL",
+        filled_quantity=65,
+        fill_price=95.0,
+        bracket_id=bracket_id,
+        linked_entry_order_id=linked_entry_order_id,
+        trade_lifecycle_id=trade_lifecycle_id,
+    )
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+
+    assert manager.reconcile_filled_exit_order(order, {"status": "COMPLETE"}) is False
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_order_id is None
+    assert bracket.exit_executed is False
+
+
+@pytest.mark.parametrize("product_source", ["payload", "order"])
+def test_broker_exit_product_conflict_never_closes_bracket(
+    tmp_path, monkeypatch, product_source: str
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-WRONG-PRODUCT",
+        symbol=symbol,
+        side="SELL",
+        filled_quantity=65,
+        fill_price=95.0,
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+    payload: dict[str, Any] = {"status": "COMPLETE"}
+    if product_source == "payload":
+        payload["product"] = "NRML"
+    else:
+        order.product = "NRML"
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+
+    assert manager.reconcile_filled_exit_order(order, payload) is False
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_order_id is None
+    assert bracket.exit_executed is False
+
+
+def test_matching_product_exit_callback_preserves_normal_closure(
+    tmp_path, monkeypatch
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-MIS",
+        symbol=symbol,
+        side="SELL",
+        filled_quantity=65,
+        fill_price=95.0,
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    assert manager.reconcile_filled_exit_order(
+        order, {"status": "COMPLETE", "product": "MIS"}
+    ) is True
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
+
