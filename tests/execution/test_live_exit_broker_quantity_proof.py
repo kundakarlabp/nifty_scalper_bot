@@ -45,9 +45,7 @@ def _manager(monkeypatch, tmp_path, broker=None) -> tuple[OrderManager, _Broker]
         position_manager=PositionManager(str(tmp_path / "positions.json")),
         rate_limiter=RateLimiter(),
     )
-    manager._positions.open_position(
-        SYMBOL, "LONG", 65, 145.0, order_id="entry-1"
-    )
+    manager._positions.open_position(SYMBOL, "LONG", 65, 145.0, order_id="entry-1")
     monkeypatch.setattr(manager, "is_live_mode", lambda: True)
     return manager, broker
 
@@ -56,9 +54,7 @@ def _manager(monkeypatch, tmp_path, broker=None) -> tuple[OrderManager, _Broker]
 def test_live_exit_never_trusts_stale_local_65_unit_position(
     monkeypatch, tmp_path, broker_quantity
 ) -> None:
-    manager, broker = _manager(
-        monkeypatch, tmp_path, _Broker(quantity=broker_quantity)
-    )
+    manager, broker = _manager(monkeypatch, tmp_path, _Broker(quantity=broker_quantity))
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
     result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
