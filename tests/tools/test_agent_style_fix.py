@@ -98,3 +98,64 @@ def test_style_fix_does_not_rewrite_legacy_debt(monkeypatch) -> None:
         "black-skipped-legacy-debt",
     )
     assert calls == []
+
+
+def test_style_fix_repairs_only_changed_legacy_lines(tmp_path, monkeypatch) -> None:
+    module = _load_style_module()
+    target = tmp_path / "tests" / "legacy.py"
+    target.parent.mkdir()
+    target.write_text("old  = 1\nnew  = 2\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_base_content", lambda *_a, **_kw: "old  = 1\n")
+    monkeypatch.setattr(module, "_snapshot_clean", lambda *_a, **_kw: False)
+
+    def fake_run(argv, **_kwargs):
+        result = _Result()
+        if argv[:2] == ["git", "diff"]:
+            result.stdout = "@@ -2 +2 @@\n"
+        elif "black" in argv:
+            assert "--line-ranges" in argv
+            target.write_text("old  = 1\nnew = 2\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(module, "_run", fake_run)
+    actions = module._fix_file(tmp_path, base_ref="origin/main", path="tests/legacy.py")
+
+    assert actions == ("ruff-legacy-touched", "black-legacy-touched")
+    assert target.read_text(encoding="utf-8") == "old  = 1\nnew = 2\n"
+
+
+def test_style_fix_reverts_legacy_changes_outside_scope(tmp_path, monkeypatch) -> None:
+    module = _load_style_module()
+    target = tmp_path / "tests" / "legacy.py"
+    target.parent.mkdir()
+    original = "old  = 1\nnew  = 2\n"
+    target.write_text(original, encoding="utf-8")
+
+    def fake_run(argv, **_kwargs):
+        if argv[:2] == ["git", "diff"]:
+            result = _Result()
+            result.stdout = "@@ -2 +2 @@\n"
+            return result
+        target.write_text("old = 1\nnew = 2\n", encoding="utf-8")
+        return _Result()
+
+    monkeypatch.setattr(module, "_run", fake_run)
+    assert not module._fix_legacy_lines(
+        tmp_path, base_ref="origin/main", path="tests/legacy.py", tool="black"
+    )
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_snapshot_style_checks_use_repository_config(monkeypatch) -> None:
+    module = _load_style_module()
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return _Result()
+
+    monkeypatch.setattr(module, "_run", fake_run)
+    assert module._snapshot_clean(ROOT, content="x=1\n", tool="ruff")
+    assert module._snapshot_clean(ROOT, content="x=1\n", tool="black")
+    assert all("--config" in args for args in calls)
+    assert all(str(ROOT / "pyproject.toml") in args for args in calls)

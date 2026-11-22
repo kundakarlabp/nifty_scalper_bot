@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import difflib
+import re
 import subprocess
 import sys
 import tempfile
@@ -84,12 +86,94 @@ def _snapshot_clean(
         path = Path(tmp) / "snapshot.py"
         path.write_text(content, encoding="utf-8")
         if tool == "ruff":
-            argv = [sys.executable, "-m", "ruff", "check", str(path)]
+            argv = [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--config",
+                str(root / "pyproject.toml"),
+                str(path),
+            ]
         elif tool == "black":
-            argv = [sys.executable, "-m", "black", "--check", str(path)]
+            argv = [
+                sys.executable,
+                "-m",
+                "black",
+                "--check",
+                "--config",
+                str(root / "pyproject.toml"),
+                str(path),
+            ]
         else:
             raise ValueError(f"unsupported style tool: {tool}")
         return _run(argv, cwd=root).returncode == 0
+
+
+def _fix_legacy_lines(root: Path, *, base_ref: str, path: str, tool: str) -> bool:
+    """Keep automatic style changes only when confined to modified lines."""
+    target = root / path
+    if not target.is_file():
+        return False
+    diff = _run(
+        ["git", "diff", "--unified=0", "--diff-filter=ACMR", base_ref, "--", path],
+        cwd=root,
+        capture_output=True,
+    )
+    if diff.returncode != 0:
+        raise RuntimeError(diff.stderr.strip() or f"git diff failed for {path}")
+
+    ranges: list[tuple[int, int]] = []
+    for line in diff.stdout.splitlines():
+        match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+        if match is not None:
+            length = int(match.group(2) or "1")
+            if length:
+                start = int(match.group(1))
+                ranges.append((start, start + length - 1))
+    if not ranges:
+        return False
+
+    original = target.read_text(encoding="utf-8")
+    if tool == "black":
+        selected = [
+            item
+            for start, end in ranges
+            for item in ("--line-ranges", f"{start}-{end}")
+        ]
+        argv = [
+            sys.executable,
+            "-m",
+            "black",
+            "--config",
+            "pyproject.toml",
+            *selected,
+            path,
+        ]
+    else:
+        argv = [sys.executable, "-m", "ruff", "check", "--fix", path]
+
+    result = _run(argv, cwd=root, capture_output=True)
+    if result.returncode not in ((0, 1) if tool == "ruff" else (0,)):
+        target.write_text(original, encoding="utf-8")
+        raise RuntimeError(result.stderr.strip() or f"{tool} failed for {path}")
+
+    updated = target.read_text(encoding="utf-8")
+    changes = (
+        (i1 + 1, max(i1 + 1, i2))
+        for tag, i1, i2, _, _ in difflib.SequenceMatcher(
+            a=original.splitlines(keepends=True),
+            b=updated.splitlines(keepends=True),
+        ).get_opcodes()
+        if tag != "equal"
+    )
+    if any(
+        not any(max(first, start) <= min(last, end) for start, end in ranges)
+        for first, last in changes
+    ):
+        target.write_text(original, encoding="utf-8")
+        return False
+    return True
 
 
 def _fix_file(root: Path, *, base_ref: str, path: str) -> tuple[str, ...]:
@@ -111,7 +195,8 @@ def _fix_file(root: Path, *, base_ref: str, path: str) -> tuple[str, ...]:
             raise RuntimeError(f"Ruff failed for {path}")
         actions.append("ruff")
     else:
-        actions.append("ruff-skipped-legacy-debt")
+        changed = _fix_legacy_lines(root, base_ref=base_ref, path=path, tool="ruff")
+        actions.append("ruff-legacy-touched" if changed else "ruff-skipped-legacy-debt")
 
     black_safe = is_new or _snapshot_clean(
         root,
@@ -127,7 +212,10 @@ def _fix_file(root: Path, *, base_ref: str, path: str) -> tuple[str, ...]:
             raise RuntimeError(f"Black failed for {path}")
         actions.append("black")
     else:
-        actions.append("black-skipped-legacy-debt")
+        changed = _fix_legacy_lines(root, base_ref=base_ref, path=path, tool="black")
+        actions.append(
+            "black-legacy-touched" if changed else "black-skipped-legacy-debt"
+        )
 
     return tuple(actions)
 

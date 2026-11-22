@@ -122,6 +122,8 @@ The public façade delegates to the risk-aware focused ring: it runs delta-aware
 
 `python scripts/agent_task.py check --files ...` is the single fast pre-push command for hosts with a working tree. It performs safe style fixing plus the risk-aware focused validation ring.
 
+For GitHub-connector-only work, complete and review the patch before the first commit. Draft CI is read-only (`--no-style-fix`); it cannot repair formatting. When a working tree is available, `agent_task.py check` formats and checks modified lines before publication, including safe limited changes in legacy files.
+
 For GitHub-connector-only work, use the staged remote equivalent:
 
 1. finish the coherent branch patch before opening the PR when practical;
