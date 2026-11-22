@@ -269,3 +269,45 @@ def test_multi_product_snapshot_rejects_missing_or_duplicate_identity() -> None:
                 {"symbol": SYMBOL, "quantity": 0, "product": "MIS"},
             ]
         )
+
+
+def test_legacy_exit_uses_the_native_durable_submission_owner(
+    monkeypatch, tmp_path
+) -> None:
+    import nifty_scalper_bot.execution.order_manager_core as core
+
+    manager, _broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    calls: list[dict] = []
+    manager._orders["native-exit"] = SimpleNamespace(order_id="native-exit")
+
+    def native_place(**kwargs):
+        calls.append(kwargs)
+        return "native-exit"
+
+    def reject_parallel_path(**_kwargs):
+        pytest.fail("legacy exit must not bypass the native owner")
+
+    monkeypatch.setattr(manager, "place_order", native_place)
+    monkeypatch.setattr(manager, "_place_single_order", reject_parallel_path)
+
+    def route(**kwargs):
+        ok, order_id, _error = kwargs["submit"]("MIS", "IOC", "regular")
+        return SimpleNamespace(
+            ok=ok,
+            order_id=order_id,
+            reason=None,
+            attempts=[SimpleNamespace(attempt=1)],
+        )
+
+    monkeypatch.setattr(core, "plan_and_send_exit", route)
+    details = manager._place_exit_order(
+        symbol=SYMBOL, side="SELL", quantity=65, product="MIS", tag="FORCE_SL_EXIT"
+    )
+
+    assert details.order_id == "native-exit"
+    assert len(calls) == 1
+    assert calls[0]["intent"] == "EXIT"
+    assert calls[0]["check_risk"] is False
+    assert calls[0]["product"] == "MIS"
+    assert calls[0]["quantity"] == 65
