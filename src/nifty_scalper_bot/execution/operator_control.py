@@ -297,8 +297,7 @@ def flatten_all(
                 continue
             cancelled_ids = set(cancel_result.get("cancelled", []))
             if any(
-                _order_id(order) in cancelled_ids
-                and _order_status(order) == "COMPLETE"
+                _order_id(order) in cancelled_ids and _order_status(order) == "COMPLETE"
                 for order in same_symbol_orders
             ):
                 failed.append({"symbol": symbol, "reason": "stop_filled_sync_pending"})
