@@ -122,8 +122,10 @@ def test_explicit_invalid_or_receipt_only_source_cannot_authorize_live_book() ->
     manager = _manager(data_hub=_TickProvider({}), mdm=_TickProvider({}))
     for provenance in (
         {"timestamp_quality": "synthetic"},
+        {"timestamp_quality": "received_at"},
         {"source_timestamp_valid": False},
         {"timestamp_source": "received_at", "source_timestamp_valid": True},
+        {"timestamp_source": "received_at_fallback", "source_timestamp_valid": True},
     ):
         quote = {**_depth_quote(symbol), **provenance}
         diagnostics = manager._extract_quote_diagnostics(quote)
