@@ -3254,7 +3254,11 @@ class OrderManager:
         )
         if is_option_exit:
             exit_validation = self._validate_option_exit_quantity(
-                normalized_symbol, normalized_side, int(quantity), normalized_intent
+                normalized_symbol,
+                normalized_side,
+                int(quantity),
+                normalized_intent,
+                product,
             )
             if exit_validation is not None:
                 _log_order_decision(
@@ -12114,7 +12118,7 @@ class OrderManager:
         # directly. Apply the same broker-backed guard as public place_order.
         if normalize_symbol(symbol).endswith(("CE", "PE")):
             blocked = self._validate_option_exit_quantity(
-                symbol, side, quantity, "EXIT"
+                symbol, side, quantity, "EXIT", product or "MIS"
             )
             if blocked is not None:
                 raise OrderPlacementError(
@@ -14487,7 +14491,12 @@ class OrderManager:
         return True
 
     def _validate_option_exit_quantity(
-        self, symbol: str, side: str, quantity: int, intent: str
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        intent: str,
+        product: str | None = None,
     ) -> dict[str, Any] | None:
         getter = getattr(self._positions, "get_position", None)
         position = None
@@ -14514,13 +14523,36 @@ class OrderManager:
             try:
                 if not callable(fetcher):
                     raise ValueError("broker_position_fetcher_unavailable")
-                net_qty = decode_position_snapshot(fetcher()).quantity_for(symbol)
+                snapshot = decode_position_snapshot(fetcher())
+                net_qty = snapshot.quantity_for(symbol)
+                broker_product = next(
+                    (
+                        str(row.raw.get("product") or "").strip().upper()
+                        for row in snapshot.rows
+                        if row.symbol == normalize_symbol(symbol)
+                    ),
+                    "",
+                )
             except Exception as exc:  # noqa: BLE001 - unknown is not flat
                 return {
                     "reason": "exit_broker_position_unavailable",
                     "symbol": symbol,
                     "requested_exit_units": quantity,
                     "error_type": type(exc).__name__,
+                    "intent": intent,
+                }
+            expected_product = str(product or "").strip().upper()
+            if (
+                broker_product
+                and expected_product
+                and broker_product != expected_product
+            ):
+                return {
+                    "reason": "exit_broker_product_mismatch",
+                    "symbol": symbol,
+                    "broker_product": broker_product,
+                    "requested_product": expected_product,
+                    "requested_exit_units": quantity,
                     "intent": intent,
                 }
             open_units = abs(net_qty)
