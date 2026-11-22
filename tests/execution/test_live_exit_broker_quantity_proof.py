@@ -12,6 +12,10 @@ from nifty_scalper_bot.execution.order_manager import (
     OrderType,
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_snapshot import (
+    PositionSnapshotError,
+    decode_position_snapshot,
+)
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 SYMBOL = "NFO:NIFTY26NOV25700CE"
@@ -66,7 +70,7 @@ def test_live_exit_never_trusts_stale_local_65_unit_position(
     manager, broker = _manager(monkeypatch, tmp_path, _Broker(quantity=broker_quantity))
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] in {
@@ -84,7 +88,7 @@ def test_unavailable_broker_snapshot_is_not_treated_as_local_exposure(
     broker.position_outage = True
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] == "exit_broker_position_unavailable"
@@ -107,7 +111,7 @@ def test_trusted_entry_instrument_lot_survives_temporary_resolver_outage(
 
     monkeypatch.setattr(manager, "_lot_size_for_symbol", offline)
 
-    assert manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT") is None
+    assert manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS") is None
 
 
 def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
@@ -119,7 +123,7 @@ def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
         raise OrderPlacementError("lot_size_unresolved")
 
     monkeypatch.setattr(manager, "_lot_size_for_symbol", offline)
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] == "exit_lot_size_unresolved"
@@ -189,3 +193,79 @@ def test_low_level_broker_ack_requires_real_order_id(
 
     assert len(broker.orders) == 1
     assert "None" not in manager._orders
+
+
+def test_multi_product_snapshot_preserves_each_signed_broker_exposure() -> None:
+    snapshot = decode_position_snapshot(
+        {
+            "net": [
+                {"tradingsymbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"tradingsymbol": SYMBOL, "quantity": -65, "product": "NRML"},
+            ]
+        }
+    )
+    assert snapshot.all_flat is False
+    assert snapshot.quantity_for(SYMBOL, product="MIS") == 65
+    assert snapshot.quantity_for(SYMBOL, product="NRML") == -65
+    with pytest.raises(PositionSnapshotError, match="product ambiguous"):
+        snapshot.quantity_for(SYMBOL)
+
+
+def test_live_exit_uses_exact_product_not_cross_product_net(monkeypatch, tmp_path):
+    manager, broker = _manager(monkeypatch, tmp_path)
+    broker.get_positions = lambda: {
+        "net": [
+            {"tradingsymbol": SYMBOL, "quantity": 65, "product": "MIS"},
+            {"tradingsymbol": SYMBOL, "quantity": -65, "product": "NRML"},
+        ]
+    }
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    assert manager._validate_option_exit_quantity(
+        SYMBOL, "SELL", 65, "EXIT", "MIS"
+    ) is None
+    assert manager._validate_option_exit_quantity(
+        SYMBOL, "BUY", 65, "EXIT", "NRML"
+    ) is None
+    assert manager._validate_option_exit_quantity(
+        SYMBOL, "SELL", 130, "EXIT", "MIS"
+    )["reason"] == "exit_quantity_exceeds_position"
+
+
+def test_live_exit_refuses_broker_position_missing_product(monkeypatch, tmp_path):
+    manager, broker = _manager(monkeypatch, tmp_path)
+    broker.position_product = ""
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    blocked = manager._validate_option_exit_quantity(
+        SYMBOL, "SELL", 65, "EXIT", "MIS"
+    )
+    assert blocked is not None
+    assert blocked["reason"] == "exit_broker_product_unavailable"
+
+    with pytest.raises(OrderPlacementError, match="exit_broker_product_unavailable"):
+        manager._place_exit_order(
+            symbol=SYMBOL,
+            side="SELL",
+            quantity=65,
+            product="MIS",
+            tag="FORCE_SL_EXIT",
+        )
+    assert not broker.orders
+
+
+def test_multi_product_snapshot_rejects_missing_or_duplicate_identity() -> None:
+    with pytest.raises(PositionSnapshotError):
+        decode_position_snapshot(
+            [
+                {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"symbol": SYMBOL, "quantity": 0},
+            ]
+        )
+    with pytest.raises(PositionSnapshotError, match="duplicate broker position"):
+        decode_position_snapshot(
+            [
+                {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"symbol": SYMBOL, "quantity": 0, "product": "MIS"},
+            ]
+        )
