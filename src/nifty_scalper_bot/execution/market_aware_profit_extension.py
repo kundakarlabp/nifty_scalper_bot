@@ -1775,6 +1775,17 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
                 if level is not None and abs(level - recorded) <= _TICK_SIZE / 2:
                     confirmed_stop = recorded
                     break
+        # A synchronous broker proof may precede provenance serialization.
+        # Report it from the exact confirmed stop owner, not only trail_history.
+        if (
+            confirmed_stop is None
+            and config.get("_adaptive_profit_has_ratcheted") is True
+            and config.get("_adaptive_profit_confirmed_order_id")
+            == getattr(bracket, "exchange_stop_order_id", None)
+            and recorded is not None
+            and abs(recorded - candidate) <= _TICK_SIZE / 2
+        ):
+            confirmed_stop = recorded
         provenance["adaptive_profit_lock"] = {
             "strategy_family": _exit_strategy_family(bracket),
             "state": state,
