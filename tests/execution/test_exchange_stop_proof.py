@@ -325,3 +325,43 @@ def test_unrelated_stop_cannot_confirm_pending_adaptive_owner() -> None:
     }
     assert manager._confirm_exchange_protective_stop(bracket) is True
     assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+
+
+def test_new_stop_submission_is_unverified_until_exact_broker_readback() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    manager._exchange_stop_modify_mutex = RLock()
+    manager._exchange_protective_stop_enabled = True
+    manager._is_live_execution = lambda: True
+    manager._exchange_stop_prices = lambda _bracket, sl: (sl, sl - 0.05)
+    manager._order_to_entry = {}
+    manager.order_manager = SimpleNamespace(
+        place_order=lambda **_kwargs: "submitted-stop-123"
+    )
+    observed = []
+    manager._confirm_exchange_protective_stop = (
+        lambda bracket: observed.append(bracket.exchange_stop_degraded_reason) or False
+    )
+    bracket = SimpleNamespace(
+        bracket_id="entry-1",
+        entry_order_id="entry-1",
+        trade_lifecycle_id="entry-1",
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        active=True,
+        entry_confirmed=True,
+        remaining_quantity=65,
+        sl_trigger_price=100.0,
+        exchange_stop_order_id=None,
+        exchange_stop_quantity=0,
+        exchange_stop_degraded_reason=None,
+        linked_exit_order_ids=[],
+        updated_at=0.0,
+    )
+
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert observed == ["broker_stop_placement_unverified"]
+    assert bracket.exchange_stop_order_id == "submitted-stop-123"
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_placement_unverified"
+    assert bracket.exchange_stop_quantity == 65

@@ -25,7 +25,8 @@ _quote_age_seconds(require_exchange_time=True) requires validated aware
 exchange-event provenance, never receipt-only freshness. Adaptive proposals
 remain virtual until the canonical broker orderbook confirms the intended
 stop order and geometry. A recorded trigger is NOT an orderbook-confirmed
-stop or guaranteed fill.
+stop or guaranteed fill. A LIVE final-target extension also requires a
+quantity-matched, verified exchange stop covering its new profit-lock floor.
 No broker calls or competing exchange-stop owner are introduced here.
 Evidence comes from the already-wired IndicatorEngine and market-data cache.
 """
@@ -925,9 +926,27 @@ def _protected_profit_floor(manager: Any, bracket: Any) -> bool:
     )
     if not virtual_protected:
         return False
-    # Extending the profit target must not rely on a virtual-only lock while
-    # a looser exchange order still owns the actual emergency protection.
-    if getattr(bracket, "exchange_stop_order_id", None):
+    live_probe = getattr(manager, "_is_live_execution", None)
+    try:
+        live = bool(live_probe()) if callable(live_probe) else False
+    except Exception:  # noqa: BLE001 - unknown broker mode cannot prove protection
+        return False
+    stop_id = getattr(bracket, "exchange_stop_order_id", None)
+    if live and not stop_id:
+        return False
+    # The canonical orderbook verifier owns this state. A submitted or
+    # modified stop is not verified merely because its local price is stored.
+    if stop_id:
+        if getattr(bracket, "exchange_stop_degraded_reason", None):
+            return False
+        if live:
+            try:
+                held = int(getattr(bracket, "remaining_quantity", 0) or 0)
+                covered = int(getattr(bracket, "exchange_stop_quantity", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if held <= 0 or covered != held:
+                return False
         broker_stop = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
         if broker_stop is None:
             return False
@@ -1091,6 +1110,25 @@ def extend_final_target_if_supported(
         ltp,
         reason="strong_continuation_extension",
     )
+
+    # An optional virtual ratchet cannot defer an already-triggered FINAL_TP
+    # until the canonical stop owner has confirmed the new profit floor at
+    # the exchange. A failed/ambiguous modify retains the original exit.
+    live_probe = getattr(manager, "_is_live_execution", None)
+    try:
+        live = bool(live_probe()) if callable(live_probe) else False
+    except Exception:  # noqa: BLE001
+        return action
+    if live:
+        broker_stop = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
+        required_stop = _round_tick(candidate_sl)
+        locked = broker_stop is not None and (
+            broker_stop >= required_stop - (_TICK_SIZE / 2)
+            if side == "BUY"
+            else broker_stop <= required_stop + (_TICK_SIZE / 2)
+        )
+        if not locked or not _protected_profit_floor(manager, bracket):
+            return action
 
     lock = getattr(manager, "_lock", None)
     context = lock if hasattr(lock, "__enter__") else nullcontext()

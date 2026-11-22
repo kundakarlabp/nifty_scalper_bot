@@ -38,7 +38,8 @@ Owns / does NOT own:
 Safe-edit notes:
 - Live money and thread-sensitive (RLock-guarded). Preserve locking and the
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
-- An ambiguous failed stop amend requires broker readback before another modify.
+- Initial exchange stop placement remains unverified until exact broker readback;
+  an ambiguous failed amend requires reconciliation before another modify.
 - Linked-portfolio group exits are currently broker-truth diagnostic only;
   this owner never blindly submits a portfolio leg or claims flat by intent.
 - Every ordered protection tick is assessed even when second-resolution Kite
@@ -6388,7 +6389,9 @@ class BracketManager:
             bracket.exchange_stop_trigger_price = trigger
             bracket.exchange_stop_limit_price = limit_price
             bracket.exchange_stop_triggered_at = None
-            bracket.exchange_stop_degraded_reason = None
+            # Placement acceptance is not broker-resident stop proof.
+            # Keep the entry gate blocked until orderbook verification succeeds.
+            bracket.exchange_stop_degraded_reason = "broker_stop_placement_unverified"
             bracket.exchange_stop_modify_count = 0
             if stop_id not in bracket.linked_exit_order_ids:
                 bracket.linked_exit_order_ids.append(stop_id)
