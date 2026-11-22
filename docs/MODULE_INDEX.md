@@ -78,7 +78,7 @@ This navigation index is derived from the authoritative [architecture manifest](
 | [`broker_recovery.py`](../src/nifty_scalper_bot/execution/broker_recovery.py) | Classify broker failures and recommend bounded recovery. |
 | [`entry_recovery.py`](../src/nifty_scalper_bot/execution/entry_recovery.py) | Recover bounded entry failures in the existing order-manager path. |
 | [`exchange_stop_proof.py`](../src/nifty_scalper_bot/execution/exchange_stop_proof.py) | Verify exchange-resident stop coverage against broker order truth. |
-| [`exit_router.py`](../src/nifty_scalper_bot/execution/exit_router.py) | Route broker exit attempts under session and product rules. |
+| [`exit_router.py`](../src/nifty_scalper_bot/execution/exit_router.py) | Route a single broker-safe exit without uncertain resubmission. |
 | [`hardened_adaptive_trailing.py`](../src/nifty_scalper_bot/execution/hardened_adaptive_trailing.py) | Safety-hardened adaptive trailing controller. |
 | [`ledger_bracket_manager.py`](../src/nifty_scalper_bot/execution/ledger_bracket_manager.py) | Keep the protective bracket lifecycle tied to durable fill evidence. |
 | [`live_entry_preflight.py`](../src/nifty_scalper_bot/execution/live_entry_preflight.py) | Validate broker-backed entry readiness and quote evidence. |
