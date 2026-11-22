@@ -5119,7 +5119,15 @@ class BracketManager:
         )
         result: Mapping[str, Any] = {}
         if callable(getter):
-            history = getter(order_id)
+            try:
+                history = getter(order_id)
+            except Exception as exc:  # noqa: BLE001 - orderbook may still prove state
+                LOGGER.warning(
+                    "BROKER_ORDER_HISTORY_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                history = None
             if isinstance(history, Mapping):
                 result = history
                 state = str(history.get("status") or "").strip().upper()
@@ -5148,7 +5156,15 @@ class BracketManager:
                         return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
-            orders = getter()
+            try:
+                orders = getter()
+            except Exception as exc:  # noqa: BLE001 - unknown is not terminal
+                LOGGER.warning(
+                    "BROKER_ORDERBOOK_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                return result
             # Broker orderbooks are lists; a missing/malformed response is not
             # proof of cancellation or of a fill (also protects mock adapters).
             if not isinstance(orders, (list, tuple)):
