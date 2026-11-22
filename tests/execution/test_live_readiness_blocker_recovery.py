@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from nifty_scalper_bot.execution.fill_ledger import BracketFillLedgerStore, FillLeg
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
 from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
@@ -87,6 +88,9 @@ def _orphan_manager(*, payload: dict[str, Any], broker: _Broker) -> RuntimeBrack
         "old-bracket": {"reason": "final_exit_accounting_failed", "payload": payload}
     }
     manager._release_store = _ReleaseStore()
+    manager._fill_ledger = SimpleNamespace(
+        realized_pnl=lambda _bracket_id: SimpleNamespace(complete=True)
+    )
     manager.order_manager = _OrderManager(broker)
     manager._find_bracket_by_id = lambda _bracket_id: None  # type: ignore[method-assign]
     manager._retry_ledger_block = lambda _bracket: False  # type: ignore[method-assign]
@@ -254,6 +258,78 @@ def test_orphan_with_invalid_persisted_product_remains_blocked() -> None:
         broker=_Broker([]),
     )
 
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_flat_orphan_remains_blocked_without_durable_fills(tmp_path) -> None:
+    manager = _orphan_manager(payload={"symbol": SYMBOL}, broker=_Broker([]))
+    manager._fill_ledger = BracketFillLedgerStore(tmp_path / "orphan-ledger.db")
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_orphan_requires_complete_entry_and_exit_fill_ledger(tmp_path) -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker([]),
+    )
+    ledger = BracketFillLedgerStore(tmp_path / "orphan-ledger.db")
+    manager._fill_ledger = ledger
+    ledger.record_fill(
+        FillLeg(
+            fill_id="ENTRY:entry-order",
+            bracket_id="old-bracket",
+            order_id="entry-order",
+            kind="ENTRY",
+            side="BUY",
+            quantity=65,
+            price=100.0,
+        )
+    )
+    manager._retry_blocked_releases()
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+    ledger.record_fill(
+        FillLeg(
+            fill_id="EXIT:exit-order",
+            bracket_id="old-bracket",
+            order_id="exit-order",
+            kind="EXIT",
+            side="SELL",
+            quantity=65,
+            price=99.0,
+        )
+    )
+    manager._retry_blocked_releases()
+
+    assert manager._ledger_blocked == {}
+    assert manager._release_store.cleared == ["old-bracket"]
+
+
+def test_orphan_fails_closed_when_ledger_unavailable() -> None:
+    manager = _orphan_manager(payload={"symbol": SYMBOL}, broker=_Broker([]))
+    manager._fill_ledger = None
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_orphan_keeps_entry_block_when_durable_clear_fails() -> None:
+    manager = _orphan_manager(payload={"symbol": SYMBOL}, broker=_Broker([]))
+
+    def reject_clear(_bracket_id: str) -> None:
+        raise OSError("database not writable")
+
+    manager._release_store.clear = reject_clear
     manager._retry_blocked_releases()
 
     assert "old-bracket" in manager._ledger_blocked

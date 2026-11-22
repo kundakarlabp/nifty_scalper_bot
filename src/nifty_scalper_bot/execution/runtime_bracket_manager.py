@@ -6,7 +6,8 @@ lose functionality when broker fill identity is intentionally absent.
 Safety: Broker exit-fill callbacks require consistent lifecycle identity,
 valid fill evidence, and matching explicit broker product before correlation.
 LIVE managed exits reconcile against their bracket's exact broker product;
-restart-orphan release retains product identity when available.
+restart-orphan release requires both exact broker-flat and durable fill-ledger
+completion, and retains product identity when available.
 """
 
 from __future__ import annotations
@@ -79,6 +80,22 @@ class RuntimeBracketManager(LedgerBracketManager):
         if product and product not in {"MIS", "NRML"}:
             return False
 
+        # A flat broker position proves no exposure, not successful fill
+        # accounting. Never unblock entries for an orphaned failed ledger write.
+        try:
+            if (
+                self._fill_ledger is None
+                or not self._fill_ledger.realized_pnl(str(bracket_id)).complete
+            ):
+                return False
+        except Exception as exc:  # noqa: BLE001 - missing ledger proof fails closed
+            _core.LOGGER.error(
+                "FILL_LEDGER_ORPHAN_ACCOUNTING_UNVERIFIED bracket_id=%s error=%s",
+                bracket_id,
+                exc,
+            )
+            return False
+
         flat: bool | None
         if symbol:
             try:
@@ -123,10 +140,18 @@ class RuntimeBracketManager(LedgerBracketManager):
             )
             return False
 
+        if self._release_store is None:
+            return False
+        try:
+            self._release_store.clear(str(bracket_id))
+        except Exception as exc:  # noqa: BLE001 - keep entry blocker on write failure
+            _core.LOGGER.error(
+                "FILL_LEDGER_ORPHAN_RELEASE_PERSIST_FAILED bracket_id=%s error=%s",
+                bracket_id,
+                exc,
+            )
+            return False
         self._ledger_blocked.pop(str(bracket_id), None)
-        if self._release_store is not None:
-            with suppress(Exception):
-                self._release_store.clear(str(bracket_id))
         _core.LOGGER.warning(
             "FILL_LEDGER_ORPHAN_BLOCK_CLEARED bracket_id=%s symbol=%s",
             bracket_id,
