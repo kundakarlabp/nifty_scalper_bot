@@ -188,10 +188,12 @@ def test_legacy_orphan_without_symbol_retains_block_for_open_position() -> None:
 def test_product_qualified_orphan_releases_without_waiting_for_other_product() -> None:
     manager = _orphan_manager(
         payload={"symbol": SYMBOL, "product": "MIS"},
-        broker=_Broker([
-            {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
-            {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
-        ]),
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
+            ]
+        ),
     )
 
     manager._retry_blocked_releases()
@@ -203,10 +205,12 @@ def test_product_qualified_orphan_releases_without_waiting_for_other_product() -
 def test_product_qualified_orphan_keeps_block_when_its_position_is_open() -> None:
     manager = _orphan_manager(
         payload={"symbol": SYMBOL, "product": "MIS"},
-        broker=_Broker([
-            {"symbol": SYMBOL, "product": "MIS", "quantity": 65},
-            {"symbol": SYMBOL, "product": "NRML", "quantity": 0},
-        ]),
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 65},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 0},
+            ]
+        ),
     )
 
     manager._retry_blocked_releases()
@@ -230,10 +234,12 @@ def test_product_qualified_orphan_rejects_unlabeled_broker_position() -> None:
 def test_legacy_orphan_does_not_net_across_products() -> None:
     manager = _orphan_manager(
         payload={"symbol": SYMBOL},
-        broker=_Broker([
-            {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
-            {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
-        ]),
+        broker=_Broker(
+            [
+                {"symbol": SYMBOL, "product": "MIS", "quantity": 0},
+                {"symbol": SYMBOL, "product": "NRML", "quantity": 65},
+            ]
+        ),
     )
 
     manager._retry_blocked_releases()
