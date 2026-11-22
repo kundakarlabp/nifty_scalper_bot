@@ -40,7 +40,7 @@ def test_bracket_anchor_provenance_is_owned_by_runtime_without_facade_patch() ->
     _enrich_trade_plan_exit_provenance(plan)
 
     assert plan.trade_provenance["bracket_anchor_mode"] == "absolute_level"
-    assert not hasattr(runtime_module, "_original_enrich_trade_plan_exit_provenance")
+    assert _enrich_trade_plan_exit_provenance.__module__ == runtime_module.__name__
 
 
 def test_nonentry_plan_preserves_bracket_anchor_without_adding_tp1() -> None:
