@@ -867,7 +867,7 @@ class RuntimeOrderManager(_core.OrderManager):
 
     def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
         """Extend core diagnostics with the existing canonical Zerodha depth resolver."""
-        diagnostics = dict(super()._extract_quote_diagnostics(quote))
+        diagnostics = dict(_core.OrderManager._extract_quote_diagnostics(self, quote))
         if not isinstance(quote, Mapping):
             return diagnostics
 
