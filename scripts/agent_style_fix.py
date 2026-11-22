@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Safely auto-fix style on changed Python without expanding legacy debt."""
+"""Purpose: Fix changed-file Python style without expanding legacy debt.
+
+Responsibilities:
+- Use the repository's Ruff and Black configuration for edited files.
+- Limit formatting of legacy-dirty files to the changed source lines.
+Safety: Restore original content if a formatter modifies unrelated code.
+"""
 
 from __future__ import annotations
 
@@ -136,11 +142,9 @@ def _fix_legacy_lines(root: Path, *, base_ref: str, path: str, tool: str) -> boo
 
     original = target.read_text(encoding="utf-8")
     if tool == "black":
-        selected = [
-            item
-            for start, end in ranges
-            for item in ("--line-ranges", f"{start}-{end}")
-        ]
+        selected: list[str] = []
+        for start, end in ranges:
+            selected.extend(("--line-ranges", f"{start}-{end}"))
         argv = [
             sys.executable,
             "-m",
