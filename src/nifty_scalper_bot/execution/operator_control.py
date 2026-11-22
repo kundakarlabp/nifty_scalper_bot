@@ -160,7 +160,21 @@ def _cancel_order(self: Any, order_id: str) -> bool:
 def cancel_pending_orders(self: Any) -> dict[str, Any]:
     cancelled: list[str] = []
     failed: list[str] = []
-    for row in _order_rows(self):
+    checker = getattr(self, "is_live_mode", None)
+    live = bool(checker()) if callable(checker) else False
+    if live:
+        # Local in-memory open orders can omit exchange-resident stops.
+        # In LIVE only the broker's complete orderbook may select cancellations.
+        broker = _broker(self)
+        fetcher = getattr(broker, "get_orders", None)
+        if not callable(fetcher):
+            raise ValueError("broker_orderbook_fetcher_unavailable")
+        rows = fetcher()
+        if not isinstance(rows, list):
+            raise ValueError("broker_orderbook_unavailable")
+    else:
+        rows = _order_rows(self)
+    for row in rows:
         status = _order_status(row)
         if status and status not in _OPEN_ORDER_STATUSES:
             continue
