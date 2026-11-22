@@ -251,8 +251,8 @@ class BoundBracketManager(RuntimeBracketManager):
             captured = self._capture_same_tick_cached_quote(
                 normalized, ltp, exchange_ts
             )
-        if not captured:
-            # A depth-less/invalid new tick must not reuse an older BBO.
+        if isinstance(tick, Mapping) and not captured:
+            # A depth-less/invalid explicit new tick must not reuse an older BBO.
             # Canonical hard SL/TP still evaluates the current LTP; the
             # broker-resident protective stop is never cancelled here.
             with self._lock:
