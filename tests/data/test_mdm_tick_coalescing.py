@@ -2479,3 +2479,78 @@ def test_open_position_also_survives_basket_subscription_replacement() -> None:
     result = mdm.reconcile_active_subscriptions({1002})
     assert result["protected_tokens_retained"] == 1
     assert mdm._desired_tokens == {1001, 1002}
+
+def test_fast_arrival_rejects_retired_option_before_cache_publication() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    cached = {"symbol": symbol, "ltp": 105.0, "source_timestamp_valid": True}
+    mdm._tick_cache[symbol] = dict(cached)
+    mdm._latest_ticks[symbol] = dict(cached)
+    mdm._last_tick_time[symbol] = 123.0
+    mdm._desired_tokens.discard(1)
+
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=90.0,
+        raw_tick={"instrument_token": 1, "last_price": 90.0},
+    )
+
+    assert mdm.get_latest_tick(symbol) == cached
+    assert mdm._last_tick_time[symbol] == 123.0
+    assert mdm.current_live_token(symbol) == 1
+
+
+def test_fast_arrival_rejects_stale_symbol_token_mapping() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    mdm._symbol_to_token[symbol] = 2
+    mdm._token_by_symbol[symbol] = 2
+
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=90.0,
+        raw_tick={"instrument_token": 1, "last_price": 90.0},
+    )
+
+    assert mdm.get_latest_tick(symbol) is None
+    assert mdm.current_live_token(symbol) == 2
+
+
+def test_fast_arrival_cannot_invent_exchange_time_or_downgrade_verified_book() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=100.0,
+        raw_tick={"instrument_token": 1, "last_price": 100.0},
+    )
+    provisional = mdm.get_latest_tick(symbol)
+    assert provisional is not None
+    assert provisional["source_timestamp_valid"] is False
+    assert provisional["timestamp_source"] == "received_at_fallback"
+    assert provisional["timestamp_quality"] == "unknown"
+
+    verified = {
+        "symbol": symbol,
+        "ltp": 105.0,
+        "source_timestamp_valid": True,
+        "timestamp_source": "exchange_timestamp",
+    }
+    mdm._tick_cache[symbol] = dict(verified)
+    mdm._latest_ticks[symbol] = dict(verified)
+    original_receipt = mdm._last_tick_time[symbol]
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=99.0,
+        raw_tick={"instrument_token": 1, "last_price": 99.0},
+    )
+
+    assert mdm.get_latest_tick(symbol) == verified
+    assert mdm._last_tick_time[symbol] == original_receipt
