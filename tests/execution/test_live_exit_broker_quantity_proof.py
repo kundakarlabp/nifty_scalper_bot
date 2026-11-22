@@ -224,15 +224,20 @@ def test_live_exit_uses_exact_product_not_cross_product_net(monkeypatch, tmp_pat
     }
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    assert manager._validate_option_exit_quantity(
-        SYMBOL, "SELL", 65, "EXIT", "MIS"
-    ) is None
-    assert manager._validate_option_exit_quantity(
-        SYMBOL, "BUY", 65, "EXIT", "NRML"
-    ) is None
-    assert manager._validate_option_exit_quantity(
-        SYMBOL, "SELL", 130, "EXIT", "MIS"
-    )["reason"] == "exit_quantity_exceeds_position"
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
+        is None
+    )
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "BUY", 65, "EXIT", "NRML")
+        is None
+    )
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 130, "EXIT", "MIS")[
+            "reason"
+        ]
+        == "exit_quantity_exceeds_position"
+    )
 
 
 def test_live_exit_refuses_broker_position_missing_product(monkeypatch, tmp_path):
@@ -240,9 +245,7 @@ def test_live_exit_refuses_broker_position_missing_product(monkeypatch, tmp_path
     broker.position_product = ""
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    blocked = manager._validate_option_exit_quantity(
-        SYMBOL, "SELL", 65, "EXIT", "MIS"
-    )
+    blocked = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
     assert blocked is not None
     assert blocked["reason"] == "exit_broker_product_unavailable"
 
