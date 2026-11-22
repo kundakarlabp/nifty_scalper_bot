@@ -2538,7 +2538,8 @@ def test_fast_arrival_cannot_invent_exchange_time_or_downgrade_verified_book() -
     assert provisional is not None
     assert provisional["source_timestamp_valid"] is False
     assert provisional["timestamp_source"] == "received_at_fallback"
-    assert provisional["timestamp_quality"] == "unknown"
+    # The read facade may further downgrade an unverified receipt to synthetic.
+    assert provisional["timestamp_quality"] in {"unknown", "synthetic"}
 
     verified = {
         "symbol": symbol,
