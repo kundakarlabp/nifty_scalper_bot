@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from nifty_scalper_bot.execution.order_manager import (
     OrderManager,
     OrderPlacementError,
+    OrderStatus,
     OrderType,
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -30,6 +32,10 @@ class _Broker:
         self.orders: list[dict] = []
         self.reply: dict = {"order_id": "new-order", "status": "SUBMITTED"}
         self.position_outage = False
+        self.working_orders: list[dict] = []
+
+    def get_orders(self):
+        return list(self.working_orders)
 
     def get_positions(self):
         if self.position_outage:
@@ -347,3 +353,66 @@ def test_symbol_keyed_position_manager_refuses_dual_product_overwrite(
         )
 
     assert manager._positions.get_position(SYMBOL) is existing
+
+
+def test_native_exit_refuses_duplicate_while_broker_reduction_working(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["existing-reduction"] = SimpleNamespace(
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    broker.working_orders = [
+        {
+            "order_id": "existing-reduction",
+            "tradingsymbol": SYMBOL.split(":", 1)[-1],
+            "status": "OPEN",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "product": "MIS",
+        }
+    ]
+
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert broker.orders == []
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
+def test_native_exit_fails_closed_when_existing_reduction_book_unreadable(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["existing-reduction"] = SimpleNamespace(
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc),
+    )
+    broker.get_orders = lambda: None
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert not broker.orders
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
