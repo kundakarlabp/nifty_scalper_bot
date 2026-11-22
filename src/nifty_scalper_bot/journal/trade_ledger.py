@@ -3,6 +3,8 @@
 This module is deliberately not an execution or accounting authority. It derives
 one query-friendly row per trade_id from events already accepted by TradeJournal
 and writes that row in the same SQLite transaction.
+A validated bracket decision_ts supplies the causal signal time when approval
+journaling is delayed, independent of broker acknowledgment and fill times.
 """
 
 from __future__ import annotations
@@ -184,7 +186,11 @@ ON CONFLICT(trade_id) DO UPDATE SET
         WHEN trade_ledger.ledger_complete = 1 THEN 1
         ELSE {_monotonic_merge_sql("ledger_complete")}
     END,
-    decision_at = COALESCE(trade_ledger.decision_at, excluded.decision_at),
+    decision_at = CASE
+        WHEN trade_ledger.decision_at IS NULL THEN excluded.decision_at
+        WHEN excluded.decision_at IS NULL THEN trade_ledger.decision_at
+        ELSE MIN(trade_ledger.decision_at, excluded.decision_at)
+    END,
     entry_submitted_at = COALESCE(
         trade_ledger.entry_submitted_at, excluded.entry_submitted_at
     ),
@@ -544,6 +550,16 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
     elif "ledger_complete" in meta:
         ledger_complete = int(bool(meta.get("ledger_complete")))
 
+    # The post-order candidate.approved event is not the original strategy
+    # decision time. Bracket registration preserves the earlier decision_ts.
+    decision_ts = _number(meta.get("decision_ts"))
+    if (
+        event_name != "bracket.registered"
+        or decision_ts is None
+        or not 0.0 <= timestamp - decision_ts <= 300.0
+    ):
+        decision_ts = None
+
     return {
         "trade_id": trade_id,
         "signal_id": _first_text(event.get("signal_id"), outcome.get("signal_id")),
@@ -580,9 +596,13 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         ),
         "ledger_complete": ledger_complete,
         "decision_at": (
-            timestamp
-            if event_name in {"signal.evaluated", "candidate.approved"}
-            else None
+            decision_ts
+            if decision_ts is not None
+            else (
+                timestamp
+                if event_name in {"signal.evaluated", "candidate.approved"}
+                else None
+            )
         ),
         "entry_submitted_at": (
             timestamp if event_name == "order.acknowledged" else None
