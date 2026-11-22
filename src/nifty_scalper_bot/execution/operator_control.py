@@ -310,9 +310,8 @@ def flatten_all(
                     raise ValueError("broker_orderbook_row_malformed")
                 if (
                     _symbol(order) in initial
-                    and _order_status(order) not in {
-                        "COMPLETE", "CANCELLED", "CANCELED", "REJECTED"
-                    }
+                    and _order_status(order)
+                    not in {"COMPLETE", "CANCELLED", "CANCELED", "REJECTED"}
                     and _order_id(order) not in owned_ids
                 ):
                     raise ValueError("unowned_nifty_order_prevents_safe_flatten")
