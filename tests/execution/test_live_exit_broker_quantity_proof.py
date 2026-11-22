@@ -151,9 +151,7 @@ def test_live_exit_rejects_mismatched_broker_product_in_both_routes(
     broker.position_product = "NRML"
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    blocked = manager._validate_option_exit_quantity(
-        SYMBOL, "SELL", 65, "EXIT", "MIS"
-    )
+    blocked = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
     assert blocked is not None
     assert blocked["reason"] == "exit_broker_product_mismatch"
     assert blocked["broker_product"] == "NRML"
