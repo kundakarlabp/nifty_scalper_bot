@@ -689,9 +689,7 @@ class CanonicalBracketManager(HardenedBracketManager):
             "authoritative_position_quantity",
         )
 
-    def _safe_position_flat(
-        self, symbol: str, *, product: str | None = None
-    ) -> bool:
+    def _safe_position_flat(self, symbol: str, *, product: str | None = None) -> bool:
         return (
             self._broker_position_evidence(symbol, product=product).state
             is BrokerPositionState.FLAT_CONFIRMED
