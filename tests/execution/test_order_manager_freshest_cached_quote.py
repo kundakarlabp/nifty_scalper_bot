@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 from nifty_scalper_bot.execution.order_manager import OrderManager, TradePlan
 
@@ -81,6 +82,60 @@ def _depth_quote(
             "sell": [{"price": 100.10, "quantity": ask_qty}],
         },
     }
+
+
+def test_stale_exchange_book_is_not_freshened_by_recent_receipt() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    quote["exchange_timestamp"] = datetime.now(timezone.utc) - timedelta(seconds=45)
+    quote["timestamp_quality"] = "exchange"
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+
+    diagnostics = manager._extract_quote_diagnostics(quote)
+    assert diagnostics["timestamp_key"] == "exchange_timestamp"
+    assert diagnostics["age_ms"] > 40_000
+
+
+def test_future_exchange_book_is_unusable_even_with_recent_receipt() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    quote["exchange_timestamp"] = datetime.now(timezone.utc) + timedelta(seconds=60)
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+    diagnostics = manager._extract_quote_diagnostics(quote)
+    plan = TradePlan(
+        symbol=symbol,
+        side="BUY",
+        quantity=65,
+        entry_price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+    )
+
+    assert diagnostics["age_ms"] is None
+    rejection = manager._validate_live_entry_quote(plan, diagnostics)
+    assert rejection is not None
+    assert rejection.reason == "entry_quote_timestamp_unusable"
+
+
+def test_explicit_invalid_or_receipt_only_source_cannot_authorize_live_book() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(data_hub=_TickProvider({}), mdm=_TickProvider({}))
+    for provenance in (
+        {"timestamp_quality": "synthetic"},
+        {"source_timestamp_valid": False},
+        {"timestamp_source": "received_at", "source_timestamp_valid": True},
+    ):
+        quote = {**_depth_quote(symbol), **provenance}
+        diagnostics = manager._extract_quote_diagnostics(quote)
+        assert diagnostics["age_ms"] is None
+
+
+def test_legacy_receipt_only_quote_keeps_nonlive_age_compatibility() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] is not None
 
 
 def test_runtime_owns_quote_methods_without_facade_monkey_patching() -> None:
