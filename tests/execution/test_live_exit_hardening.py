@@ -1962,11 +1962,9 @@ def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
         ]
 
     monkeypatch.setattr(broker, "get_orders", current_orders, raising=False)
-    order_manager._last_order_decision = {"broker_attempted": False}
-    monkeypatch.setattr(
-        manager,
-        "submit_exit_order",
-        lambda **_kwargs: SimpleNamespace(
+    def prebroker_reject(**_kwargs: Any) -> SimpleNamespace:
+        order_manager._last_order_decision = {"broker_attempted": False}
+        return SimpleNamespace(
             accepted=False,
             order_id=None,
             retryable=True,
@@ -1974,8 +1972,9 @@ def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
             error_message="prebroker rejection",
             status="REJECTED",
             broker_payload=None,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(manager, "submit_exit_order", prebroker_reject)
     manager._process_exit_state(
         bracket,
         {"qty": 65, "reason": "PROFIT_TARGET"},
