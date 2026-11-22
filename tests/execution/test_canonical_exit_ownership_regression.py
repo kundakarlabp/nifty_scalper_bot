@@ -106,7 +106,9 @@ def test_canonical_bracket_owns_stop_even_when_local_stop_is_crossed(
         SYMBOL, "LONG", 65, 145.0, stop_loss=140.0, order_id="entry-1"
     )
     manager._data_hub = SimpleNamespace(get_latest_price=lambda _symbol: 130.0)
-    manager._bracket_manager = SimpleNamespace(register_virtual_bracket=lambda **_: None)
+    manager._bracket_manager = SimpleNamespace(
+        register_virtual_bracket=lambda **_: None
+    )
     attempts: list[dict] = []
     monkeypatch.setattr(
         manager, "_place_exit_order", lambda **kwargs: attempts.append(kwargs)
