@@ -10,8 +10,8 @@ Runtime role:
   orphan/position resync.
 - _record_trade_quality_shadow separates cached top bids from same-tick
   full-lot, timestamp-attested bid evidence for research only; never controls stops.
-- _is_replayed_protection_tick vetoes stale pre-fill or older exchange
-  events before quote caching and evaluation, retaining changed same-second ticks.
+- _is_replayed_protection_tick permanently vetoes provably pre-fill or
+  out-of-order exchange events, retaining legitimate same-second updates.
 - _range_vwap_underlying_exit_action reuses the existing protective/target exit
   dispatcher with a verified active futures cache and frozen session-VWAP
   invalidation/target carried through the canonical TradePlan provenance.
@@ -2717,11 +2717,17 @@ class BracketManager:
             fill_epoch = float(bracket.entry_fill_ts)
         except (TypeError, ValueError, OverflowError):
             return False
-        return (
-            math.isfinite(fill_epoch)
-            and event_epoch < fill_epoch
-            and now_ts - fill_epoch <= STALE_TICK_ARM_WINDOW_SEC
-        )
+        if not math.isfinite(fill_epoch) or event_epoch >= fill_epoch:
+            return False
+        # A tick from an earlier exchange second is definitely pre-fill even
+        # if queued for more than the short startup grace period. Fractional
+        # exchange timestamps can likewise prove the event preceded the fill.
+        if event_epoch < math.floor(fill_epoch) or not event_epoch.is_integer():
+            return True
+        # Kite often stamps several updates with the same whole second.
+        # During initial arming keep the existing conservative pre-fill veto;
+        # afterwards allow updates that cannot be ordered within that second.
+        return now_ts - fill_epoch <= STALE_TICK_ARM_WINDOW_SEC
 
     def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> bool:
         """Cache executable bid/ask only from an eligible post-fill event."""

@@ -7,6 +7,8 @@ Runtime role:
 - Fans ticks out to subscribers via the message bus.
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
+- Fast WebSocket receipt caching refuses retired option/futures tokens and
+  cannot demote a validated exchange-time quote to an unverified arrival.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
   drains ordered ticks on a dedicated serial worker rather than the shared
   asyncio executor, and exports bounded tick latency percentiles.
@@ -8291,7 +8293,7 @@ class MarketDataManager:
         try:
             canonical = self._canonical_symbol(symbol)
             price = float(ltp)
-            if price <= 0:
+            if not math.isfinite(price) or price <= 0:
                 return
             now = time.time()
             payload = dict(raw_tick)
@@ -8301,6 +8303,11 @@ class MarketDataManager:
             payload["source"] = "ws"
             payload["received_at"] = now
             payload.setdefault("timestamp", now)
+            # Raw WS arrival has not passed the canonical exchange-time parser.
+            # Keep the fast LTP observable, never present it as executable proof.
+            payload["source_timestamp_valid"] = False
+            payload["timestamp_source"] = "received_at_fallback"
+            payload["timestamp_quality"] = "unknown"
             # KiteTicker emits average_traded_price, not REST average_price.
             # The fast cache is read by DataHub before the queued tick is
             # normalized; publish the canonical, broker-derived field here too.
@@ -8310,6 +8317,23 @@ class MarketDataManager:
                 payload["instrument_token"] = int(token)
 
             with self._lock:
+                # _emit_tick enforces this same current-basket contract later.
+                # A retired tick must never transiently refresh the public cache.
+                if canonical.startswith("NFO:") and canonical.endswith(
+                    ("CE", "PE", "FUT")
+                ):
+                    if (
+                        token is None
+                        or int(token) not in self._desired_tokens
+                        or self._current_symbol_token_locked(canonical) != int(token)
+                    ):
+                        return
+                # Ordered normalization owns authoritative quote publication.
+                # Do not overwrite a previously verified quote with raw arrival.
+                current = self._tick_cache.get(canonical)
+                if isinstance(current, Mapping):
+                    if current.get("source_timestamp_valid") is True:
+                        return
                 if token is not None:
                     token_int = int(token)
                     self._set_symbol_token_mapping(

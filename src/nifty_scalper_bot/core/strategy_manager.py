@@ -7,6 +7,8 @@ Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
 - Propagates selected option/futures context to strategy code.
 - Must not select contracts or call broker instruments.
+- Raw regime safety denials block option signals even in adaptive mode;
+  adaptive weighting is applied only after the canonical regime gate passes.
 - can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
   actual reversal admission remains owned by the verified range vote contract.
 - _derive_context_direction applies an ATR-scaled floor to EMA spreads and
@@ -2981,42 +2983,19 @@ class StrategyManager(_BaseStrategyManager):
                     snapshot=regime_snapshot,
                 )
                 if not allowed:
-                    # A raw detector denial is observational in adaptive mode;
-                    # the effective fallback scale is only known AFTER the
-                    # stable/raw policy is reconciled below. Do not emit a
-                    # fictitious pre-fallback scale=1.0 decision.
+                    # This method handles tradable options; context symbols
+                    # returned through _generate_context_only above. Adaptive
+                    # weighting must never override the canonical safety veto.
                     self._observability_counters["regime_gate_denials_observed"] += 1
-                if not allowed and not self._use_regime_adaptive:
-                    if symbol_role in {"spot_context", "futures_context"}:
-                        log_throttled(
-                            log,
-                            f"context_regime_gate_bypassed:{symbol}",
-                            (
-                                "CONTEXT_REGIME_GATE_BYPASSED "
-                                "symbol=%s role=%s reason=context_snapshot_update_not_trade_entry"
-                            ),
-                            symbol,
-                            symbol_role,
-                            interval_sec=60.0,
-                            level=logging.INFO,
-                            extra={
-                                "event": "CONTEXT_REGIME_GATE_BYPASSED",
-                                "symbol": symbol,
-                                "symbol_role": symbol_role,
-                                "gate_reasons": list(reasons),
-                                "reason": "context_snapshot_update_not_trade_entry",
-                            },
-                        )
-                    else:
-                        self._observability_counters["signals_blocked_by_regime"] += 1
-                        _log_reject(
-                            "regime_gate_block",
-                            {"gate_reasons": reasons, "gate": "regime_manager"},
-                        )
-                        _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
-                        no_signal_reasons.append("regime_gate_block")
-                        _emit_strategy_exit()
-                        return None
+                    self._observability_counters["signals_blocked_by_regime"] += 1
+                    _log_reject(
+                        "regime_gate_block",
+                        {"gate_reasons": reasons, "gate": "regime_manager"},
+                    )
+                    _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
+                    no_signal_reasons.append("regime_gate_block")
+                    _emit_strategy_exit()
+                    return None
             except Exception as exc:  # noqa: BLE001
                 log.error(
                     "Failure in StrategyManager regime gate: %s",
@@ -3024,29 +3003,17 @@ class StrategyManager(_BaseStrategyManager):
                     exc_info=exc,
                     extra={"event": "strategy_regime_gate_error", "symbol": symbol},
                 )
+                self._observability_counters["signals_blocked_by_regime"] += 1
+                _log_reject("regime_gate_error", {"error_type": type(exc).__name__})
+                _emit_no_signal("regime_gate_error")
+                no_signal_reasons.append("regime_gate_error")
+                _emit_strategy_exit()
+                return None
         if regime_snapshot is not None and isinstance(
             regime_snapshot.adjustments, t.Mapping
         ):
             adjustments = dict(regime_snapshot.adjustments)
         regime_scale = self._extract_regime_scale(adjustments)
-        if regime_manager is not None:
-            try:
-                if (
-                    regime_allowed is False
-                    and self._use_regime_adaptive
-                ):
-                    regime_scale = min(
-                        regime_scale, max(self._regime_fallback_scale, 0.0)
-                    )
-                    self._observability_counters[
-                        "regime_adaptive_fallback_evaluations"
-                    ] += 1
-            except Exception as exc:
-                log.error(
-                    "Failure in StrategyManager.generate_signal regime fallback: %s",
-                    exc,
-                    exc_info=exc,
-                )
         regime_name = (
             regime_snapshot.regime
             if isinstance(regime_snapshot, RegimeSnapshot)
@@ -3060,11 +3027,7 @@ class StrategyManager(_BaseStrategyManager):
         raw_regime_name = getattr(raw_regime_snapshot, "regime", None)
         raw_regime_reason = getattr(raw_regime_snapshot, "reason", None)
         regime_decision_action = (
-            "manager_allowed"
-            if regime_allowed is True
-            else "adaptive_fallback"
-            if regime_allowed is False and self._use_regime_adaptive
-            else "unavailable"
+            "manager_allowed" if regime_allowed is True else "unavailable"
         )
         if regime_manager is not None:
             log_throttled(
