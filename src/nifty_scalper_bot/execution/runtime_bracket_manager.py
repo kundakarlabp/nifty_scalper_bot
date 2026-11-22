@@ -3,9 +3,10 @@
 LIVE execution uses the durable ledger release gate. PAPER/SHADOW/SIMULATION
 retain legacy close and hook behaviour so tests, dry runs and dashboards do not
 lose functionality when broker fill identity is intentionally absent.
-Safety: Broker exit-fill callbacks must have integral quantities and finite
-positive prices before bracket state can be correlated or closed.
-LIVE managed exits reconcile against their bracket's exact broker product.
+Safety: Broker exit-fill callbacks require consistent lifecycle identity,
+valid fill evidence, and matching explicit broker product before correlation.
+LIVE managed exits reconcile against their bracket's exact broker product;
+restart-orphan release retains product identity when available.
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ class RuntimeBracketManager(LedgerBracketManager):
         """Persist enough identity to reconcile a ledger block after restart."""
         release_payload = dict(payload or {})
         release_payload.setdefault("symbol", str(bracket.symbol))
+        product = str(getattr(bracket, "product", "") or "").strip().upper()
+        if product in {"MIS", "NRML"}:
+            release_payload["product"] = product
         release_payload.setdefault("bracket_id", str(bracket.bracket_id))
         release_payload.setdefault("exit_state", str(bracket.exit_state or ""))
         release_payload.setdefault(
@@ -71,11 +75,16 @@ class RuntimeBracketManager(LedgerBracketManager):
         payload = details.get("payload", {}) if isinstance(details, Mapping) else {}
         payload = payload if isinstance(payload, Mapping) else {}
         symbol = str(payload.get("symbol") or "").strip()
+        product = str(payload.get("product") or "").strip().upper()
+        if product and product not in {"MIS", "NRML"}:
+            return False
 
         flat: bool | None
         if symbol:
             try:
-                quantity = self._broker_position_quantity(symbol)
+                quantity = self._broker_position_quantity(
+                    symbol, product=product or None
+                )
             except Exception as exc:  # noqa: BLE001 - unknown remains blocked
                 _core.LOGGER.error(
                     "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED "
@@ -264,23 +273,41 @@ class RuntimeBracketManager(LedgerBracketManager):
         """Resolve an exit fill to a bracket without guessing across exposures."""
 
         symbol = _core.normalize_symbol(getattr(order, "symbol", ""))
-        identity = [
-            str(getattr(order, name, "") or "").strip()
+        identity = {
+            name: str(getattr(order, name, "") or "").strip()
             for name in ("bracket_id", "linked_entry_order_id", "trade_lifecycle_id")
-        ]
-        explicit = [value for value in identity if value]
-        for value in explicit:
-            bracket = self._find_bracket_by_id(value)
-            if bracket is None:
-                bracket = self.get_bracket(value)
+        }
+        if any(identity.values()):
+            resolved = None
+            for value in identity.values():
+                if not value:
+                    continue
+                bracket = self._find_bracket_by_id(value)
+                if bracket is None:
+                    bracket = self.get_bracket(value)
+                if bracket is None:
+                    continue
+                if resolved is not None and bracket.bracket_id != resolved.bracket_id:
+                    return None, "identity_mismatch"
+                resolved = bracket
+            if resolved is None:
+                return None, "identity_mismatch"
             if (
-                bracket is not None
-                and _core.normalize_symbol(bracket.symbol) == symbol
-                and self._exit_side_matches(bracket, order)
+                (identity["bracket_id"] and identity["bracket_id"] != resolved.bracket_id)
+                or (
+                    identity["linked_entry_order_id"]
+                    and identity["linked_entry_order_id"] != resolved.entry_order_id
+                )
+                or (
+                    identity["trade_lifecycle_id"]
+                    and identity["trade_lifecycle_id"]
+                    != str(resolved.trade_lifecycle_id or resolved.entry_order_id)
+                )
+                or _core.normalize_symbol(resolved.symbol) != symbol
+                or not self._exit_side_matches(resolved, order)
             ):
-                return bracket, "managed_identity"
-        if explicit:
-            return None, "identity_mismatch"
+                return None, "identity_mismatch"
+            return resolved, "managed_identity"
 
         # External/manual broker orders have no lifecycle id.  They can own the
         # local bracket only after authoritative flat proof and only when there is
@@ -313,6 +340,7 @@ class RuntimeBracketManager(LedgerBracketManager):
         symbol = _core.normalize_symbol(getattr(order, "symbol", ""))
         if not order_id or not symbol:
             return False
+        payload = payload if isinstance(payload, Mapping) else {}
         bracket, source = self._resolve_exit_bracket(order)
         if bracket is None:
             _core.LOGGER.warning(
@@ -328,6 +356,23 @@ class RuntimeBracketManager(LedgerBracketManager):
                 },
             )
             return False
+
+        expected_product = str(getattr(bracket, "product", "") or "").strip().upper()
+        for supplied_product in (
+            payload.get("product"),
+            getattr(order, "product", None),
+        ):
+            actual_product = str(supplied_product or "").strip().upper()
+            if actual_product and actual_product != expected_product:
+                _core.LOGGER.error(
+                    "EXIT_ORDER_PRODUCT_MISMATCH order_id=%s bracket_id=%s "
+                    "expected_product=%s broker_product=%s",
+                    order_id,
+                    bracket.bracket_id,
+                    expected_product,
+                    actual_product,
+                )
+                return False
 
         # Broker updates are at-least-once. Once this exact exit order has
         # already terminalized the bracket, a repeated fill callback is an
@@ -349,7 +394,6 @@ class RuntimeBracketManager(LedgerBracketManager):
         if already_closed and known_exit_order:
             return True
 
-        payload = payload if isinstance(payload, Mapping) else {}
         raw_quantity = (
             getattr(order, "filled_quantity", 0)
             or payload.get("filled_quantity")
