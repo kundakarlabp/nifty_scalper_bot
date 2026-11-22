@@ -175,6 +175,12 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
     else:
         rows = _order_rows(self)
     for row in rows:
+        if live:
+            # This bot only owns NIFTY option orders. Never cancel unrelated
+            # account orders (or their resting stops) during a bot emergency.
+            symbol = _symbol(row)
+            if not symbol.startswith("NFO:NIFTY") or not symbol.endswith(("CE", "PE")):
+                continue
         status = _order_status(row)
         if status and status not in _OPEN_ORDER_STATUSES:
             continue
@@ -260,6 +266,10 @@ def flatten_all(
                 lot = int(self._lot_size_for_symbol(symbol))
                 if product not in {"MIS", "NRML"} or lot <= 0 or abs(qty) % lot:
                     raise ValueError("broker_position_lot_or_product_invalid")
+                if symbol in initial:
+                    # A symbol-keyed flatten cannot safely disarm and reduce
+                    # two different broker product positions at once.
+                    raise ValueError("broker_position_product_ambiguous")
                 initial[symbol] = (qty, product, lot)
         if cancel_first:
             cancel_result = cancel_pending_orders(self)
@@ -274,6 +284,17 @@ def flatten_all(
             positions = _position_rows(self)
     except Exception as exc:
         failed.append({"reason": f"broker_proof_unavailable:{type(exc).__name__}"})
+        if cancel_result["cancelled"]:
+            _logger(self).critical(
+                "OPERATOR_FLATTEN_PROTECTION_UNVERIFIED cancelled=%s error_type=%s",
+                cancel_result["cancelled"],
+                type(exc).__name__,
+                extra={
+                    "event": "OPERATOR_FLATTEN_PROTECTION_UNVERIFIED",
+                    "cancelled": cancel_result["cancelled"],
+                    "error_type": type(exc).__name__,
+                },
+            )
         return {"cancel": cancel_result, "submitted": submitted, "failed": failed}
 
     seen: set[str] = set()

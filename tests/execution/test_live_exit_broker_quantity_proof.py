@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,14 @@ import pytest
 from nifty_scalper_bot.execution.order_manager import (
     OrderManager,
     OrderPlacementError,
+    OrderStatus,
     OrderType,
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_snapshot import (
+    PositionSnapshotError,
+    decode_position_snapshot,
+)
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 SYMBOL = "NFO:NIFTY26NOV25700CE"
@@ -26,6 +32,10 @@ class _Broker:
         self.orders: list[dict] = []
         self.reply: dict = {"order_id": "new-order", "status": "SUBMITTED"}
         self.position_outage = False
+        self.working_orders: list[dict] = []
+
+    def get_orders(self):
+        return list(self.working_orders)
 
     def get_positions(self):
         if self.position_outage:
@@ -66,7 +76,7 @@ def test_live_exit_never_trusts_stale_local_65_unit_position(
     manager, broker = _manager(monkeypatch, tmp_path, _Broker(quantity=broker_quantity))
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] in {
@@ -84,7 +94,7 @@ def test_unavailable_broker_snapshot_is_not_treated_as_local_exposure(
     broker.position_outage = True
     monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
 
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] == "exit_broker_position_unavailable"
@@ -107,7 +117,10 @@ def test_trusted_entry_instrument_lot_survives_temporary_resolver_outage(
 
     monkeypatch.setattr(manager, "_lot_size_for_symbol", offline)
 
-    assert manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT") is None
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
+        is None
+    )
 
 
 def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
@@ -119,7 +132,7 @@ def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
         raise OrderPlacementError("lot_size_unresolved")
 
     monkeypatch.setattr(manager, "_lot_size_for_symbol", offline)
-    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT")
+    result = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
 
     assert result is not None
     assert result["reason"] == "exit_lot_size_unresolved"
@@ -189,3 +202,257 @@ def test_low_level_broker_ack_requires_real_order_id(
 
     assert len(broker.orders) == 1
     assert "None" not in manager._orders
+
+
+def test_multi_product_snapshot_preserves_each_signed_broker_exposure() -> None:
+    snapshot = decode_position_snapshot(
+        {
+            "net": [
+                {"tradingsymbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"tradingsymbol": SYMBOL, "quantity": -65, "product": "NRML"},
+            ]
+        }
+    )
+    assert snapshot.all_flat is False
+    assert snapshot.quantity_for(SYMBOL, product="MIS") == 65
+    assert snapshot.quantity_for(SYMBOL, product="NRML") == -65
+    with pytest.raises(PositionSnapshotError, match="product ambiguous"):
+        snapshot.quantity_for(SYMBOL)
+
+
+def test_live_exit_uses_exact_product_not_cross_product_net(monkeypatch, tmp_path):
+    manager, broker = _manager(monkeypatch, tmp_path)
+    broker.get_positions = lambda: {
+        "net": [
+            {"tradingsymbol": SYMBOL, "quantity": 65, "product": "MIS"},
+            {"tradingsymbol": SYMBOL, "quantity": -65, "product": "NRML"},
+        ]
+    }
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
+        is None
+    )
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "BUY", 65, "EXIT", "NRML")
+        is None
+    )
+    assert (
+        manager._validate_option_exit_quantity(SYMBOL, "SELL", 130, "EXIT", "MIS")[
+            "reason"
+        ]
+        == "exit_quantity_exceeds_position"
+    )
+
+
+def test_live_exit_refuses_broker_position_missing_product(monkeypatch, tmp_path):
+    manager, broker = _manager(monkeypatch, tmp_path)
+    broker.position_product = ""
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    blocked = manager._validate_option_exit_quantity(SYMBOL, "SELL", 65, "EXIT", "MIS")
+    assert blocked is not None
+    assert blocked["reason"] == "exit_broker_product_unavailable"
+
+    with pytest.raises(OrderPlacementError, match="exit_broker_product_unavailable"):
+        manager._place_exit_order(
+            symbol=SYMBOL,
+            side="SELL",
+            quantity=65,
+            product="MIS",
+            tag="FORCE_SL_EXIT",
+        )
+    assert not broker.orders
+
+
+def test_multi_product_snapshot_rejects_missing_or_duplicate_identity() -> None:
+    with pytest.raises(PositionSnapshotError):
+        decode_position_snapshot(
+            [
+                {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"symbol": SYMBOL, "quantity": 0},
+            ]
+        )
+    with pytest.raises(PositionSnapshotError, match="duplicate broker position"):
+        decode_position_snapshot(
+            [
+                {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+                {"symbol": SYMBOL, "quantity": 0, "product": "MIS"},
+            ]
+        )
+
+
+def test_legacy_exit_uses_the_native_durable_submission_owner(
+    monkeypatch, tmp_path
+) -> None:
+    import nifty_scalper_bot.execution.order_manager_core as core
+
+    manager, _broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    calls: list[dict] = []
+    manager._orders["native-exit"] = SimpleNamespace(order_id="native-exit")
+
+    def native_place(**kwargs):
+        calls.append(kwargs)
+        return "native-exit"
+
+    def reject_parallel_path(**_kwargs):
+        pytest.fail("legacy exit must not bypass the native owner")
+
+    monkeypatch.setattr(manager, "place_order", native_place)
+    monkeypatch.setattr(manager, "_place_single_order", reject_parallel_path)
+
+    def route(**kwargs):
+        ok, order_id, _error = kwargs["submit"]("MIS", "IOC", "regular")
+        return SimpleNamespace(
+            ok=ok,
+            order_id=order_id,
+            reason=None,
+            attempts=[SimpleNamespace(attempt=1)],
+        )
+
+    monkeypatch.setattr(core, "plan_and_send_exit", route)
+    details = manager._place_exit_order(
+        symbol=SYMBOL, side="SELL", quantity=65, product="MIS", tag="FORCE_SL_EXIT"
+    )
+
+    assert details.order_id == "native-exit"
+    assert len(calls) == 1
+    assert calls[0]["intent"] == "EXIT"
+    assert calls[0]["check_risk"] is False
+    assert calls[0]["product"] == "MIS"
+    assert calls[0]["quantity"] == 65
+
+
+def test_symbol_keyed_position_manager_refuses_dual_product_overwrite(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _broker = _manager(monkeypatch, tmp_path)
+    existing = manager._positions.get_position(SYMBOL)
+    assert existing is not None
+
+    with pytest.raises(PositionSnapshotError, match="multiple broker products"):
+        manager._positions._synchronize_managed_positions_from_broker(
+            [
+                {
+                    "symbol": SYMBOL,
+                    "quantity": 65,
+                    "product": "MIS",
+                    "average_price": 145.0,
+                    "last_price": 145.0,
+                },
+                {
+                    "symbol": SYMBOL,
+                    "quantity": -65,
+                    "product": "NRML",
+                    "average_price": 145.0,
+                    "last_price": 145.0,
+                },
+            ]
+        )
+
+    assert manager._positions.get_position(SYMBOL) is existing
+
+
+def test_native_exit_refuses_duplicate_while_broker_reduction_working(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["existing-reduction"] = SimpleNamespace(
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    broker.working_orders = [
+        {
+            "order_id": "existing-reduction",
+            "tradingsymbol": SYMBOL.split(":", 1)[-1],
+            "status": "OPEN",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "product": "MIS",
+        }
+    ]
+
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert broker.orders == []
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
+def test_native_exit_fails_closed_when_existing_reduction_book_unreadable(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["existing-reduction"] = SimpleNamespace(
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc),
+    )
+    broker.get_orders = lambda: None
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert not broker.orders
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"
+
+
+def test_exit_complete_but_position_snapshot_lag_never_reverses_exposure(
+    monkeypatch, tmp_path
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+    manager._orders["filled-awaiting-positions"] = SimpleNamespace(
+        order_id="filled-awaiting-positions",
+        symbol=SYMBOL,
+        side="SELL",
+        status=OrderStatus.SUBMITTED,
+        timestamp=datetime.now(timezone.utc),
+    )
+    # Broker order is terminal, but a stale NET snapshot still reports 65.
+    broker.working_orders = [
+        {
+            "order_id": "filled-awaiting-positions",
+            "tradingsymbol": SYMBOL.split(":", 1)[-1],
+            "status": "COMPLETE",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "product": "MIS",
+        }
+    ]
+
+    result = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        product="MIS",
+    )
+
+    assert result is None
+    assert not broker.orders
+    assert manager._last_order_decision["block_reason"] == "broker_reduction_working"

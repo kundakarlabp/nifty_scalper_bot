@@ -4964,6 +4964,14 @@ class PositionManager:
         """Validate and atomically replace managed positions from broker truth."""
         try:
             snapshot = decode_position_snapshot(broker_positions)
+            # This symbol-keyed registry represents one MIS position per symbol.
+            # Do not collapse two distinct broker products into the last row
+            # until the registry itself has product-qualified position keys.
+            symbols = [row.symbol for row in snapshot.rows]
+            if len(symbols) != len(set(symbols)):
+                raise PositionSnapshotError(
+                    "multiple broker products cannot share a symbol-keyed position"
+                )
         except Exception as exc:
             with self._lock:
                 self._last_broker_position_snapshot_failure_at = time.time()

@@ -3283,28 +3283,72 @@ class OrderManager:
                 if o.symbol == normalized_symbol
                 and o.side == side
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
-                # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
-                # This prevents getting stuck forever if an order is lost in limbo
-                and (current_time - self._timestamp_seconds(o.timestamp) < 45)
+                # Old local entry intents expire from dedup after 45 seconds.
+                # A reducing order remains blocked on broker working reduction
+                # or a completed, still-unreconciled same-side exit.
+                and (
+                    is_system_exit
+                    or current_time - self._timestamp_seconds(o.timestamp) < 45
+                )
             ]
 
+            # A broker COMPLETE can precede its position-snapshot update.
+            # Keep that exact local pending exit frozen until it reconciles.
+            pending_ids = {
+                str(getattr(order, "order_id", "") or "") for order in pending_orders
+            }
             broker_has_live_pending = False
-            if pending_orders and hasattr(self._broker, "get_orders"):
-                try:
-                    broker_orders = self._broker.get_orders() or []
-                    broker_has_live_pending = any(
-                        isinstance(order, Mapping)
-                        and str(order.get("status") or "").upper()
-                        in {"OPEN", "TRIGGER PENDING", "PENDING"}
-                        and (
-                            str(order.get("tradingsymbol") or "").upper()
-                            == normalized_symbol.split(":", 1)[-1]
-                            or str(order.get("symbol") or "").upper()
-                            == normalized_symbol
+            if pending_orders:
+                broker_orders_fetch = getattr(self._broker, "get_orders", None)
+                if callable(broker_orders_fetch):
+                    try:
+                        broker_orders = broker_orders_fetch()
+                        if not isinstance(broker_orders, list):
+                            raise ValueError("broker_orderbook_unavailable")
+                        broker_has_live_pending = any(
+                            isinstance(order, Mapping)
+                            and (
+                                str(order.get("status") or "").upper()
+                                in {
+                                    "OPEN",
+                                    "OPEN PENDING",
+                                    "TRIGGER PENDING",
+                                    "PENDING",
+                                    "VALIDATION PENDING",
+                                    "PUT ORDER REQ RECEIVED",
+                                    "MODIFY PENDING",
+                                }
+                                or (
+                                    is_system_exit
+                                    and str(order.get("status") or "").upper()
+                                    in {"COMPLETE", "FILLED"}
+                                    and str(order.get("order_id") or "") in pending_ids
+                                )
+                            )
+                            and (
+                                str(order.get("tradingsymbol") or "").upper()
+                                == normalized_symbol.split(":", 1)[-1]
+                                or str(order.get("symbol") or "").upper()
+                                == normalized_symbol
+                            )
+                            and (
+                                not is_system_exit
+                                or (
+                                    str(
+                                        order.get("transaction_type")
+                                        or order.get("side")
+                                        or ""
+                                    ).upper()
+                                    == normalized_side
+                                    and str(order.get("product") or "").upper()
+                                    in {"", str(product or "").upper()}
+                                )
+                            )
+                            for order in broker_orders
                         )
-                        for order in broker_orders
-                    )
-                except Exception:
+                    except Exception:
+                        broker_has_live_pending = True
+                elif is_system_exit and self.is_live_mode():
                     broker_has_live_pending = True
 
             if pending_orders and broker_has_live_pending and not is_system_exit:
@@ -3320,13 +3364,22 @@ class OrderManager:
                     allowed=False, block_reason="fresh_pending_order_exists"
                 )
                 return None
-            elif pending_orders and is_system_exit:
-                self._logger.warning(
-                    "⚠️ PENDING exit order already exists for %s — allowing new exit attempt "
-                    "(dedup bypassed for system exit to prevent position bleed).",
+            elif pending_orders and is_system_exit and broker_has_live_pending:
+                # A second SELL/BUY exit can reverse a still-working reduction.
+                # Retry only after broker-confirmed terminal cancellation or fill.
+                self._logger.critical(
+                    "EXIT_SUBMISSION_HELD symbol=%s reason=broker_reduction_working",
                     normalized_symbol,
-                    extra={"event": "exit_dedup_bypass", "symbol": normalized_symbol},
+                    extra={
+                        "event": "EXIT_SUBMISSION_HELD",
+                        "symbol": normalized_symbol,
+                        "reason": "broker_reduction_working",
+                    },
                 )
+                _log_order_decision(
+                    allowed=False, block_reason="broker_reduction_working"
+                )
+                return None
 
             # ── SINGLE-POSITION GATE (cross-strike, atomic at the choke point) ──
             # One NIFTY option exposure at a time. Reject a second ENTRY while
@@ -12146,50 +12199,36 @@ class OrderManager:
             planned_product: str, validity: str, variety: str
         ) -> tuple[bool, str | None, str | None]:
             nonlocal last_details
-            overrides = {
-                "product": planned_product,
-                "validity": validity,
-                "variety": variety,
-            }
+            # The public owner alone holds the durable exit reservation and
+            # broker-state deduplication. The old direct _place_single_order
+            # call bypassed those cross-path protections.
             try:
-                last_details = self._place_single_order(
+                order_id = self.place_order(
                     symbol=symbol,
                     side=side,
                     quantity=quantity,
                     order_type=OrderType.MARKET,
                     price=None,
                     product=planned_product,
+                    variety=variety,
                     tag=tag,
-                    payload_overrides=overrides,
+                    check_risk=False,
+                    intent="EXIT",
+                    strategy_name="legacy_protective_exit",
                 )
-            except OrderPlacementError as exc:
+            except Exception as exc:  # noqa: BLE001 - uncertain stays reserved
                 self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_attempt_failed",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                        "product": planned_product,
-                        "validity": validity,
-                        "variety": variety,
-                    },
+                    "LEGACY_EXIT_NATIVE_SUBMISSION_ERROR symbol=%s error_type=%s",
+                    symbol,
+                    type(exc).__name__,
                 )
                 return False, None, str(exc)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_unexpected",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                    },
-                )
-                return False, None, str(exc)
-            return True, last_details.order_id, None
+            if not order_id:
+                return False, None, "native_exit_owner_blocked"
+            last_details = self._orders.get(str(order_id))
+            if last_details is None:
+                return False, None, "native_exit_order_not_registered"
+            return True, str(order_id), None
 
         try:
             result = plan_and_send_exit(
@@ -14524,14 +14563,35 @@ class OrderManager:
                 if not callable(fetcher):
                     raise ValueError("broker_position_fetcher_unavailable")
                 snapshot = decode_position_snapshot(fetcher())
-                net_qty = snapshot.quantity_for(symbol)
-                broker_product = next(
-                    (
-                        str(row.raw.get("product") or "").strip().upper()
-                        for row in snapshot.rows
-                        if row.symbol == normalize_symbol(symbol)
-                    ),
-                    "",
+                matching_rows = [
+                    row
+                    for row in snapshot.rows
+                    if row.symbol == normalize_symbol(symbol)
+                ]
+                expected_product = str(product or "").strip().upper()
+                broker_products = {
+                    str(row.raw.get("product") or "").strip().upper()
+                    for row in matching_rows
+                }
+                if matching_rows and (not expected_product or "" in broker_products):
+                    return {
+                        "reason": "exit_broker_product_unavailable",
+                        "symbol": symbol,
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                if matching_rows and expected_product not in broker_products:
+                    return {
+                        "reason": "exit_broker_product_mismatch",
+                        "symbol": symbol,
+                        "broker_product": ",".join(sorted(broker_products)),
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                net_qty = snapshot.quantity_for(
+                    symbol, product=expected_product or None
                 )
             except Exception as exc:  # noqa: BLE001 - unknown is not flat
                 return {
@@ -14539,20 +14599,6 @@ class OrderManager:
                     "symbol": symbol,
                     "requested_exit_units": quantity,
                     "error_type": type(exc).__name__,
-                    "intent": intent,
-                }
-            expected_product = str(product or "").strip().upper()
-            if (
-                broker_product
-                and expected_product
-                and broker_product != expected_product
-            ):
-                return {
-                    "reason": "exit_broker_product_mismatch",
-                    "symbol": symbol,
-                    "broker_product": broker_product,
-                    "requested_product": expected_product,
-                    "requested_exit_units": quantity,
                     "intent": intent,
                 }
             open_units = abs(net_qty)
