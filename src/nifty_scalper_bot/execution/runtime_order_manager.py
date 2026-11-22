@@ -790,7 +790,7 @@ def _depth_top_quantity(quote: Any, side: str) -> int:
     for key in ("quantity", "qty"):
         value = top.get(key)
         try:
-            parsed = int(float(value))
+            parsed = int(float(value or 0))
         except (TypeError, ValueError):
             continue
         if parsed > 0:
