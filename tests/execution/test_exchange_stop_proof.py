@@ -292,3 +292,9 @@ def test_unrelated_stop_cannot_confirm_pending_adaptive_owner() -> None:
 
     assert manager._confirm_exchange_protective_stop(bracket) is True
     assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+    bracket.trailing_config["_adaptive_profit_pending_confirmation"] = {
+        "order_id": "stop-123",
+        "stop": 108.0,
+    }
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
