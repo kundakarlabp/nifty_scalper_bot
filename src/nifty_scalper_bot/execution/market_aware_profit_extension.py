@@ -292,7 +292,9 @@ def _chain_pcr(manager: Any) -> float | None:
     return pe_oi / ce_oi
 
 
-def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
+def _quote_age_seconds(
+    quote: Mapping[str, Any], *, require_exchange_time: bool = False
+) -> float | None:
     """Require fresh exchange-time evidence; never replace it with receipt time.
 
     MDM normalizes broker-local naive exchange datetimes into an aware
@@ -318,6 +320,8 @@ def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
                 stamp = datetime.fromisoformat(canonical.replace("Z", "+00:00"))
                 if stamp.tzinfo is not None:
                     authoritative = canonical
+    if require_exchange_time and authoritative is None:
+        return None
     raw = authoritative or (
         quote.get("exchange_timestamp")
         or quote.get("timestamp")
@@ -974,6 +978,18 @@ def _ratchet_stop(
         bracket.updated_at = time.time()
         bracket.last_trail_price = float(ltp)
         bracket.trail_revision = int(getattr(bracket, "trail_revision", 0) or 0) + 1
+        live_probe = getattr(manager, "_is_live_execution", None)
+        if (
+            reason == "adaptive_profit_lock"
+            and callable(live_probe)
+            and live_probe()
+        ):
+            config = getattr(bracket, "trailing_config", None)
+            if isinstance(config, dict):
+                config["_adaptive_profit_pending_confirmation"] = {
+                    "order_id": str(getattr(bracket, "exchange_stop_order_id", "") or ""),
+                    "stop": candidate,
+                }
 
     LOGGER.info(
         "MARKET_AWARE_PROFIT_FLOOR_RATCHET symbol=%s old_sl=%.2f new_sl=%.2f ltp=%.2f reason=%s",
@@ -1282,7 +1298,9 @@ def _adaptive_executable_bid(
     """Require recent FULL-size bid depth, not last-trade-price excursions."""
     symbol = str(getattr(bracket, "symbol", ""))
     quote = _quote(manager, symbol)
-    age = _quote_age_seconds(quote)
+    live_probe = getattr(manager, "_is_live_execution", None)
+    live = bool(live_probe()) if callable(live_probe) else False
+    age = _quote_age_seconds(quote, require_exchange_time=live)
     max_age = _adaptive_positive_env("ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0)
     if age is None or age > max_age:
         return None
@@ -1317,8 +1335,7 @@ def _adaptive_executable_bid(
     # WS arrival may publish a later FULL book before the serial protection
     # callback evaluates its earlier tick. LIVE adaptive protection must use
     # the same fresh bid/ask seen by the canonical bracket exit owner.
-    live_probe = getattr(manager, "_is_live_execution", None)
-    if callable(live_probe) and live_probe():
+    if live:
         current_books = getattr(manager, "_exit_quotes", None)
         current = (
             current_books.get(symbol) if isinstance(current_books, Mapping) else None
@@ -1730,9 +1747,8 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         _trace_adaptive_no_ratchet(manager, bracket, "ratchet_rejected", quote=quote)
         return False
-    # Once the continuation-aware owner has moved protection, never run a
-    # competing legacy tier later merely because adaptive holds its stop.
-    config["_adaptive_profit_has_ratcheted"] = True
+    # A virtual candidate is not broker protection. The canonical exchange
+    # stop confirmer assigns durable adaptive ownership after orderbook proof.
     provenance = getattr(bracket, "trade_provenance", None)
     if isinstance(provenance, dict):
         # A successful modify_order response updates the local broker record;
@@ -1811,13 +1827,22 @@ def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bo
     ownership_proof = getattr(bracket, "trade_provenance", None)
     if adaptive_profit_lock_enabled(manager):
         if isinstance(owner_config, dict) and (
-            owner_config.get("_adaptive_profit_has_ratcheted") is True
-            or owner_config.get("_adaptive_profit_state") == "STRONG"
+            owner_config.get("_adaptive_profit_state") == "STRONG"
+            or (
+                owner_config.get("_adaptive_profit_has_ratcheted") is True
+                and owner_config.get("_adaptive_profit_confirmed_order_id")
+                == getattr(bracket, "exchange_stop_order_id", None)
+            )
         ):
             return False
-        if isinstance(ownership_proof, Mapping) and isinstance(
-            ownership_proof.get("adaptive_profit_lock"), Mapping
-        ):
+        proof = (
+            ownership_proof.get("adaptive_profit_lock")
+            if isinstance(ownership_proof, Mapping)
+            else None
+        )
+        if isinstance(proof, Mapping) and _positive(
+            proof.get("broker_orderbook_confirmed_stop")
+        ) is not None:
             return False
     if (
         str(getattr(bracket, "side", "")).upper() != "BUY"
