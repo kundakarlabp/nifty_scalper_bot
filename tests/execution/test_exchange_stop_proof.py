@@ -340,8 +340,7 @@ def test_new_stop_submission_is_unverified_until_exact_broker_readback() -> None
     )
     observed = []
     manager._confirm_exchange_protective_stop = (
-        lambda bracket: observed.append(bracket.exchange_stop_degraded_reason)
-        or False
+        lambda bracket: observed.append(bracket.exchange_stop_degraded_reason) or False
     )
     bracket = SimpleNamespace(
         bracket_id="entry-1",

@@ -1122,13 +1122,10 @@ def extend_final_target_if_supported(
     if live:
         broker_stop = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
         required_stop = _round_tick(candidate_sl)
-        locked = (
-            broker_stop is not None
-            and (
-                broker_stop >= required_stop - (_TICK_SIZE / 2)
-                if side == "BUY"
-                else broker_stop <= required_stop + (_TICK_SIZE / 2)
-            )
+        locked = broker_stop is not None and (
+            broker_stop >= required_stop - (_TICK_SIZE / 2)
+            if side == "BUY"
+            else broker_stop <= required_stop + (_TICK_SIZE / 2)
         )
         if not locked or not _protected_profit_floor(manager, bracket):
             return action
