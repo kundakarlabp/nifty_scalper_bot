@@ -866,7 +866,7 @@ class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
 
     def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
-        """Extend core diagnostics with the existing canonical Zerodha depth resolver."""
+        """Extend core diagnostics with existing Zerodha FULL depth fields."""
         diagnostics = dict(_core.OrderManager._extract_quote_diagnostics(self, quote))
         if not isinstance(quote, Mapping):
             return diagnostics
