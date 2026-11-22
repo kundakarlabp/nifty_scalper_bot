@@ -4,10 +4,12 @@
 Key responsibilities:
     - Reject missing, malformed, partial, cached, or ambiguous exposure data.
     - Normalize symbols and net quantities once for every execution subsystem.
-    - Provide deterministic symbol and account-flat queries.
+    - Provide product-qualified signed quantities and account-flat queries.
+    - Refuse symbol-only quantities when distinct MIS/NRML rows coexist.
 
 Operational constraints:
     - Only a valid complete snapshot may prove flatness.
+    - Missing product identity never authorizes a reducing order.
     - ``day`` rows and stale cache payloads are never exposure authority.
     - Malformed rows invalidate the complete snapshot rather than being skipped.
 """
