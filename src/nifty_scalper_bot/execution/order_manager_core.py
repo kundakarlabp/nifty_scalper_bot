@@ -3285,26 +3285,56 @@ class OrderManager:
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
                 # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
                 # This prevents getting stuck forever if an order is lost in limbo
-                and (current_time - self._timestamp_seconds(o.timestamp) < 45)
+                and (
+                    is_system_exit
+                    or current_time - self._timestamp_seconds(o.timestamp) < 45
+                )
             ]
 
             broker_has_live_pending = False
-            if pending_orders and hasattr(self._broker, "get_orders"):
-                try:
-                    broker_orders = self._broker.get_orders() or []
-                    broker_has_live_pending = any(
-                        isinstance(order, Mapping)
-                        and str(order.get("status") or "").upper()
-                        in {"OPEN", "TRIGGER PENDING", "PENDING"}
-                        and (
-                            str(order.get("tradingsymbol") or "").upper()
-                            == normalized_symbol.split(":", 1)[-1]
-                            or str(order.get("symbol") or "").upper()
-                            == normalized_symbol
+            if pending_orders:
+                broker_orders_fetch = getattr(self._broker, "get_orders", None)
+                if callable(broker_orders_fetch):
+                    try:
+                        broker_orders = broker_orders_fetch()
+                        if not isinstance(broker_orders, list):
+                            raise ValueError("broker_orderbook_unavailable")
+                        broker_has_live_pending = any(
+                            isinstance(order, Mapping)
+                            and str(order.get("status") or "").upper()
+                            in {
+                                "OPEN",
+                                "OPEN PENDING",
+                                "TRIGGER PENDING",
+                                "PENDING",
+                                "VALIDATION PENDING",
+                                "PUT ORDER REQ RECEIVED",
+                                "MODIFY PENDING",
+                            }
+                            and (
+                                str(order.get("tradingsymbol") or "").upper()
+                                == normalized_symbol.split(":", 1)[-1]
+                                or str(order.get("symbol") or "").upper()
+                                == normalized_symbol
+                            )
+                            and (
+                                not is_system_exit
+                                or (
+                                    str(
+                                        order.get("transaction_type")
+                                        or order.get("side")
+                                        or ""
+                                    ).upper()
+                                    == normalized_side
+                                    and str(order.get("product") or "").upper()
+                                    in {"", str(product or "").upper()}
+                                )
+                            )
+                            for order in broker_orders
                         )
-                        for order in broker_orders
-                    )
-                except Exception:
+                    except Exception:
+                        broker_has_live_pending = True
+                elif is_system_exit and self.is_live_mode():
                     broker_has_live_pending = True
 
             if pending_orders and broker_has_live_pending and not is_system_exit:
@@ -3320,13 +3350,22 @@ class OrderManager:
                     allowed=False, block_reason="fresh_pending_order_exists"
                 )
                 return None
-            elif pending_orders and is_system_exit:
-                self._logger.warning(
-                    "⚠️ PENDING exit order already exists for %s — allowing new exit attempt "
-                    "(dedup bypassed for system exit to prevent position bleed).",
+            elif pending_orders and is_system_exit and broker_has_live_pending:
+                # A second SELL/BUY exit can reverse a still-working reduction.
+                # Retry only after broker-confirmed terminal cancellation or fill.
+                self._logger.critical(
+                    "EXIT_SUBMISSION_HELD symbol=%s reason=broker_reduction_working",
                     normalized_symbol,
-                    extra={"event": "exit_dedup_bypass", "symbol": normalized_symbol},
+                    extra={
+                        "event": "EXIT_SUBMISSION_HELD",
+                        "symbol": normalized_symbol,
+                        "reason": "broker_reduction_working",
+                    },
                 )
+                _log_order_decision(
+                    allowed=False, block_reason="broker_reduction_working"
+                )
+                return None
 
             # ── SINGLE-POSITION GATE (cross-strike, atomic at the choke point) ──
             # One NIFTY option exposure at a time. Reject a second ENTRY while
