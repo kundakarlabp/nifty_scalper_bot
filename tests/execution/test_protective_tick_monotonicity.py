@@ -53,12 +53,18 @@ def test_older_protection_event_does_not_trigger_spurious_stop() -> None:
     now = time.time() - 1.0
 
     manager.on_tick(
-        SYMBOL, 110.0, exchange_ts=now,
-        tick=_full_tick(110.0, 109.8, now), defer_submission=True,
+        SYMBOL,
+        110.0,
+        exchange_ts=now,
+        tick=_full_tick(110.0, 109.8, now),
+        defer_submission=True,
     )
     manager.on_tick(
-        SYMBOL, 90.0, exchange_ts=now - 1.0,
-        tick=_full_tick(90.0, 89.8, now - 1.0), defer_submission=True,
+        SYMBOL,
+        90.0,
+        exchange_ts=now - 1.0,
+        tick=_full_tick(90.0, 89.8, now - 1.0),
+        defer_submission=True,
     )
 
     assert bracket.last_ltp == 110.0
@@ -71,12 +77,18 @@ def test_same_second_changed_option_price_still_triggers_protection() -> None:
     now = time.time() - 1.0
 
     manager.on_tick(
-        SYMBOL, 110.0, exchange_ts=now,
-        tick=_full_tick(110.0, 109.8, now), defer_submission=True,
+        SYMBOL,
+        110.0,
+        exchange_ts=now,
+        tick=_full_tick(110.0, 109.8, now),
+        defer_submission=True,
     )
     manager.on_tick(
-        SYMBOL, 90.0, exchange_ts=now,
-        tick=_full_tick(90.0, 89.8, now), defer_submission=True,
+        SYMBOL,
+        90.0,
+        exchange_ts=now,
+        tick=_full_tick(90.0, 89.8, now),
+        defer_submission=True,
     )
 
     assert bracket.last_ltp == 90.0
@@ -89,8 +101,11 @@ def test_depthless_untimestamped_protection_event_clears_prior_bid() -> None:
     manager, bracket = _manager()
     now = time.time() - 1.0
     manager.on_tick(
-        SYMBOL, 110.0, exchange_ts=now,
-        tick=_full_tick(110.0, 109.8, now), defer_submission=True,
+        SYMBOL,
+        110.0,
+        exchange_ts=now,
+        tick=_full_tick(110.0, 109.8, now),
+        defer_submission=True,
     )
     manager.on_tick(SYMBOL, 110.0, exchange_ts=None, defer_submission=True)
 
