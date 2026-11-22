@@ -1,4 +1,13 @@
-"""Typed broker-position evidence for fail-closed reconciliation."""
+"""Purpose: Return conservative, typed broker-position evidence for reconciliation.
+
+Responsibilities:
+- Validate integer broker quantities and normalize contract symbols.
+- Preserve unknown state for duplicate or cross-product exposures.
+- Distinguish complete empty-position responses from ambiguous payloads.
+
+Boundaries: Canonical live placement uses product-qualified position_snapshot.
+Safety: Opposing broker products must never prove that a position is flat.
+"""
 
 from __future__ import annotations
 
