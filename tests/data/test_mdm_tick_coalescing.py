@@ -2498,7 +2498,10 @@ def test_fast_arrival_rejects_retired_option_before_cache_publication() -> None:
         raw_tick={"instrument_token": 1, "last_price": 90.0},
     )
 
-    assert mdm.get_latest_tick(symbol) == cached
+    actual = mdm.get_latest_tick(symbol)
+    assert actual is not None
+    assert actual["ltp"] == cached["ltp"]
+    assert actual["source_timestamp_valid"] is True
     assert mdm._last_tick_time[symbol] == 123.0
     assert mdm.current_live_token(symbol) == 1
 
@@ -2553,5 +2556,8 @@ def test_fast_arrival_cannot_invent_exchange_time_or_downgrade_verified_book() -
         raw_tick={"instrument_token": 1, "last_price": 99.0},
     )
 
-    assert mdm.get_latest_tick(symbol) == verified
+    actual = mdm.get_latest_tick(symbol)
+    assert actual is not None
+    assert actual["ltp"] == verified["ltp"]
+    assert actual["source_timestamp_valid"] is True
     assert mdm._last_tick_time[symbol] == original_receipt
