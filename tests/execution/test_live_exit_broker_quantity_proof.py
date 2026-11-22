@@ -116,6 +116,25 @@ def test_unknown_contract_lot_blocks_live_exit_without_proven_entry_lot(
     assert result["reason"] == "exit_lot_size_unresolved"
 
 
+@pytest.mark.parametrize("broker_quantity", [0, 35, -65])
+def test_legacy_exit_router_cannot_bypass_live_signed_broker_position_check(
+    monkeypatch, tmp_path, broker_quantity
+) -> None:
+    manager, broker = _manager(monkeypatch, tmp_path, _Broker(quantity=broker_quantity))
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _symbol: 65)
+
+    with pytest.raises(OrderPlacementError, match="Exit preflight blocked"):
+        manager._place_exit_order(
+            symbol=SYMBOL,
+            side="SELL",
+            quantity=65,
+            product="MIS",
+            tag="FORCE_SL_EXIT",
+        )
+
+    assert not broker.orders
+
+
 @pytest.mark.parametrize("invalid_order_id", [None, "", "None", 0])
 def test_low_level_broker_ack_requires_real_order_id(
     monkeypatch, tmp_path, invalid_order_id
