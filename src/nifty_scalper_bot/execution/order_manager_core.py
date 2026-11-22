@@ -33,6 +33,8 @@ Safe-edit notes:
   responses remain blocked across timeout and process restart until reconciled.
 - Selected-option bid/ask admission applies to entry, not protective reductions;
   an attached canonical bracket exclusively owns stop-triggered exits.
+- LIVE reducing quantities require fresh signed broker net and authoritative
+  instrument-lot proof; an acknowledged low-level order needs a real order ID.
 - Parent-level broker margin screens reuse the existing PositionManager and
   RiskManager. They never place linked children or authorize LIVE baskets.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
@@ -106,6 +108,7 @@ from nifty_scalper_bot.execution.margin_engine import (
     SizingResult,
 )
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
+from nifty_scalper_bot.execution.position_snapshot import decode_position_snapshot
 from nifty_scalper_bot.execution.position_manager import (
     OrderIntent,
     PositionManager,
@@ -3251,7 +3254,11 @@ class OrderManager:
         )
         if is_option_exit:
             exit_validation = self._validate_option_exit_quantity(
-                normalized_symbol, normalized_side, int(quantity), normalized_intent
+                normalized_symbol,
+                normalized_side,
+                int(quantity),
+                normalized_intent,
+                product,
             )
             if exit_validation is not None:
                 _log_order_decision(
@@ -11705,9 +11712,14 @@ class OrderManager:
         if payload_overrides:
             payload.update(payload_overrides)
         response = self._submit_order_with_retry(payload)
-        order_id = str(response.get("order_id"))
-        if not order_id:
+        broker_order_id = response.get("order_id")
+        if (
+            broker_order_id is None
+            or isinstance(broker_order_id, bool)
+            or str(broker_order_id).strip().lower() in {"", "none", "null", "0"}
+        ):
             raise OrderPlacementError("Broker response missing order_id")
+        order_id = str(broker_order_id).strip()
         status = self._parse_status(response.get("status"))
         message = response.get("message") or response.get("status_message")
         timestamp = datetime.now(timezone.utc)
@@ -12102,6 +12114,16 @@ class OrderManager:
         )
         if quantity <= 0:
             raise OrderPlacementError("Exit quantity must be positive")
+        # Legacy panic/force-stop/reduce-only routes call _place_single_order
+        # directly. Apply the same broker-backed guard as public place_order.
+        if normalize_symbol(symbol).endswith(("CE", "PE")):
+            blocked = self._validate_option_exit_quantity(
+                symbol, side, quantity, "EXIT", product or "MIS"
+            )
+            if blocked is not None:
+                raise OrderPlacementError(
+                    f"Exit preflight blocked ({blocked['reason']})"
+                )
 
         refresh: Callable[[str], None] | None = None
         market_data = self._market_data
@@ -14469,7 +14491,12 @@ class OrderManager:
         return True
 
     def _validate_option_exit_quantity(
-        self, symbol: str, side: str, quantity: int, intent: str
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        intent: str,
+        product: str | None = None,
     ) -> dict[str, Any] | None:
         getter = getattr(self._positions, "get_position", None)
         position = None
@@ -14482,7 +14509,55 @@ class OrderManager:
                     break
         open_units = abs(int(getattr(position, "quantity", 0) or 0))
         position_side = str(getattr(position, "side", "") or "").upper()
-        if open_units <= 0:
+        try:
+            live = bool(self.is_live_mode())
+        except AttributeError:
+            # Partially initialized recovery/test owners have no live authority.
+            live = False
+        if live:
+            # A locally held one-lot position can already be flat at Kite.
+            # Read the signed broker NET position before any reducing order.
+            fetcher = getattr(self._broker, "get_positions", None)
+            if not callable(fetcher):
+                fetcher = getattr(self._broker, "positions", None)
+            try:
+                if not callable(fetcher):
+                    raise ValueError("broker_position_fetcher_unavailable")
+                snapshot = decode_position_snapshot(fetcher())
+                net_qty = snapshot.quantity_for(symbol)
+                broker_product = next(
+                    (
+                        str(row.raw.get("product") or "").strip().upper()
+                        for row in snapshot.rows
+                        if row.symbol == normalize_symbol(symbol)
+                    ),
+                    "",
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown is not flat
+                return {
+                    "reason": "exit_broker_position_unavailable",
+                    "symbol": symbol,
+                    "requested_exit_units": quantity,
+                    "error_type": type(exc).__name__,
+                    "intent": intent,
+                }
+            expected_product = str(product or "").strip().upper()
+            if (
+                broker_product
+                and expected_product
+                and broker_product != expected_product
+            ):
+                return {
+                    "reason": "exit_broker_product_mismatch",
+                    "symbol": symbol,
+                    "broker_product": broker_product,
+                    "requested_product": expected_product,
+                    "requested_exit_units": quantity,
+                    "intent": intent,
+                }
+            open_units = abs(net_qty)
+            position_side = "LONG" if net_qty > 0 else ("SHORT" if net_qty < 0 else "")
+        elif open_units <= 0:
             broker_positions = getattr(self._broker, "query_positions", None)
             if callable(broker_positions):
                 broker_qty = int((broker_positions() or {}).get(symbol, 0) or 0)
@@ -14507,7 +14582,28 @@ class OrderManager:
             try:
                 lot_size = self._lot_size_for_symbol(symbol)
             except OrderPlacementError:
-                if quantity != open_units:
+                # Preserve a previously broker-instrument-validated entry lot
+                # across transient resolver outages. Never trust position size
+                # itself as proof that 35 or 66 is a valid exchange lot.
+                entry_id = str(getattr(position, "order_id", "") or "")
+                entry = self._orders.get(entry_id)
+                try:
+                    remembered = int(getattr(entry, "resolved_lot_size", 0) or 0)
+                except (TypeError, ValueError):
+                    remembered = 0
+                if (
+                    live
+                    and entry is not None
+                    and normalize_symbol(str(getattr(entry, "symbol", "")))
+                    == normalize_symbol(symbol)
+                    and str(getattr(entry, "side", "")).upper() == "BUY"
+                    and str(getattr(entry, "intent", "")).upper() == "ENTRY"
+                    and remembered > 0
+                ):
+                    lot_size = remembered
+                    if quantity % lot_size != 0:
+                        reason = "exit_quantity_not_lot_multiple"
+                elif live or quantity != open_units:
                     reason = "exit_lot_size_unresolved"
             else:
                 if lot_size <= 0:
