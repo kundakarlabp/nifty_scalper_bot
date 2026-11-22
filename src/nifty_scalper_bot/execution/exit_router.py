@@ -150,7 +150,7 @@ def plan_and_send_exit(
             },
         )
         ok, order_id, error_text = submit(planned_product, validity, variety)
-        if ok:
+        if ok and order_id:
             logger.info(
                 "Condition met: exit_ok order_id=%s",
                 order_id,
