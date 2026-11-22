@@ -70,11 +70,21 @@ class _ReleaseStore:
 class _Broker:
     positions: Any
     raises: bool = False
+    orders: Any = None
+    orderbook_raises: bool = False
+    strict_orderbook_reads: int = 0
 
     def get_positions(self) -> Any:
         if self.raises:
             raise RuntimeError("broker unavailable")
         return self.positions
+
+    def get_orders(self, *, allow_cache_fallback: bool = True) -> Any:
+        if not allow_cache_fallback:
+            self.strict_orderbook_reads += 1
+        if self.orderbook_raises:
+            raise RuntimeError("orderbook unavailable")
+        return [] if self.orders is None else self.orders
 
 
 @dataclass
@@ -330,6 +340,114 @@ def test_orphan_keeps_entry_block_when_durable_clear_fails() -> None:
         raise OSError("database not writable")
 
     manager._release_store.clear = reject_clear
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+def test_flat_orphan_does_not_release_with_resting_exchange_stop() -> None:
+    broker = _Broker(
+        [],
+        orders=[
+            {
+                "order_id": "STOP-1",
+                "exchange": "NFO",
+                "tradingsymbol": SYMBOL.split(":", 1)[1],
+                "product": "MIS",
+                "order_type": "SL",
+                "transaction_type": "SELL",
+                "status": "TRIGGER PENDING",
+            }
+        ],
+    )
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"}, broker=broker
+    )
+    manager._is_live_execution = lambda: True  # type: ignore[method-assign]
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+    assert broker.strict_orderbook_reads == 1
+
+
+def test_flat_orphan_releases_after_broker_stop_cancelled() -> None:
+    broker = _Broker(
+        [],
+        orders=[
+            {
+                "order_id": "STOP-1",
+                "tradingsymbol": SYMBOL.split(":", 1)[1],
+                "product": "MIS",
+                "status": "CANCELLED",
+            }
+        ],
+    )
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"}, broker=broker
+    )
+    manager._is_live_execution = lambda: True  # type: ignore[method-assign]
+
+    manager._retry_blocked_releases()
+
+    assert manager._ledger_blocked == {}
+    assert manager._release_store.cleared == ["old-bracket"]
+    assert broker.strict_orderbook_reads == 1
+
+
+def test_flat_orphan_does_not_block_for_unrelated_product_stop() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker(
+            [],
+            orders=[
+                {
+                    "tradingsymbol": SYMBOL.split(":", 1)[1],
+                    "product": "NRML",
+                    "status": "OPEN",
+                }
+            ],
+        ),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert manager._ledger_blocked == {}
+    assert manager._release_store.cleared == ["old-bracket"]
+
+
+def test_flat_orphan_blocks_for_unknown_order_product_or_identity() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"},
+        broker=_Broker([], orders=[{"status": "OPEN"}]),
+    )
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+
+
+def test_flat_orphan_fails_closed_when_fresh_orderbook_unavailable() -> None:
+    broker = _Broker([], orderbook_raises=True)
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL, "product": "MIS"}, broker=broker
+    )
+    manager._is_live_execution = lambda: True  # type: ignore[method-assign]
+
+    manager._retry_blocked_releases()
+
+    assert "old-bracket" in manager._ledger_blocked
+    assert manager._release_store.cleared == []
+    assert broker.strict_orderbook_reads == 1
+
+
+def test_flat_orphan_rejects_malformed_orderbook_response() -> None:
+    manager = _orphan_manager(
+        payload={"symbol": SYMBOL}, broker=_Broker([], orders=[None])
+    )
+
     manager._retry_blocked_releases()
 
     assert "old-bracket" in manager._ledger_blocked
