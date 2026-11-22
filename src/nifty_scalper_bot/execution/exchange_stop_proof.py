@@ -6,7 +6,8 @@ Responsibilities:
 - Return fixed diagnostic reason tokens without leaking broker payloads.
 
 Boundaries: Pure validation only; never queries brokers, submits, or modifies orders.
-Safety: Only TRIGGER PENDING proves a resting stop; an OPEN order may already be triggered.
+Safety: Only TRIGGER PENDING proves a resting stop.
+        An OPEN order may already be triggered.
 """
 
 from __future__ import annotations
