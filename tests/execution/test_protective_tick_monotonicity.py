@@ -116,3 +116,38 @@ def test_depthless_untimestamped_protection_event_clears_prior_bid() -> None:
     )
 
     assert manager._executable_exit_price(bracket, 110.0)[1] != "bid"
+
+
+def test_delayed_first_prefill_tick_remains_rejected_after_arming_grace() -> None:
+    manager, bracket = _manager()
+    bracket.entry_fill_ts = time.time() - 20.0
+    old_event = float(int(bracket.entry_fill_ts) - 2)
+
+    manager.on_tick(
+        SYMBOL,
+        90.0,
+        exchange_ts=old_event,
+        tick=_full_tick(90.0, 89.8, old_event),
+        defer_submission=True,
+    )
+
+    assert bracket.last_ltp == 110.0
+    assert manager._executable_exit_price(bracket, 110.0)[1] != "bid"
+    manager._fire_exits_batch.assert_not_called()
+
+
+def test_same_second_option_update_remains_eligible_after_arming_grace() -> None:
+    manager, bracket = _manager()
+    bracket.entry_fill_ts = time.time() - 20.0
+    same_second = float(int(bracket.entry_fill_ts))
+
+    manager.on_tick(
+        SYMBOL,
+        90.0,
+        exchange_ts=same_second,
+        tick=_full_tick(90.0, 89.8, same_second),
+        defer_submission=True,
+    )
+
+    assert bracket.last_ltp == 90.0
+    manager._fire_exits_batch.assert_called_once()
