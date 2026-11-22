@@ -452,6 +452,142 @@ def test_target_extension_accepts_matching_broker_profit_protection() -> None:
     assert bracket.tp_trigger_price > 118.0
 
 
+@pytest.mark.parametrize(
+    "fault",
+    ("no_stop", "pending_modify", "undercovered", "overcovered"),
+)
+def test_live_target_extension_requires_verified_full_position_stop(fault):
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=True)
+    bracket.exchange_stop_order_id = "broker-stop-1"
+    bracket.exchange_stop_trigger_price = 106.0
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_degraded_reason = None
+    if fault == "no_stop":
+        bracket.exchange_stop_order_id = None
+    elif fault == "pending_modify":
+        bracket.exchange_stop_degraded_reason = "broker_stop_modify_unverified"
+    elif fault == "undercovered":
+        bracket.exchange_stop_quantity = 40
+    else:
+        bracket.exchange_stop_quantity = 80
+
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+
+    assert action is not None and action["type"] == "FINAL_TP"
+    assert bracket.tp_trigger_price == 118.0
+    assert bracket.sl_trigger_price == 106.0
+
+
+def test_live_target_extension_retains_final_exit_if_ratchet_is_unverified(
+    monkeypatch,
+):
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=True)
+    bracket.exchange_stop_order_id = "broker-stop-1"
+    bracket.exchange_stop_trigger_price = 106.0
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_degraded_reason = None
+    monkeypatch.setattr(
+        profit_extension,
+        "_cached_assessment",
+        lambda *_args: ContinuationDecision(
+            extend=True,
+            evidence_count=4,
+            positive=("futures_volume",),
+            negative=(),
+            critical_block=False,
+            snapshot={},
+        ),
+    )
+    calls = []
+
+    def submit_unverified(stop):
+        calls.append(stop.sl_trigger_price)
+        stop.exchange_stop_degraded_reason = "broker_stop_trigger_mismatch"
+        return False
+
+    manager._sync_exchange_protective_stop = submit_unverified
+    action = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+
+    assert calls and calls[0] > 106.0
+    assert action is not None and action["type"] == "FINAL_TP"
+    assert bracket.tp_trigger_price == 118.0
+
+
+def test_live_target_extension_requires_new_floor_broker_proof(monkeypatch):
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=True)
+    bracket.exchange_stop_order_id = "broker-stop-1"
+    bracket.exchange_stop_trigger_price = 106.0
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_degraded_reason = None
+    monkeypatch.setattr(
+        profit_extension,
+        "_cached_assessment",
+        lambda *_args: ContinuationDecision(
+            extend=True,
+            evidence_count=4,
+            positive=("futures_volume",),
+            negative=(),
+            critical_block=False,
+            snapshot={},
+        ),
+    )
+    manager._sync_exchange_protective_stop = lambda _stop: False
+
+    result = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+
+    assert result is not None and result["type"] == "FINAL_TP"
+    assert bracket.exchange_stop_trigger_price == 106.0
+    assert bracket.tp_trigger_price == 118.0
+
+
+def test_live_target_extension_allows_newly_confirmed_profit_floor(monkeypatch):
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=True)
+    bracket.exchange_stop_order_id = "broker-stop-1"
+    bracket.exchange_stop_trigger_price = 106.0
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_degraded_reason = None
+    monkeypatch.setattr(
+        profit_extension,
+        "_cached_assessment",
+        lambda *_args: ContinuationDecision(
+            extend=True,
+            evidence_count=4,
+            positive=("futures_volume",),
+            negative=(),
+            critical_block=False,
+            snapshot={},
+        ),
+    )
+
+    def confirm_amend(stop):
+        stop.exchange_stop_trigger_price = stop.sl_trigger_price
+        stop.exchange_stop_degraded_reason = None
+        return True
+
+    manager._sync_exchange_protective_stop = confirm_amend
+    result = extend_final_target_if_supported(
+        manager, bracket, 120.0, _final_tp_action()
+    )
+
+    assert result is None
+    assert bracket.tp_trigger_price > 118.0
+    assert bracket.exchange_stop_trigger_price >= 110.0
+
+
 def _adaptive_market(manager, *, bid=115.0, quantity=65, spread=0.2, age=0.0):
     from time import time
 
