@@ -115,6 +115,20 @@ def test_emergency_reconciles_cancellation_and_flattens_one_lot() -> None:
     assert manager.sent[0]["intent"] == "REDUCE"
 
 
+def test_live_operator_cancellation_uses_broker_orderbook_not_local_snapshot() -> None:
+    broker = _Broker()
+    manager = _Manager(broker)
+    manager.get_open_orders = lambda: [
+        {"order_id": "unrelated-local-ghost", "status": "OPEN"}
+    ]
+
+    result = emergency_stop(manager, reason="verify-exchange-stop-cancel")
+
+    assert broker.cancel_calls == ["stop-1"]
+    assert result["flatten"]["failed"] == []
+    assert len(manager.sent) == 1
+
+
 def test_emergency_preserves_verified_nrml_position_product() -> None:
     broker = _Broker(product="NRML")
     manager = _Manager(broker)
