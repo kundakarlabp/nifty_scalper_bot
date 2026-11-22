@@ -179,6 +179,33 @@ def test_sparse_history_obtains_exact_live_stop_orderbook_proof() -> None:
     assert reads == ["book"]
 
 
+def test_history_exception_falls_back_to_exact_orderbook() -> None:
+    manager = object.__new__(BracketManager)
+
+    def unavailable(_order_id: str) -> dict:
+        raise RuntimeError("history endpoint unavailable")
+
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=unavailable,
+            get_orders=lambda: [_valid_order()],
+        )
+    )
+    assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)
+
+
+def test_both_broker_status_endpoints_failing_do_not_prove_protection() -> None:
+    manager = object.__new__(BracketManager)
+
+    def unavailable(*_args: object) -> None:
+        raise RuntimeError("broker unavailable")
+
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(get_order_status=unavailable, get_orders=unavailable)
+    )
+    assert manager._get_broker_order_status("stop-123") == {}
+
+
 def test_sparse_history_missing_exact_order_cannot_confirm_protection() -> None:
     other = _valid_order()
     other["order_id"] = "another-stop"
