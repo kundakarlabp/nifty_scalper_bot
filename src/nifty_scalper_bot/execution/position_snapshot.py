@@ -204,7 +204,10 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
                 raw=dict(item),
             )
         )
-    if any(len(products) > 1 and "" in products for products in products_by_symbol.values()):
+    if any(
+        len(products) > 1 and "" in products
+        for products in products_by_symbol.values()
+    ):
         raise PositionSnapshotError("broker position product ambiguous or missing")
     return PositionSnapshot(
         rows=tuple(validated),
