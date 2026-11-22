@@ -219,3 +219,82 @@ def test_complete_history_does_not_require_secondary_broker_read() -> None:
         )
     )
     assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)
+
+
+def test_adaptive_owner_requires_orderbook_confirmed_stop_not_virtual() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    order = _valid_order()
+    manager._get_broker_order_status = lambda _order_id: order
+    bracket = SimpleNamespace(
+        exchange_stop_order_id="stop-123",
+        exchange_stop_quantity=65,
+        exchange_stop_trigger_price=113.0,
+        exchange_stop_limit_price=107.5,
+        exchange_stop_degraded_reason=None,
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        updated_at=0.0,
+        trailing_config={
+            "_adaptive_profit_pending_confirmation": {
+                "order_id": "stop-123",
+                "stop": 113.0,
+            }
+        },
+        trade_provenance={
+            "adaptive_profit_lock": {
+                "virtual_stop": 113.0,
+                "broker_orderbook_confirmed_stop": None,
+            }
+        },
+    )
+
+    assert manager._confirm_exchange_protective_stop(bracket) is False
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+    order["trigger_price"] = 113.0
+    order["price"] = 107.5
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config["_adaptive_profit_has_ratcheted"] is True
+    assert bracket.trailing_config["_adaptive_profit_confirmed_order_id"] == "stop-123"
+    assert "_adaptive_profit_pending_confirmation" not in bracket.trailing_config
+    assert (
+        bracket.trade_provenance["adaptive_profit_lock"][
+            "broker_orderbook_confirmed_stop"
+        ]
+        == 113.0
+    )
+
+
+def test_unrelated_stop_cannot_confirm_pending_adaptive_owner() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    order = _valid_order()
+    manager._get_broker_order_status = lambda _order_id: order
+    bracket = SimpleNamespace(
+        exchange_stop_order_id="stop-123",
+        exchange_stop_quantity=65,
+        exchange_stop_trigger_price=109.2,
+        exchange_stop_limit_price=103.75,
+        exchange_stop_degraded_reason=None,
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        updated_at=0.0,
+        trailing_config={
+            "_adaptive_profit_pending_confirmation": {
+                "order_id": "stale-replaced-stop",
+                "stop": 109.2,
+            }
+        },
+        trade_provenance={},
+    )
+
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+    bracket.trailing_config["_adaptive_profit_pending_confirmation"] = {
+        "order_id": "stop-123",
+        "stop": 108.0,
+    }
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True

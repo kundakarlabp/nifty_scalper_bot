@@ -466,10 +466,16 @@ def _adaptive_market(manager, *, bid=115.0, quantity=65, spread=0.2, age=0.0):
         }
     )
     live_probe = getattr(manager, "_is_live_execution", None)
-    if callable(live_probe) and live_probe() and not hasattr(manager, "_exit_quotes"):
-        # A real BoundBracketManager already captures this exact tick.
-        # Test doubles need equivalent current-tick evidence for LIVE cases.
-        manager._exit_quotes = {SYMBOL: (bid, bid + spread, time())}
+    if callable(live_probe) and live_probe():
+        # LIVE book evidence must have verified exchange event time as well
+        # as the separate current reception timestamp.
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=age)
+        ).isoformat()
+        quote["timestamp_source"] = "exchange_timestamp"
+        quote["source_timestamp_valid"] = True
+        if not hasattr(manager, "_exit_quotes"):
+            manager._exit_quotes = {SYMBOL: (bid, bid + spread, time())}
     return quote
 
 
@@ -1313,6 +1319,9 @@ def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, fa
         quote.pop("depth")
     elif failure == "old_exchange":
         quote["exchange_timestamp"] = time() - 30
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=30)
+        ).isoformat()
     elif failure == "wide_spread":
         quote["ask"] = quote["bid"] + 5.0
     elif failure == "unmatched_tick":
@@ -1466,10 +1475,14 @@ def test_verified_tiers_never_override_adaptive_continuation_owner(monkeypatch, 
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
     if proof == "ratcheted":
         bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
+        bracket.trailing_config["_adaptive_profit_confirmed_order_id"] = "broker-stop"
     elif proof == "strong":
         bracket.trailing_config["_adaptive_profit_state"] = "STRONG"
     else:
-        bracket.trade_provenance["adaptive_profit_lock"] = {"state": "NORMAL"}
+        bracket.trade_provenance["adaptive_profit_lock"] = {
+            "state": "NORMAL",
+            "broker_orderbook_confirmed_stop": 94.0,
+        }
 
     assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
     assert bracket.sl_trigger_price == 94.0
@@ -1532,3 +1545,44 @@ def test_adaptive_does_not_discard_changed_book_with_same_second_timestamp(
     quote["exchange_timestamp"] = timestamp
     profit_extension.tighten_adaptive_profit_lock(manager, bracket, 116.0)
     assert bracket.trailing_config["_adaptive_profit_last_sample"] != first
+
+
+def test_unconfirmed_adaptive_virtual_stop_does_not_take_broker_owner(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
+    manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
+    bracket.trade_provenance["adaptive_profit_lock"] = {
+        "state": "NORMAL",
+        "virtual_stop": 95.0,
+        "broker_orderbook_confirmed_stop": None,
+    }
+    bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
+
+    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
+    assert syncs
+    assert bracket.sl_trigger_price > 94.0
+
+
+@pytest.mark.parametrize("broken", ["missing", "unverified", "stale", "future"])
+def test_live_adaptive_requires_verified_exchange_time_not_fresh_receive(
+    broken: str,
+):
+    manager, bracket, quote, _syncs = _ready_verified_tier_fallback()
+    quote["received_at"] = time()
+    if broken == "missing":
+        quote.pop("timestamp_source", None)
+        quote.pop("source_timestamp_valid", None)
+        quote.pop("timestamp", None)
+        quote["exchange_timestamp"] = None
+    elif broken == "unverified":
+        quote["source_timestamp_valid"] = False
+    elif broken == "stale":
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=45)
+        ).isoformat()
+    else:
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=120)
+        ).isoformat()
+
+    assert profit_extension._adaptive_executable_bid(manager, bracket) is None
