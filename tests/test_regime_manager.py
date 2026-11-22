@@ -211,3 +211,63 @@ async def test_stale_or_unfinished_history_never_proves_range() -> None:
     await manager.refresh_from_indicators()
     assert manager.get_raw_snapshot().regime == "unknown"
     assert manager.get_raw_snapshot().reason == "range_evidence_unverified"
+
+
+def test_raw_low_activity_blocks_while_stable_trend_is_held() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="confirmed_trend",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="low_activity",
+            confidence=0.75,
+            reason="current_low_activity",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_raw_snapshot().regime == "low_activity"
+    assert manager.can_trade(record_decision=False) is False
+    assert "regime_low_activity" in manager.get_filter_reasons()
+
+
+def test_raw_event_threshold_vetoes_older_stable_trend() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=3)
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="confirmed_trend",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="event",
+            confidence=0.9,
+            reason="fresh_event",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.get_latest_snapshot().regime == "trend"
+    assert manager.get_raw_snapshot().regime == "event"
+    assert manager.can_trade(record_decision=False) is False
+    assert any(
+        reason.startswith("regime_block_") for reason in manager.get_filter_reasons()
+    )

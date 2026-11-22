@@ -4,8 +4,10 @@ Responsibilities: refresh timestamped underlying indicators and completed
 in-memory price history, stabilise regime transitions, and explain the accepted
 regime evidence in throttled runtime diagnostics.
 
-Safety: Missing or stale history must not be invented, a low ATR alone cannot
-license mean-reversion entries, and existing risk and broker gates remain owned
+Safety: Missing, stale, UNKNOWN or LOW_ACTIVITY raw evidence cannot inherit
+trade permission from an older stable regime. Raw EVENT/VOLATILE thresholds
+are checked at the latest observation, while hysteresis remains diagnostic.
+A low ATR alone cannot license mean-reversion entries; risk and broker gates remain owned
 by their execution components.
 """
 
@@ -912,19 +914,19 @@ class MarketRegimeManager:
                 if raw_snapshot.confidence < self.min_confidence:
                     allowed = False
                     reasons.append("confidence_below_floor")
-                if normalize_regime(raw_snapshot.regime) is MarketRegime.UNKNOWN:
+                raw_regime = normalize_regime(raw_snapshot.regime)
+                if raw_regime is MarketRegime.UNKNOWN:
                     allowed = False
                     reasons.append("regime_unknown")
-                threshold = self._block_threshold_for(
-                    getattr(snapshot, "regime", raw_snapshot.regime)
-                )
-                if (
-                    snapshot is not None
-                    and threshold
-                    and snapshot.confidence >= threshold
-                ):
+                elif raw_regime is MarketRegime.LOW_ACTIVITY:
                     allowed = False
-                    reasons.append(f"regime_block_{snapshot.regime}")
+                    reasons.append("regime_low_activity")
+                # Stable hysteresis is not authority to accept an unsafe
+                # current raw EVENT/VOLATILE observation.
+                threshold = self._block_threshold_for(raw_snapshot.regime)
+                if threshold and raw_snapshot.confidence >= threshold:
+                    allowed = False
+                    reasons.append(f"regime_block_{raw_snapshot.regime}")
             if context:
                 reasons.extend(
                     [f"ctx_{key}" for key in context.keys() if isinstance(key, str)]
