@@ -292,7 +292,6 @@ def test_invalid_raw_regime_timestamp_fails_closed(invalid_time: str) -> None:
     assert "regime_timestamp_invalid" in manager.get_filter_reasons()
 
 
-
 def test_nonfinite_raw_regime_confidence_fails_closed() -> None:
     manager = MarketRegimeManager(MarketRegimeDetector())
     manager.ingest_snapshot(
