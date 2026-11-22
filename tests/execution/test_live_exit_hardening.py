@@ -1878,7 +1878,9 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
 
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
     assert manager.get_bracket("entry-1") is bracket
-    assert status_calls == ["old-stop"]
+    assert status_calls == (
+        ["old-stop", "old-stop"] if unsafe == "book_contains_stop" else ["old-stop"]
+    )
     assert broker.cancel_calls == []
 
 
