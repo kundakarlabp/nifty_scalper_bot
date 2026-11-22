@@ -6130,7 +6130,7 @@ class BracketManager:
                     except (TypeError, ValueError):
                         proposed = 0.0
                         proven = 0.0
-                    if proposed > 0 and proven + 1e-6 >= proposed:
+                    if proposed > 0 and abs(proven - proposed) <= 0.025:
                         config["_adaptive_profit_has_ratcheted"] = True
                         config["_adaptive_profit_confirmed_order_id"] = order_id
                         config.pop("_adaptive_profit_pending_confirmation", None)
