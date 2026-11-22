@@ -416,6 +416,59 @@ def test_live_tp1_does_not_resume_using_another_or_unlabeled_product(
     assert order_manager.place_calls == []
 
 
+def test_live_tp1_reconciles_mis_residual_despite_distinct_nrml_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-mixed-products",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.05,
+    )
+    broker.positions = [
+        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+        {"symbol": SYMBOL, "quantity": -65, "product": "NRML"},
+    ]
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", lambda _b: True)
+    manager._exchange_protective_stop_enabled = True
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.remaining_quantity == 65
+    assert bracket.tp_levels[0].executed is True
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_pending is False
+    assert order_manager.place_calls == []
+
+
+def test_live_partial_target_does_not_close_if_its_product_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-mis-absent",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=0,
+        average_price=110.05,
+    )
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65, "product": "NRML"}]
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._filled_position_sync_grace_seconds = 0.0
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.tp_levels[0].executed is False
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert order_manager.place_calls == []
+
+
 def test_tp1_cannot_resume_long_protection_on_reversed_broker_short() -> None:
     """A signed -65 net is not 65 long contracts for TP1 residual re-arming."""
     manager, order_manager, broker = _manager()

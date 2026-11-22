@@ -5,6 +5,7 @@ retain legacy close and hook behaviour so tests, dry runs and dashboards do not
 lose functionality when broker fill identity is intentionally absent.
 Safety: Broker exit-fill callbacks must have integral quantities and finite
 positive prices before bracket state can be correlated or closed.
+LIVE managed exits reconcile against their bracket's exact broker product.
 """
 
 from __future__ import annotations
@@ -429,7 +430,10 @@ class RuntimeBracketManager(LedgerBracketManager):
                 "fill_price": fill_price,
             },
         )
-        residual = self._broker_position_quantity(symbol)
+        residual = self._broker_position_quantity(
+            symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        )
         if residual == 0 and quantity >= int(bracket.remaining_quantity or 0):
             resting_stop_id = str(
                 getattr(bracket, "exchange_stop_order_id", "") or ""

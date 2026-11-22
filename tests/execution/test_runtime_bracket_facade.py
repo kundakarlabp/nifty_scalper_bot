@@ -239,6 +239,38 @@ def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) 
     assert manager.has_unresolved_exit() is False
 
 
+def test_live_managed_fill_closes_mis_without_netting_distinct_nrml(
+    tmp_path, monkeypatch
+) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    broker.statuses["EXIT-MIS"] = {
+        "status": "COMPLETE",
+        "average_price": 95.0,
+    }
+    broker.positions = [
+        {"symbol": symbol, "product": "MIS", "quantity": 0},
+        {"symbol": symbol, "product": "NRML", "quantity": 65},
+    ]
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    order = SimpleNamespace(
+        order_id="EXIT-MIS",
+        symbol=symbol,
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=95.0,
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-MIS"])
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
+    assert bracket.position_flat_confirmed is True
+
+
 @pytest.mark.parametrize(
     ("filled_quantity", "fill_price"),
     [
