@@ -62,9 +62,7 @@ def test_ws_batch_ingress_suppresses_legacy_callback_when_mdm_present() -> None:
 
 
 def test_kite_sdk_naive_exchange_datetime_preserves_host_local_instant() -> None:
-    manager = WebSocketManager(
-        "api_key", "access_token", trading_window_enabled=False
-    )
+    manager = WebSocketManager("api_key", "access_token", trading_window_enabled=False)
     mdm = _BatchMdm()
     manager._market_data_manager = mdm
 
@@ -91,9 +89,7 @@ def test_kite_sdk_naive_exchange_datetime_preserves_host_local_instant() -> None
 
 
 def test_kite_sdk_already_aware_and_numeric_times_remain_unchanged() -> None:
-    manager = WebSocketManager(
-        "api_key", "access_token", trading_window_enabled=False
-    )
+    manager = WebSocketManager("api_key", "access_token", trading_window_enabled=False)
     mdm = _BatchMdm()
     manager._market_data_manager = mdm
     aware = datetime(2026, 11, 20, 13, 40, tzinfo=ZoneInfo("Asia/Kolkata"))
