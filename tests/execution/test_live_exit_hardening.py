@@ -1881,7 +1881,9 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     assert status_calls == (
         ["old-stop", "old-stop"] if unsafe == "book_contains_stop" else ["old-stop"]
     )
-    assert broker.cancel_calls == []
+    assert broker.cancel_calls == (
+        ["old-stop"] if unsafe == "book_contains_stop" else []
+    )
 
 
 def test_unknown_broker_stop_status_never_cancels_exchange_protection(
