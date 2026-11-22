@@ -239,7 +239,6 @@ def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) 
     assert manager.has_unresolved_exit() is False
 
 
-
 def test_live_managed_fill_closes_mis_without_netting_distinct_nrml(
     tmp_path, monkeypatch
 ) -> None:
