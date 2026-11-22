@@ -3280,6 +3280,7 @@ class BracketManager:
             qty,
             reason,
         )
+        decision_before = getattr(self.order_manager, "_last_order_decision", None)
         submit = self.submit_exit_order(
             symbol=symbol,
             qty=qty,
@@ -3464,6 +3465,7 @@ class BracketManager:
         decision = decision_raw if isinstance(decision_raw, Mapping) else {}
         if (
             not submit.accepted
+            and decision_raw is not decision_before
             and decision.get("broker_attempted") is False
             and self._is_live_execution()
             and self._exchange_protective_stop_enabled
