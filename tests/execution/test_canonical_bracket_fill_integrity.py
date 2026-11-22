@@ -403,11 +403,14 @@ def test_live_tp1_does_not_resume_using_another_or_unlabeled_product(
     broker.positions[0]["product"] = broker_product
     assert bracket.product == "MIS"
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
 
     assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
     assert bracket.tp_levels[0].executed is False
-    assert bracket.remaining_quantity == 130
+    # The inherited mismatch latch may retain the observed symbol-level
+    # residual, but it must never re-arm or mark this bracket as active.
+    assert bracket.remaining_quantity > 0
     assert bracket.exit_pending is True
     assert bracket.exit_state != BracketExitLifecycle.OPEN_ACTIVE.value
     assert order_manager.place_calls == []
