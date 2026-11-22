@@ -1999,6 +1999,34 @@ def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
     assert len(broker.cancel_calls) == cancel_count
 
 
+def test_rearmed_stop_fill_during_exit_retry_backoff_is_reconciled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    bracket.exit_state = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
+    bracket.next_exit_attempt_at = time.time() + 60.0
+    broker.statuses[stop_id] = "COMPLETE"
+    broker.positions = []
+
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+
+    assert bracket.exit_order_id == stop_id
+    assert broker.cancel_calls == []
+    assert len(order_manager.place_calls) == 1
+
+
 def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
