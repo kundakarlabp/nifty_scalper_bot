@@ -5,7 +5,7 @@ Key responsibilities:
     - Apply unresolved-exit entry blocking before broker submission.
     - Run bounded entry recovery and finalize partial-entry reconciliation.
     - Reject costly VWAP continuation retries against durable first-attempt prices.
-    - Own bracket-anchor provenance directly without public-facade monkey-patching.
+    - Own bracket-anchor provenance and execution preflight quote selection directly.
     - Delegate unchanged order operations to ``order_manager_core``.
 
 Operational constraints:
@@ -44,6 +44,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     block_result,
     configure_provider,
 )
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.risk.cost_model import (
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
@@ -773,8 +774,183 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
     return result
 
 
+def _depth_top_quantity(quote: Any, side: str) -> int:
+    """Return positive top-level executable quantity from Zerodha FULL depth."""
+    if not isinstance(quote, Mapping):
+        return 0
+    depth = quote.get("depth")
+    if not isinstance(depth, Mapping):
+        return 0
+    levels = depth.get(side)
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return 0
+    top = levels[0]
+    if not isinstance(top, Mapping):
+        return 0
+    for key in ("quantity", "qty"):
+        value = top.get(key)
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return 0
+
+
+def _quote_age_ms(manager: Any, quote: Any) -> float | None:
+    """Return a finite quote age from the existing canonical diagnostics."""
+    if not isinstance(quote, Mapping):
+        return None
+    try:
+        age = manager._extract_quote_diagnostics(quote).get("age_ms")
+        parsed = float(age) if age is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed
+
+
+def _quote_execution_rank(manager: Any, quote: Any) -> int:
+    """Rank cached quote evidence without treating LTP-only data as executable."""
+    if not isinstance(quote, Mapping):
+        return 0
+    try:
+        diagnostics = manager._extract_quote_diagnostics(quote)
+        bid = float(diagnostics.get("bid") or 0.0)
+        ask = float(diagnostics.get("ask") or 0.0)
+        bid_qty = int(diagnostics.get("bid_qty") or 0)
+        ask_qty = int(diagnostics.get("ask_qty") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+    if bid <= 0.0 or ask < bid:
+        return 0
+    return 2 if bid_qty > 0 and ask_qty > 0 else 1
+
+
+def _cached_quote(provider: Any, symbol: str) -> Mapping[str, Any] | None:
+    """Read cached quote evidence without triggering broker/HTTP pulls."""
+    getter = getattr(provider, "get_latest_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_quote", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol, allow_pull=False)
+        except TypeError:
+            quote = None
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+    return None
+
+
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
+
+    def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
+        """Extend core diagnostics with the existing canonical Zerodha depth resolver."""
+        diagnostics = dict(super()._extract_quote_diagnostics(quote))
+        if not isinstance(quote, Mapping):
+            return diagnostics
+
+        current_bid = float(diagnostics.get("bid") or 0.0)
+        current_ask = float(diagnostics.get("ask") or 0.0)
+        if current_bid <= 0.0 or current_ask <= 0.0:
+            bid, ask, spread_pct, _source = resolve_quote_bid_ask_spread(dict(quote))
+            if bid is not None and ask is not None and bid > 0.0 and ask > bid:
+                diagnostics["bid"] = float(bid)
+                diagnostics["ask"] = float(ask)
+                diagnostics["spread"] = float(ask - bid)
+                if spread_pct is not None:
+                    diagnostics["spread_pct"] = float(spread_pct)
+
+        try:
+            bid_qty = int(diagnostics.get("bid_qty") or 0)
+        except (TypeError, ValueError):
+            bid_qty = 0
+        try:
+            ask_qty = int(diagnostics.get("ask_qty") or 0)
+        except (TypeError, ValueError):
+            ask_qty = 0
+        if bid_qty <= 0:
+            bid_qty = _depth_top_quantity(quote, "buy")
+            diagnostics["bid_qty"] = bid_qty
+        if ask_qty <= 0:
+            ask_qty = _depth_top_quantity(quote, "sell")
+            diagnostics["ask_qty"] = ask_qty
+        diagnostics["depth_qty"] = max(0, bid_qty) + max(0, ask_qty)
+        return diagnostics
+
+    def _get_latest_quote_safe(self, symbol: str) -> dict[str, Any] | None:
+        """Prefer executable cached evidence, then freshness; never pull implicitly."""
+        best = None
+        best_age = None
+        best_rank = 0
+        normalized_symbol = _core.normalize_symbol(symbol)
+        seen_providers: set[int] = set()
+
+        for attr in (
+            "_market_data_manager",
+            "market_data_manager",
+            "_market_data",
+            "_data_hub",
+            "data_hub",
+        ):
+            provider = getattr(self, attr, None)
+            if provider is None or id(provider) in seen_providers:
+                continue
+            seen_providers.add(id(provider))
+            candidate = _cached_quote(provider, symbol)
+            if not isinstance(candidate, Mapping) or not candidate:
+                continue
+            candidate_symbol = str(candidate.get("symbol") or "").strip()
+            if (
+                candidate_symbol
+                and _core.normalize_symbol(candidate_symbol) != normalized_symbol
+            ):
+                continue
+            try:
+                diagnostics = self._extract_quote_diagnostics(candidate)
+                candidate_ltp = float(diagnostics.get("ltp") or 0.0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if candidate_ltp <= 0.0:
+                continue
+            candidate_age = _quote_age_ms(self, candidate)
+            if candidate_age is None:
+                continue
+            candidate_rank = _quote_execution_rank(self, candidate)
+            if (
+                best is None
+                or candidate_rank > best_rank
+                or (
+                    candidate_rank == best_rank
+                    and (best_age is None or candidate_age < best_age)
+                )
+            ):
+                best = candidate
+                best_age = candidate_age
+                best_rank = candidate_rank
+
+        return dict(best) if isinstance(best, Mapping) else None
 
     def emergency_stop(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Pause entries, cancel pending orders and flatten open exposure."""
