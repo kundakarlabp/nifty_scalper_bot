@@ -271,3 +271,40 @@ def test_raw_event_threshold_causes_immediate_safety_transition() -> None:
     assert any(
         reason.startswith("regime_block_") for reason in manager.get_filter_reasons()
     )
+
+
+@pytest.mark.parametrize("invalid_time", ("future", "nan"))
+def test_invalid_raw_regime_timestamp_fails_closed(invalid_time: str) -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    timestamp = time.time() + 3600.0 if invalid_time == "future" else float("nan")
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.8,
+            reason="unverified_clock",
+            updated_at=timestamp,
+            adjustments={},
+        )
+    )
+
+    assert manager.can_trade(record_decision=False) is False
+    assert "regime_timestamp_invalid" in manager.get_filter_reasons()
+
+
+
+def test_nonfinite_raw_regime_confidence_fails_closed() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=float("nan"),
+            reason="unverified_confidence",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+
+    assert manager.can_trade(record_decision=False) is False
+    assert "confidence_invalid" in manager.get_filter_reasons()

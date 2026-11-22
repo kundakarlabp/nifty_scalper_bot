@@ -4,8 +4,8 @@ Responsibilities: refresh timestamped underlying indicators and completed
 in-memory price history, stabilise regime transitions, and explain the accepted
 regime evidence in throttled runtime diagnostics.
 
-Safety: Missing, stale, UNKNOWN or LOW_ACTIVITY raw evidence cannot inherit
-trade permission from an older stable regime. Raw EVENT/VOLATILE thresholds
+Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
+cannot inherit trade permission from an older stable regime. Raw EVENT/VOLATILE thresholds
 are checked at the latest observation, while hysteresis remains diagnostic.
 A low ATR alone cannot license mean-reversion entries. Risk and broker gates
 remain owned by their execution components.
@@ -889,8 +889,12 @@ class MarketRegimeManager:
                     allowed = False
                     reasons.append("regime_unavailable")
             else:
-                age = max(0.0, now - float(raw_snapshot.updated_at))
-                if age > self.stale_after_seconds:
+                raw_age = now - float(raw_snapshot.updated_at)
+                age = max(0.0, raw_age) if math.isfinite(raw_age) else float("inf")
+                if not math.isfinite(raw_age) or raw_age < -1.0:
+                    allowed = False
+                    reasons.append("regime_timestamp_invalid")
+                elif age > self.stale_after_seconds:
                     # ✅ FIX: Check for stale bypass
                     stale_bypass = coalesce_bool(
                         "REGIME_BYPASS_ON_STALE", default=False
@@ -911,7 +915,11 @@ class MarketRegimeManager:
                     else:
                         allowed = False
                         reasons.append("regime_stale")
-                if raw_snapshot.confidence < self.min_confidence:
+                confidence = float(raw_snapshot.confidence)
+                if not math.isfinite(confidence):
+                    allowed = False
+                    reasons.append("confidence_invalid")
+                elif confidence < self.min_confidence:
                     allowed = False
                     reasons.append("confidence_below_floor")
                 raw_regime = normalize_regime(raw_snapshot.regime)
