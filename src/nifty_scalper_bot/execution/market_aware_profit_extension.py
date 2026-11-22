@@ -990,7 +990,9 @@ def _ratchet_stop(
             config = getattr(bracket, "trailing_config", None)
             if isinstance(config, dict):
                 config["_adaptive_profit_pending_confirmation"] = {
-                    "order_id": str(getattr(bracket, "exchange_stop_order_id", "") or ""),
+                    "order_id": str(
+                        getattr(bracket, "exchange_stop_order_id", "") or ""
+                    ),
                     "stop": candidate,
                 }
 
