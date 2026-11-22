@@ -250,10 +250,11 @@ def flatten_all(
         if cancel_first:
             cancel_result = cancel_pending_orders(self)
         if live:
-            remote_orders = order_fetch()
+            remote_orders = order_fetch() if callable(order_fetch) else None
             if not isinstance(remote_orders, list):
                 raise ValueError("broker_orders_unavailable_after_cancel")
-            positions = decode_position_snapshot(position_fetch()).raw_rows()
+            snapshot = position_fetch() if callable(position_fetch) else None
+            positions = decode_position_snapshot(snapshot).raw_rows()
         else:
             remote_orders = []
             positions = _position_rows(self)
