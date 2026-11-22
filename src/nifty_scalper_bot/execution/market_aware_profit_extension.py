@@ -20,9 +20,12 @@ tick. The canonical BracketManager alone modifies exchange stop orders and
 owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
 Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
 quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
-adaptive quotes must agree with the canonical protected-tick bid/ask; ratchets
-require a recorded broker stop trigger and position-size coverage.
-A recorded trigger is NOT an orderbook-confirmed stop or guaranteed fill.
+adaptive quotes must agree with the canonical protected-tick bid/ask and
+_quote_age_seconds(require_exchange_time=True) requires validated aware
+exchange-event provenance, never receipt-only freshness. Adaptive proposals
+remain virtual until the canonical broker orderbook confirms the intended
+stop order and geometry. A recorded trigger is NOT an orderbook-confirmed
+stop or guaranteed fill.
 No broker calls or competing exchange-stop owner are introduced here.
 Evidence comes from the already-wired IndicatorEngine and market-data cache.
 """
