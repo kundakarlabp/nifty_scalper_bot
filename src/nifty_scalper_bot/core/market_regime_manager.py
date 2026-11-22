@@ -7,8 +7,8 @@ regime evidence in throttled runtime diagnostics.
 Safety: Missing, stale, UNKNOWN or LOW_ACTIVITY raw evidence cannot inherit
 trade permission from an older stable regime. Raw EVENT/VOLATILE thresholds
 are checked at the latest observation, while hysteresis remains diagnostic.
-A low ATR alone cannot license mean-reversion entries; risk and broker gates remain owned
-by their execution components.
+A low ATR alone cannot license mean-reversion entries. Risk and broker gates
+remain owned by their execution components.
 """
 
 from __future__ import annotations
