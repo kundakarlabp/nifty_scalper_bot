@@ -99,9 +99,7 @@ class PositionSnapshot:
             return BrokerExposureState.ABSENT
         quantity = self.quantity_for(symbol, product=product)
         return (
-            BrokerExposureState.FLAT
-            if quantity == 0
-            else BrokerExposureState.NONZERO
+            BrokerExposureState.FLAT if quantity == 0 else BrokerExposureState.NONZERO
         )
 
     @property
@@ -205,8 +203,7 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
             )
         )
     if any(
-        len(products) > 1 and "" in products
-        for products in products_by_symbol.values()
+        len(products) > 1 and "" in products for products in products_by_symbol.values()
     ):
         raise PositionSnapshotError("broker position product ambiguous or missing")
     return PositionSnapshot(
