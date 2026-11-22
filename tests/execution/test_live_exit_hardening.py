@@ -242,6 +242,41 @@ def test_stale_open_protective_exit_is_cancelled_then_replaced_once() -> None:
     assert len(order_manager.place_calls) == 1
 
 
+def test_live_rescue_requires_product_identity_before_replacement(monkeypatch):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    # A symbol-only position cannot authorize a LIVE rescue order.
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
+
+    manager._submit_rescue_exit(bracket, qty=65, prior_order_id="old-exit")
+
+    assert order_manager.place_calls == []
+    assert bracket.exit_order_id == "old-exit"
+    assert bracket.exit_pending is True
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+    assert "rescue_position_unavailable" in bracket.last_exit_error
+
+
+def test_live_rescue_matches_exact_product_despite_opposing_position(monkeypatch):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    broker.positions = [
+        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+        {"symbol": SYMBOL, "quantity": -65, "product": "NRML"},
+    ]
+
+    manager._submit_rescue_exit(bracket, qty=65, prior_order_id="old-exit")
+
+    assert len(order_manager.place_calls) == 1
+    rescue = order_manager.place_calls[0]
+    assert rescue["quantity"] == 65
+    assert rescue["side"] == "SELL"
+    assert rescue["product"] == "MIS"
+    assert bracket.exit_order_id == "rescue-1"
+
+
 def test_cancel_unconfirmed_escalates_once_and_state_remains_latched() -> None:
     manager, _order_manager, _broker = _manager(cancel_confirms=False)
     bracket = _make_stale_exit(manager)
@@ -511,7 +546,7 @@ def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) ->
     broker.statuses["rescue-1"] = "CANCELLED"
     outcome = manager._retire_exchange_protective_stop(bracket, reason="TP1")
     assert outcome == "cancelled"
-    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35, "product": "MIS"}]
     target = SimpleNamespace(name="TP1", quantity=30, executed=False)
 
     assert manager._resume_after_partial_target(

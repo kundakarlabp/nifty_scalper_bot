@@ -468,9 +468,15 @@ class HardenedBracketManager(_CoreBracketManager):
         # Both callers have already observed a terminal cancellation. A
         # retry must use broker net quantity *and signed side* after that
         # cancellation, never a stale bracket quantity or an ABS-only value.
+        # LIVE recovery must also match the position's exact broker product.
         try:
             signed_qty = int(
-                self._authoritative_position_snapshot().quantity_for(bracket.symbol)
+                self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol,
+                    product=(bracket.product or "")
+                    if self._is_live_execution()
+                    else None,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - unknown is not flat
             with self._lock:

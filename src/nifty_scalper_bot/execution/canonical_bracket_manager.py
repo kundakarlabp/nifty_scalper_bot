@@ -176,11 +176,16 @@ class CanonicalBracketManager(HardenedBracketManager):
         ):
             return False
 
-        # Legacy flatness queries use absolute position quantities. A
-        # reversed short must not be treated as a surviving long TP1 lot.
+        # A reversed short or a different broker product must never count as
+        # the surviving TP1 residual. Non-live simulation keeps legacy fixtures.
         try:
             signed_residual = int(
-                self._authoritative_position_snapshot().quantity_for(bracket.symbol)
+                self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol,
+                    product=(bracket.product or "")
+                    if self._is_live_execution()
+                    else None,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - unknown direction is not proof
             _core.LOGGER.critical(
