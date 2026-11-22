@@ -393,6 +393,7 @@ def test_external_exit_does_not_steal_bracket_while_broker_nonflat(
     assert bracket.exit_order_id is None
     assert bracket.exit_reason is None
 
+
 @pytest.mark.parametrize(
     ("bracket_id", "linked_entry_order_id", "trade_lifecycle_id"),
     [
