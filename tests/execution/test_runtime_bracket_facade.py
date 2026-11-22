@@ -269,7 +269,9 @@ def test_malformed_broker_fill_never_claims_exit_completion(
         trade_lifecycle_id="ENTRY-1",
     )
 
-    assert manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-BAD"]) is False
+    assert (
+        manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-BAD"]) is False
+    )
     assert bracket.exit_state == bracket_core.BracketExitLifecycle.OPEN_ACTIVE.value
     assert bracket.exit_order_id is None
     assert bracket.exit_executed is False
