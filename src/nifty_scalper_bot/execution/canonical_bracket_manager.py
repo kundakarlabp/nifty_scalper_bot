@@ -182,9 +182,9 @@ class CanonicalBracketManager(HardenedBracketManager):
             signed_residual = int(
                 self._authoritative_position_snapshot().quantity_for(
                     bracket.symbol,
-                    product=(bracket.product or "")
-                    if self._is_live_execution()
-                    else None,
+                    product=(
+                        (bracket.product or "") if self._is_live_execution() else None
+                    ),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - unknown direction is not proof
