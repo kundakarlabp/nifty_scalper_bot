@@ -293,7 +293,10 @@ class RuntimeBracketManager(LedgerBracketManager):
             if resolved is None:
                 return None, "identity_mismatch"
             if (
-                (identity["bracket_id"] and identity["bracket_id"] != resolved.bracket_id)
+                (
+                    identity["bracket_id"]
+                    and identity["bracket_id"] != resolved.bracket_id
+                )
                 or (
                     identity["linked_entry_order_id"]
                     and identity["linked_entry_order_id"] != resolved.entry_order_id
