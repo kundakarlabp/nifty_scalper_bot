@@ -1555,9 +1555,7 @@ def test_unconfirmed_adaptive_virtual_stop_does_not_take_broker_owner(monkeypatc
     }
     bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
 
-    assert profit_extension.tighten_verified_tier_fallback(
-        manager, bracket, 107.0
-    )
+    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
     assert syncs
     assert bracket.sl_trigger_price > 94.0
 
