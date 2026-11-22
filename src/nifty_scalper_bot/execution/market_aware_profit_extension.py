@@ -1588,7 +1588,9 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             manager, bracket, "quote_identity_missing", quote=quote
         )
         return False
-    identity = str(sample)
+    # Kite exchange timestamps can repeat across distinct within-second FULL
+    # books. De-duplicate identical quotes, not different executable prices.
+    identity = f"{sample}:{bid:.2f}:{bid + spread:.2f}"
     if identity == config.get("_adaptive_profit_last_sample"):
         _trace_adaptive_no_ratchet(
             manager, bracket, "duplicate_quote_identity", quote=quote
