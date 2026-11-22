@@ -114,8 +114,12 @@ def evidence_from_positions(
             parsed_qty = _row_qty(row)
             if parsed_qty is None:
                 raise ValueError("position quantity is not an integer")
+            # A symbol can have independent MIS and NRML exposures.  Never
+            # convert a positive position and an opposing negative one to flat.
+            if matched:
+                raise ValueError("multiple broker position rows for symbol")
             matched = True
-            net += parsed_qty
+            net = parsed_qty
     except (TypeError, ValueError) as exc:
         return BrokerPositionEvidence(
             BrokerPositionState.UNKNOWN,
