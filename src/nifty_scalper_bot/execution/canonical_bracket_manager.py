@@ -422,9 +422,9 @@ class CanonicalBracketManager(HardenedBracketManager):
 
         if mismatch_latched and not order_id:
             residual = self._broker_position_quantity(
-                    bracket.symbol,
-                    product=bracket.product if self._is_live_execution() else None,
-                )
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
             if residual == 0:
                 self._clear_fill_sync_state(bracket)
                 self._close_bracket(
@@ -708,9 +708,9 @@ class CanonicalBracketManager(HardenedBracketManager):
         """Cancel/replace stale exits without treating a non-flat fill as closure."""
 
         flat_evidence = self._broker_position_evidence(
-                    bracket.symbol,
-                    product=bracket.product if self._is_live_execution() else None,
-                )
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        )
         strict_live = bool(getattr(self, "_is_live_execution", lambda: True)())
         if strict_live and flat_evidence.state not in {
             BrokerPositionState.FLAT_CONFIRMED,
@@ -825,9 +825,9 @@ class CanonicalBracketManager(HardenedBracketManager):
             )
             return
         flat_evidence = self._broker_position_evidence(
-                    bracket.symbol,
-                    product=bracket.product if self._is_live_execution() else None,
-                )
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        )
         if (
             terminal == "cancelled"
             and flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED
