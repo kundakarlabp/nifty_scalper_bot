@@ -10,8 +10,8 @@ Runtime role:
   orphan/position resync.
 - _record_trade_quality_shadow separates cached top bids from same-tick
   full-lot, timestamp-attested bid evidence for research only; never controls stops.
-- _is_replayed_prefill_tick applies one fill-time veto to quote caching and
-  core evaluation, preventing delayed pre-entry bids from poisoning the watchdog.
+- _is_replayed_protection_tick vetoes stale pre-fill or older exchange
+  events before quote caching and evaluation, retaining changed same-second ticks.
 - _range_vwap_underlying_exit_action reuses the existing protective/target exit
   dispatcher with a verified active futures cache and frozen session-VWAP
   invalidation/target carried through the canonical TradePlan provenance.
@@ -2431,7 +2431,7 @@ class BracketManager:
                 # pre-fill/replayed signal tick — never evaluate it against
                 # this bracket. Bounded window so clock skew cannot suppress
                 # genuine SL/TP evaluation beyond the first seconds.
-                if b is not None and self._is_replayed_prefill_tick(
+                if b is not None and self._is_replayed_protection_tick(
                     b, exchange_ts, now_ts
                 ):
                     self._log_throttled(
@@ -2494,6 +2494,9 @@ class BracketManager:
                 # and monotonic broker ratchets own idempotency.
                 if tick_id is not None:
                     bracket.last_processed_tick_id = tick_id
+                    bracket.trailing_config["_last_protection_exchange_ts"] = (
+                        float(exchange_ts)
+                    )
                 # Track previous tick for jump/cross stop-loss detection.
                 bracket.previous_ltp = float(
                     bracket.last_ltp or bracket.entry_price or ltp
@@ -2688,20 +2691,33 @@ class BracketManager:
             self._fire_exits_batch(exits_to_fire)
 
     @staticmethod
-    def _is_replayed_prefill_tick(
+    def _is_replayed_protection_tick(
         bracket: BracketState, exchange_ts: float | None, now_ts: float
     ) -> bool:
-        """Apply the same short pre-fill veto to quotes and exit evaluation."""
-        if exchange_ts is None or bracket.entry_fill_ts is None:
+        """Reject pre-fill and older exchange events without losing same-second ticks."""
+        if exchange_ts is None:
             return False
         try:
             event_epoch = float(exchange_ts)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        if not math.isfinite(event_epoch):
+            return True
+        config = bracket.trailing_config
+        try:
+            previous = float(config.get("_last_protection_exchange_ts") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            previous = 0.0
+        if math.isfinite(previous) and previous > 0 and event_epoch < previous - 0.001:
+            return True
+        if bracket.entry_fill_ts is None:
+            return False
+        try:
             fill_epoch = float(bracket.entry_fill_ts)
         except (TypeError, ValueError, OverflowError):
             return False
         return (
-            math.isfinite(event_epoch)
-            and math.isfinite(fill_epoch)
+            math.isfinite(fill_epoch)
             and event_epoch < fill_epoch
             and now_ts - fill_epoch <= STALE_TICK_ARM_WINDOW_SEC
         )
@@ -2720,7 +2736,7 @@ class BracketManager:
                         bracket is not None
                         and bracket.entry_confirmed
                         and bracket.remaining_quantity > 0
-                        and self._is_replayed_prefill_tick(
+                        and self._is_replayed_protection_tick(
                             bracket, event_epoch, now_ts
                         )
                     ):

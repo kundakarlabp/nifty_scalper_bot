@@ -10,7 +10,8 @@ Key responsibilities:
     - Forward the original protection tick to read-only full-lot research
       without introducing another quote cache or stop authority.
     - Discard prior-tick exit quotes when a new tick has no matching BBO.
-    - Preserve the prior valid quote when the core rejects a delayed pre-fill event.
+    - Preserve the prior valid quote when core rejects pre-fill or older
+      exchange-time events; clear BBO for an explicit new quote-less tick.
     - Count optional trail assessments in existing per-bracket state to
       distinguish missed dispatch from a legitimate no-ratchet decision.
 
@@ -174,6 +175,9 @@ class BoundBracketManager(RuntimeBracketManager):
             or abs(cached_ltp - current_ltp) > 1e-9
         ):
             return False
+        if exchange_ts is None:
+            # LTP equality without a clock cannot identify an executable BBO.
+            return False
         if exchange_ts is not None:
             cached_ts = _core.tick_exchange_epoch(cached)
             try:
@@ -204,7 +208,7 @@ class BoundBracketManager(RuntimeBracketManager):
                 bracket is not None
                 and bracket.entry_confirmed
                 and bracket.remaining_quantity > 0
-                and self._is_replayed_prefill_tick(bracket, exchange_ts, now_ts)
+                and self._is_replayed_protection_tick(bracket, exchange_ts, now_ts)
                 for entry_id in self._symbol_map.get(normalized, ())
                 if (bracket := self._brackets.get(entry_id)) is not None
             )
@@ -248,7 +252,7 @@ class BoundBracketManager(RuntimeBracketManager):
                 normalized, ltp, exchange_ts
             )
         if isinstance(tick, Mapping) and not captured:
-            # A depth-less/invalid new tick must not reuse an older BBO.
+            # A depth-less/invalid explicit new tick must not reuse an older BBO.
             # Canonical hard SL/TP still evaluates the current LTP; the
             # broker-resident protective stop is never cancelled here.
             with self._lock:
