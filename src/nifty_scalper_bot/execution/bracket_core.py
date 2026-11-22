@@ -3474,6 +3474,69 @@ class BracketManager:
                         submit.error_message,
                     )
                     self._escalate_exit_locked(bracket, "fatal_or_retry_exhausted")
+
+        # The old exchange stop was retired before this alternative exit.
+        # Only a proven *pre-broker* rejection permits restoring protection:
+        # an attempted/uncertain broker exit may still execute, so rearming
+        # then could create a second SELL and reverse the position.
+        decision_raw = getattr(self.order_manager, "_last_order_decision", None)
+        decision = decision_raw if isinstance(decision_raw, Mapping) else {}
+        if (
+            not submit.accepted
+            and decision.get("broker_attempted") is False
+            and self._is_live_execution()
+            and self._exchange_protective_stop_enabled
+            and not bracket.exchange_stop_order_id
+        ):
+            try:
+                signed_qty = self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol, product=bracket.product
+                )
+                expected_qty = int(bracket.remaining_quantity) * (
+                    1 if bracket.side == "BUY" else -1
+                )
+                if signed_qty != expected_qty or expected_qty == 0:
+                    raise PositionSnapshotError("residual_quantity_or_side_unverified")
+                broker = getattr(self.order_manager, "_broker", None)
+                fetch_orders = getattr(broker, "get_orders", None)
+                orders = fetch_orders() if callable(fetch_orders) else None
+                if not isinstance(orders, list) or any(
+                    not isinstance(order, Mapping) for order in orders
+                ):
+                    raise ValueError("broker_orderbook_unavailable_for_rearm")
+                reducing_side = "SELL" if bracket.side == "BUY" else "BUY"
+                for order in orders:
+                    order_symbol = normalize_symbol(
+                        str(order.get("tradingsymbol") or order.get("symbol") or "")
+                    )
+                    order_product = str(order.get("product") or "").upper()
+                    order_side = str(
+                        order.get("transaction_type") or order.get("side") or ""
+                    ).upper()
+                    status = str(order.get("status") or "").upper()
+                    if (
+                        order_symbol == normalize_symbol(bracket.symbol)
+                        and order_product in {"", str(bracket.product).upper()}
+                        and order_side == reducing_side
+                        and status not in {
+                            "COMPLETE", "CANCELLED", "CANCELED", "REJECTED"
+                        }
+                    ):
+                        raise ValueError("competing_reducing_order_prevents_rearm")
+                rearmed = bool(self._ensure_exchange_protective_stop(bracket))
+                if not rearmed:
+                    LOGGER.critical(
+                        "EXIT_PREBROKER_REARM_UNVERIFIED bracket_id=%s symbol=%s",
+                        bracket.bracket_id,
+                        bracket.symbol,
+                    )
+            except Exception as exc:  # noqa: BLE001 - never infer protection
+                LOGGER.critical(
+                    "EXIT_PREBROKER_REARM_BLOCKED bracket_id=%s symbol=%s error_type=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    type(exc).__name__,
+                )
         self._reconcile_exit_state(bracket, requested_by="post_submit")
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
