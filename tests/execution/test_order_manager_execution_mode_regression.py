@@ -652,11 +652,7 @@ def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
             self.payload = None
 
         def get_positions(self):
-            return {
-                "net": [
-                    {"tradingsymbol": "NFO:NIFTY2671423950CE", "quantity": 65}
-                ]
-            }
+            return {"net": [{"tradingsymbol": "NFO:NIFTY2671423950CE", "quantity": 65}]}
 
         def place_order(
             self,
