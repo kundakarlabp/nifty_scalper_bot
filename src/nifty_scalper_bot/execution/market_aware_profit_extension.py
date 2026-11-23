@@ -7,11 +7,12 @@ fresh futures quotes and timestamped completed futures-volume candles; preserve
 the original FINAL_TP for VWAP mean-reversion entries.
 Interface: assess_continuation, tighten_adaptive_profit_lock and
 tighten_verified_tier_fallback provide independent continuation evidence,
-one optional full-depth-verified trailing stop per tick, and a strict
-broker-confirmed canonical synchronization path; the private
+one optional full-depth-verified trailing stop per tick, with verified
+live tiers used only when adaptive is disabled, and strict broker-confirmed
+canonical synchronization; the private
 _trace_adaptive_no_ratchet helper emits bounded, reason-coded diagnostics and
-retains a bounded per-position skip summary only when the independently cached
-best bid has crossed 0.6R (not proof of full-size executable fill).
+retains a bounded per-position skip summary when an observed bid or explicitly
+labeled LTP-only proxy crosses 0.6R (neither proves executable quantity).
 _exit_strategy_family, _verified_futures_volume_ratio and
 _adaptive_cost_per_unit resolve the entry thesis, independent completed
 futures volume and uncapped round-trip fee estimates.
@@ -20,9 +21,9 @@ tick. The canonical BracketManager alone modifies exchange stop orders and
 owns hard SL, TP1, time-stop, pending exits, reconciliation and final fills.
 Safety: Stale, nonfinite, future-dated or contradictory bid/depth/futures
 quotes cannot authorize STRONG continuation or adaptive ratcheting. LIVE
-adaptive quotes must agree with the canonical protected-tick bid/ask and
-_quote_age_seconds(require_exchange_time=True) requires validated aware
-exchange-event provenance, never receipt-only freshness. Adaptive proposals
+adaptive quotes must agree with the canonical protected-tick bid/ask;
+option and futures confirmation require validated aware exchange-event
+provenance AND fresh receipt time, never receipt-only freshness. Adaptive proposals
 remain virtual until the canonical broker orderbook confirms the intended
 stop order and geometry. A recorded trigger is NOT an orderbook-confirmed
 stop or guaranteed fill. A LIVE final-target extension also requires a
@@ -1204,9 +1205,9 @@ def _trace_adaptive_no_ratchet(
 ) -> None:
     """Bounded diagnosis of a skipped 0.6R trail; never changes exit eligibility.
 
-    The bracket's cached best bid proves only an observed price, NOT an
-    executable full-lot fill. Actual stop proposals continue to require all
-    adaptive quote, cost and broker-protection gates.
+    A fresh protected-tick bid is evidence of price, NOT a whole-lot fill.
+    An unmatched book bid or LTP-only threshold is labeled as diagnostic
+    context only. No diagnostic can relax any adaptive or broker gate.
     """
     try:
         entry = _positive(getattr(bracket, "entry_price", None))
@@ -1214,19 +1215,7 @@ def _trace_adaptive_no_ratchet(
         symbol = str(getattr(bracket, "symbol", ""))
         if entry is None or initial is None or initial >= entry or not symbol:
             return
-        cached = getattr(manager, "_exit_quotes", {}).get(symbol)
-        if not isinstance(cached, (tuple, list)) or len(cached) < 3:
-            return
-        bid = _positive(cached[0])
-        seen_at = _as_float(cached[2])
         now_wall = time.time()
-        if (
-            bid is None
-            or seen_at is None
-            or not 0 <= now_wall - seen_at <= 3.0
-            or bid < entry + 0.60 * (entry - initial)
-        ):
-            return
         config = getattr(bracket, "trailing_config", None)
         if not isinstance(config, dict):
             return
@@ -1234,8 +1223,52 @@ def _trace_adaptive_no_ratchet(
         previous = _as_float(config.get("_adaptive_last_skip_trace_mono"))
         if previous is not None and 0 <= now_mono - previous < 8.0:
             return
-        config["_adaptive_last_skip_trace_mono"] = now_mono
+
+        cached_quotes = getattr(manager, "_exit_quotes", None)
+        cached = (
+            cached_quotes.get(symbol) if isinstance(cached_quotes, Mapping) else None
+        )
+        cached_bid = (
+            _positive(cached[0])
+            if isinstance(cached, (tuple, list)) and len(cached) >= 3
+            else None
+        )
+        seen_at = (
+            _as_float(cached[2])
+            if isinstance(cached, (tuple, list)) and len(cached) >= 3
+            else None
+        )
+        protected_bid = (
+            cached_bid
+            if cached_bid is not None
+            and seen_at is not None
+            and 0 <= now_wall - seen_at <= 3.0
+            else None
+        )
         book = _mapping(quote) if quote is not None else _quote(manager, symbol)
+        live_probe = getattr(manager, "_is_live_execution", None)
+        live = bool(live_probe()) if callable(live_probe) else False
+        book_age = _quote_age_seconds(book, require_exchange_time=live)
+        book_bid = (
+            _positive(book.get("bid"))
+            if book_age is not None and book_age <= 3.0
+            else None
+        )
+        bid = protected_bid if protected_bid is not None else book_bid
+        observed_price = bid or _positive(getattr(bracket, "last_ltp", None))
+        if (
+            observed_price is None
+            or observed_price < entry + 0.60 * (entry - initial)
+        ):
+            return
+        source = (
+            "protected_tick_bid"
+            if protected_bid is not None
+            else "unmatched_book_bid"
+            if book_bid is not None
+            else "ltp_only_not_executable"
+        )
+        config["_adaptive_last_skip_trace_mono"] = now_mono
         depth = book.get("depth")
         buys = depth.get("buy") if isinstance(depth, Mapping) else None
         first = buys[0] if isinstance(buys, list) and buys else {}
@@ -1246,7 +1279,6 @@ def _trace_adaptive_no_ratchet(
             if received is not None
             else None
         )
-        book_age = _quote_age_seconds(book)
         if reason in {
             "full_size_quote_unqualified",
             "fallback_full_depth_unavailable",
@@ -1254,7 +1286,7 @@ def _trace_adaptive_no_ratchet(
             if not book:
                 gate = "no_cached_quote"
             elif book_age is None:
-                gate = "invalid_or_future_event_timestamp"
+                gate = "unverified_or_invalid_exchange_timestamp"
             elif book_age > _adaptive_positive_env(
                 "ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0
             ):
@@ -1278,6 +1310,8 @@ def _trace_adaptive_no_ratchet(
             else:
                 gate = "book_mismatch_or_other"
             reason = f"{reason}:{gate}"
+        if protected_bid is None:
+            reason = f"{reason}:protected_tick_bid_missing"
         # The original 20 Nov logs could not distinguish a policy not
         # evaluated from a price-only quote rejected at a specific gate.
         # Keep bounded evidence in the existing bracket state so the final
@@ -1293,11 +1327,12 @@ def _trace_adaptive_no_ratchet(
             count = 0
         reason_counts[key] = min(10000, max(0, count) + 1)
         config["_adaptive_last_skip_reason"] = reason
-        config["_adaptive_last_skip_bid"] = round(bid, 2)
+        config["_adaptive_last_skip_bid"] = round(bid, 2) if bid is not None else None
+        config["_adaptive_last_skip_evidence_source"] = source
         config["_adaptive_last_skip_at"] = round(now_wall, 3)
         LOGGER.warning(
             "ADAPTIVE_PROFIT_LOCK_SKIP symbol=%s reason=%s "
-            "observed_bid=%.2f observed_mfe_r=%.3f "
+            "observed_bid=%s observed_mfe_r=%.3f evidence_source=%s "
             "top_bid_quantity_sufficient=%s top_bid_qty=%s required_qty=%s "
             "book_bid=%s book_age_s=%s received_age_s=%s "
             "quote_source=%s spread_pct=%s broker_stop_trigger=%s "
@@ -1305,7 +1340,8 @@ def _trace_adaptive_no_ratchet(
             symbol,
             reason,
             bid,
-            (bid - entry) / (entry - initial),
+            (observed_price - entry) / (entry - initial),
+            source,
             bool(
                 qty is not None
                 and qty >= int(getattr(bracket, "remaining_quantity", 0) or 0) > 0
@@ -1313,7 +1349,7 @@ def _trace_adaptive_no_ratchet(
             qty,
             int(getattr(bracket, "remaining_quantity", 0) or 0),
             book.get("bid"),
-            _quote_age_seconds(book),
+            book_age,
             received_age,
             book.get("source"),
             _spread_pct(book),
@@ -1461,8 +1497,15 @@ def _verified_futures_volume_ratio(
     earlier completed bars supply the denominator. Generic runtime direction
     context ages do NOT certify the volume source's candle time.
     """
-    quote_age = _quote_age_seconds(quote)
-    if not symbol or quote_age is None or quote_age > 3.0:
+    quote_age = _quote_age_seconds(quote, require_exchange_time=True)
+    received_age = _quote_age_seconds({"received_at": quote.get("received_at")})
+    if (
+        not symbol
+        or quote_age is None
+        or quote_age > 3.0
+        or received_age is None
+        or received_age > 3.0
+    ):
         return None, None
     getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
     if not callable(getter):
@@ -1863,38 +1906,16 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
 def tighten_verified_tier_fallback(manager: Any, bracket: Any, ltp: float) -> bool:
     """Fallback to the canonical tier schedule on verified executable evidence.
 
-    One optional policy may ratchet in a tick: this runs ONLY when the
-    adaptive policy did not commit a proposal. Neither LTP nor a bare best
-    bid is permitted to promote a live stop. The canonical broker owner
+    This is selected only when adaptive is explicitly disabled in LIVE.
+    Neither LTP nor a bare best bid may promote a live stop. The canonical broker owner
     remains responsible for serial stop modifications and acknowledgements.
     """
     if not _env_bool("VERIFIED_TIER_FALLBACK_ENABLED", True):
         return False
-    # An adaptive NOOP after its first ratchet is an intentional continuation
-    # decision, not a failure. Do not allow legacy tiers to override its
-    # wider giveback allowance or a proven STRONG continuation assessment.
-    owner_config = getattr(bracket, "trailing_config", None)
-    ownership_proof = getattr(bracket, "trade_provenance", None)
+    # An active adaptive policy owns the whole position, including NOOPs.
+    # Verified tiers are an explicit LIVE opt-out, never a second candidate.
     if adaptive_profit_lock_enabled(manager):
-        if isinstance(owner_config, dict) and (
-            owner_config.get("_adaptive_profit_state") == "STRONG"
-            or (
-                owner_config.get("_adaptive_profit_has_ratcheted") is True
-                and owner_config.get("_adaptive_profit_confirmed_order_id")
-                == getattr(bracket, "exchange_stop_order_id", None)
-            )
-        ):
-            return False
-        proof = (
-            ownership_proof.get("adaptive_profit_lock")
-            if isinstance(ownership_proof, Mapping)
-            else None
-        )
-        if (
-            isinstance(proof, Mapping)
-            and _positive(proof.get("broker_orderbook_confirmed_stop")) is not None
-        ):
-            return False
+        return False
     if (
         str(getattr(bracket, "side", "")).upper() != "BUY"
         or not bool(getattr(bracket, "trailing_enabled", True))
