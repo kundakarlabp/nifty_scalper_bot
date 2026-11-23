@@ -767,8 +767,7 @@ def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> No
 
     assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.CONTEXT_ONLY
     assert (
-        bot._entry_evaluation_route(selected)
-        == EntryEvaluationRoute.OPTION_CANDIDATE
+        bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
     )
 
 
