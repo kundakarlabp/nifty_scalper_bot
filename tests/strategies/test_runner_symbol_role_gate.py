@@ -653,6 +653,9 @@ def test_generated_candidate_and_terminal_result_share_one_trace(monkeypatch):
 
 def _independent_fallback_runner(monkeypatch):
     bot, manager, risk, orders, selected = _build_phase9_runner(monkeypatch)
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
     candidate = "NFO:NIFTY26JUN23950CE"
     bot._active_symbols.add(candidate)
     bot._tracked_symbols.add(candidate)
