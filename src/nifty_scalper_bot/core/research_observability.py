@@ -55,7 +55,10 @@ _REJECTION_CONTEXT_KEYS = (
     "futures_price",
     "futures_vwap",
     "futures_vwap_slope",
-    "futures_volume_ratio",
+    "futures_volume_ratio",  # Legacy sampled quote-counter ratio.
+    "futures_completed_bar_volume_ratio",
+    "futures_completed_bar_volume_ready",
+    "futures_completed_bar_volume_symbol",
     "ema_fast",
     "ema_slow",
     "bos_confirmed",
