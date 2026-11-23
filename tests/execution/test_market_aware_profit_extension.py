@@ -1415,7 +1415,8 @@ def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
 
 @pytest.mark.parametrize("evidence", ["unmatched_bid", "ltp_only"])
 def test_adaptive_skip_records_missing_protected_tick_bid_without_trading(
-    monkeypatch, evidence,
+    monkeypatch,
+    evidence,
 ):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     manager = FakeManager(strong=True)
