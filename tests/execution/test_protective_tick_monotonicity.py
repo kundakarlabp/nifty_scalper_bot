@@ -177,12 +177,24 @@ def test_iso_timestamped_old_tick_cannot_reverse_bracket_protection() -> None:
     older = datetime.fromtimestamp(now - 20.0, tz=timezone.utc).isoformat()
 
     manager.on_tick_event(
-        {"symbol": SYMBOL, "ltp": 110.0, "bid": 109.8, "ask": 110.0,
-         "exchange_timestamp": recent, "received_at": now}
+        {
+            "symbol": SYMBOL,
+            "ltp": 110.0,
+            "bid": 109.8,
+            "ask": 110.0,
+            "exchange_timestamp": recent,
+            "received_at": now,
+        }
     )
     manager.on_tick_event(
-        {"symbol": SYMBOL, "ltp": 90.0, "bid": 89.8, "ask": 90.0,
-         "exchange_timestamp": older, "received_at": now}
+        {
+            "symbol": SYMBOL,
+            "ltp": 90.0,
+            "bid": 89.8,
+            "ask": 90.0,
+            "exchange_timestamp": older,
+            "received_at": now,
+        }
     )
 
     assert bracket.last_ltp == 110.0
