@@ -328,3 +328,81 @@ def test_order_details_persists_exact_lot_lifecycle_state() -> None:
         "state": "ENTRY_OPEN",
         "requested_lots": 1,
     }
+
+
+def test_independent_itm_fallback_reaches_broker_free_order_preflight(
+    monkeypatch,
+) -> None:
+    """A verified own-contract signal must be explicitly authorized at preflight."""
+    import inspect
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    selected = GOOD_SYMBOL
+    independent = BAD_SYMBOL  # 50-point higher strike is ITM for a PE
+    runner = object.__new__(StrategyRunner)
+    runner._active_selected_ce = None
+    runner._active_selected_pe = selected
+    runner._active_option_symbols = {selected, independent}
+    runner._active_basket_token_by_symbol = {
+        selected: 12345,
+        independent: 54321,
+    }
+    runner._eval_option_whitelist = {selected, independent}
+    runner._indicator_engine = SimpleNamespace(
+        get_history=lambda _symbol: [{}] * 20
+    )
+    runner._option_required_bars = 5
+    runner._last_bar_ts = {independent: datetime.now(timezone.utc)}
+    quotes = {
+        selected: {"ltp": 28.0, "bid": 27.85, "ask": 27.95, "tick_age_ms": 100},
+        independent: {
+            "ltp": 55.0,
+            "bid": 54.8,
+            "ask": 55.1,
+            "tick_age_ms": 100,
+        },
+    }
+    runner._get_cached_quote_for_live_entry = lambda symbol: quotes.get(symbol, {})
+
+    assert runner._independent_premium_fallback_eligible(independent)
+
+    # Pin the runner-to-plan handoff contract, then exercise the actual
+    # OrderManager live preflight with no broker access.
+    source = inspect.getsource(StrategyRunner._handle_signal)
+    start = source.index('elif metadata.get("_independent_premium_fallback") is True:')
+    end = source.index("# The final order symbol", start)
+    assert (
+        'metadata["_runner_approved_replacement_symbol"] = selected_symbol'
+        in source[start:end]
+    )
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724300PE"},
+        active_basket={
+            "selected_pe": selected,
+            "option_symbols": [selected, independent],
+            "basket_version": "7",
+            "expiry": "2026-07-30",
+            "token_by_symbol": {selected: 12345, independent: 54321},
+        },
+    )
+    plan = _plan(independent)
+    plan.instrument_token = 54321
+    missing_authorization = core.OrderManager._validate_trade_plan(manager, plan)
+    assert missing_authorization.allowed is False
+    assert missing_authorization.reason == "active_contract_unavailable"
+
+    plan.trade_provenance["runner_approved_replacement_symbol"] = independent
+    authorized = core.OrderManager._validate_trade_plan(manager, plan)
+    assert authorized.allowed is True
+
+    plan.instrument_token = 99999
+    mismatched = core.OrderManager._validate_trade_plan(manager, plan)
+    assert mismatched.allowed is False
