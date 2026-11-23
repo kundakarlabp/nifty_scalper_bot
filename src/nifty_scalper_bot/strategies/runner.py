@@ -13766,8 +13766,9 @@ class StrategyRunner:
 
     def _independent_premium_fallback_eligible(self, symbol: str) -> bool:
         """Allow own-contract evaluation only for a fresh nearest-ITM alternative."""
+        policy = resolve_entry_policy()
         if (
-            not resolve_entry_policy().is_live
+            not policy.is_live
             or _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
             or not _env_flag("INDEPENDENT_ITM_PREMIUM_FALLBACK_ENABLED", True)
         ):
@@ -13823,8 +13824,8 @@ class StrategyRunner:
         bar_age_s = (datetime.now(timezone.utc) - last_bar).total_seconds()
         if not 0.0 <= bar_age_s <= 120.0:
             return False
-        floor = resolve_entry_policy().execution_min_premium
-        ceiling = resolve_entry_policy().max_premium
+        floor = policy.execution_min_premium
+        ceiling = policy.max_premium
         max_age_ms = float(app_settings.ORDER_MAX_QUOTE_AGE_MS)
         for quote_symbol in (selected, candidate):
             quote = self._get_cached_quote_for_live_entry(quote_symbol)
