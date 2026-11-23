@@ -150,9 +150,7 @@ def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
     hub = _hub(mdm_tick=None, cached_tick={})
     hub._token_by_symbol[_SYMBOL] = 12345
 
-    quote = hub._stamp_quote_identity(
-        _SYMBOL, {"instrument_token": 0, "ltp": 100.0}
-    )
+    quote = hub._stamp_quote_identity(_SYMBOL, {"instrument_token": 0, "ltp": 100.0})
 
     assert quote["instrument_token"] == 0
     assert quote["quote_identity_token_mismatch"] is True
