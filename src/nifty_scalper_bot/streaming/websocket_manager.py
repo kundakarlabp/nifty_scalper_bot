@@ -9,8 +9,10 @@ Runtime role:
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 import random
+import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 TickCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+OrderUpdateCallback = Callable[[dict[str, Any]], None]
 
 
 class ConnectionState(Enum):
@@ -119,6 +122,10 @@ class WebSocketManager:
         self._tokens: set[int] = {int(token) for token in (tokens or [])}
         self._on_tick_callback = on_tick_callback or on_tick
         self._on_error_callback = on_error
+        self._on_order_update_callback: OrderUpdateCallback | None = None
+        self._order_update_lock = threading.Lock()
+        self._order_update_slots = threading.BoundedSemaphore(128)
+        self._order_update_executor: ThreadPoolExecutor | None = None
         self._loop = loop
 
         self._base_backoff = float(base_backoff_seconds)
@@ -187,6 +194,62 @@ class WebSocketManager:
         if self._on_tick_callback is not None and not suppress_warning:
             self._logger.warning("WS|Replacing existing tick callback")
         self._on_tick_callback = callback
+
+    def set_order_update_callback(
+        self, callback: OrderUpdateCallback | None
+    ) -> None:
+        """Route broker postbacks to the existing order owner, not the tick bus."""
+        self._on_order_update_callback = callback
+
+    def _deliver_order_update(
+        self, callback: OrderUpdateCallback, payload: dict[str, Any]
+    ) -> None:
+        try:
+            callback(payload)
+        except Exception as exc:  # noqa: BLE001 - REST reconciliation remains authoritative
+            self._logger.error(
+                "WS_BROKER_ORDER_UPDATE_FAILED order_id=%s error_type=%s",
+                payload.get("order_id"),
+                type(exc).__name__,
+                extra={"event": "WS_BROKER_ORDER_UPDATE_FAILED"},
+            )
+        finally:
+            self._order_update_slots.release()
+
+    def _on_order_update(self, ws: Any, update: Any) -> None:
+        """Dispatch Kite order postbacks serially without blocking its tick thread."""
+        if (
+            (self._ticker is not None and ws is not self._ticker)
+            or self._shutdown
+            or self._manual_disconnect
+        ):
+            return
+        callback = self._on_order_update_callback
+        if not callable(callback) or not isinstance(update, dict):
+            return
+        if not str(update.get("order_id") or "").strip():
+            return
+        if not self._order_update_slots.acquire(blocking=False):
+            self._logger.error(
+                "WS_BROKER_ORDER_UPDATE_BACKLOG_FULL broker_reconciliation_required",
+                extra={"event": "WS_BROKER_ORDER_UPDATE_BACKLOG_FULL"},
+            )
+            return
+        try:
+            with self._order_update_lock:
+                if self._order_update_executor is None:
+                    self._order_update_executor = ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="kite-order-updates"
+                    )
+                self._order_update_executor.submit(
+                    self._deliver_order_update, callback, dict(update)
+                )
+        except RuntimeError:
+            self._order_update_slots.release()
+            self._logger.error(
+                "WS_BROKER_ORDER_UPDATE_DISPATCH_UNAVAILABLE broker_reconciliation_required",
+                extra={"event": "WS_BROKER_ORDER_UPDATE_DISPATCH_UNAVAILABLE"},
+            )
 
     def set_fallback_callbacks(
         self,
@@ -276,6 +339,11 @@ class WebSocketManager:
             self._ticker = None
             if ticker is not None:
                 await asyncio.to_thread(ticker.close)
+            with self._order_update_lock:
+                executor = self._order_update_executor
+                self._order_update_executor = None
+            if executor is not None:
+                executor.shutdown(wait=False)
         except Exception as e:
             self._logger.error("Failure in disconnect: %s", e)
             raise
@@ -790,6 +858,7 @@ class WebSocketManager:
         ticker.on_ticks = self._on_ticks
         ticker.on_error = self._on_error
         ticker.on_close = self._on_close
+        ticker.on_order_update = self._on_order_update
         if hasattr(ticker, "on_pong"):
             ticker.on_pong = self._on_pong
         if self._on_tick_callback is None:
