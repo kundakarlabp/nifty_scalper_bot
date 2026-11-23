@@ -1256,10 +1256,7 @@ def _trace_adaptive_no_ratchet(
         )
         bid = protected_bid if protected_bid is not None else book_bid
         observed_price = bid or _positive(getattr(bracket, "last_ltp", None))
-        if (
-            observed_price is None
-            or observed_price < entry + 0.60 * (entry - initial)
-        ):
+        if observed_price is None or observed_price < entry + 0.60 * (entry - initial):
             return
         source = (
             "protected_tick_bid"
