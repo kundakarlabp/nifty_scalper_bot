@@ -5214,6 +5214,23 @@ class OrderManager:
         quote = self._get_latest_quote_safe(symbol)
         if quote is None:
             return OrderPreflightResult(False, "quote_unavailable", {})
+        if live_entry and plan.instrument_token is not None:
+            quote_token = quote.get("instrument_token") or quote.get("token")
+            if quote_token is not None:
+                try:
+                    token_matches = int(quote_token) == int(plan.instrument_token)
+                except (TypeError, ValueError, OverflowError):
+                    token_matches = False
+                if not token_matches:
+                    return OrderPreflightResult(
+                        False,
+                        "quote_instrument_token_mismatch",
+                        {"symbol": symbol, "expected_token": plan.instrument_token},
+                    )
+        if live_entry and quote.get("quote_identity_token_mismatch") is True:
+            return OrderPreflightResult(
+                False, "quote_instrument_token_mismatch", {"symbol": symbol}
+            )
         qd = self._extract_quote_diagnostics(quote)
         if qd.get("age_ms") is not None and qd["age_ms"] > plan.max_quote_age_ms:
             return OrderPreflightResult(
