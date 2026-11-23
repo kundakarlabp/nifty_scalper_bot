@@ -256,3 +256,35 @@ def test_strategy_snapshot_rejects_untrusted_book_and_one_sided_depth() -> None:
     assert snap.depth_available is False
     assert snap.tradable_quote is False
     assert snap.tick_age_s is None
+
+
+def test_receipt_only_ws_event_cannot_confirm_current_generation() -> None:
+    mdm = MarketDataManager(kite=None)
+    token = 127654
+    assert mdm.request_token_subscription(token, symbol=SYMBOL)
+    now = time.time()
+    tick = {
+        "symbol": SYMBOL,
+        "instrument_token": token,
+        "ltp": 100.0,
+        "timestamp": now,
+        "received_at": now,
+        "source": "ws",
+        "timestamp_source": "received_at",
+        "timestamp_quality": "received_at",
+        "source_timestamp_valid": True,
+    }
+
+    mdm._ingest_normalized_tick(tick)
+
+    assert mdm.time_since_last_live_ws_tick(SYMBOL) is None
+    assert mdm._symbol_first_tick_generation.get(SYMBOL) is None
+
+    valid = {
+        **tick,
+        "timestamp_source": "exchange_timestamp",
+        "timestamp_quality": "exchange",
+    }
+    mdm._ingest_normalized_tick(valid)
+
+    assert mdm.time_since_last_live_ws_tick(SYMBOL) is not None
