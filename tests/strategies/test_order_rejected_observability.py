@@ -421,9 +421,7 @@ def test_replacement_premium_block_preserves_exact_cause_in_trade_journal() -> N
 
     assert captured[0]["order_submitted"] is False
     assert captured[0]["candidate_rejects"]["premium_out_of_range"] == 3
-    decision = captured[0]["candidate_capacity_decisions"][
-        "NFO:NIFTY26NOV25450PE"
-    ]
+    decision = captured[0]["candidate_capacity_decisions"]["NFO:NIFTY26NOV25450PE"]
     assert decision["reason"] == "replacement_not_permitted"
     assert decision["replacement_blocker"] == "premium_jump"
     assert decision["original_symbol"] == "NFO:NIFTY26NOV25400PE"
