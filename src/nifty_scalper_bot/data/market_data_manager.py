@@ -82,6 +82,7 @@ from nifty_scalper_bot.data.time_contract import (
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
+    quote_timestamp_quality_allows_hard_readiness,
     resolve_quote_bid_ask_spread,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -12818,9 +12819,14 @@ class MarketDataManager:
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
         age = None
-        wallclock = self._tick_wallclock(tick)
-        if wallclock is not None:
-            age = max(0.0, time.time() - wallclock)
+        event_epoch = self._tick_event_wallclock(tick)
+        now_epoch = time.time()
+        if (
+            event_epoch is not None
+            and 0.0 <= now_epoch - event_epoch
+            and quote_timestamp_quality_allows_hard_readiness(tick)
+        ):
+            age = now_epoch - event_epoch
         with self._lock:
             source = str(
                 self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
@@ -12863,8 +12869,11 @@ class MarketDataManager:
             bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
         )
         ohlc_valid = bool(bars)
-        depth_available = isinstance(tick.get("depth"), Mapping) and bool(
-            tick.get("depth")
+        depth = tick.get("depth")
+        depth_available = bool(
+            isinstance(depth, Mapping)
+            and depth.get("buy")
+            and depth.get("sell")
         )
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
@@ -12888,6 +12897,9 @@ class MarketDataManager:
             (not bid_missing and not ask_missing)
             and source_ok
             and (self._quote_api_available or not rest_quote_source)
+            and tick.get("tradable_quote") is not False
+            and tick.get("hard_readiness_eligible") is not False
+            and quote_timestamp_quality_allows_hard_readiness(tick)
         )
         snapshot = MarketSnapshot(
             symbol=str(symbol),
