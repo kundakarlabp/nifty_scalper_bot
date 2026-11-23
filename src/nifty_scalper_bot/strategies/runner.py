@@ -25,6 +25,9 @@ Runtime role:
   second risk authority.
 - Checks independent original/replacement expiry, strike, side, premium,
   and basket eligibility before affordability and again before final order routing.
+- Evaluates one separately quoted, completed-bar ITM candidate when the selected
+  option is below the execution premium floor; the candidate's own strategy
+  vote remains pinned to that contract, without transplanting an ATM thesis.
 - Rejects changed-contract premium plans whose materialized stop widens beyond
   the selected candidate or lacks finite, same-contract entry/exit geometry.
 - Pins each live candidate decision to one active basket generation and reports
@@ -13761,6 +13764,91 @@ class StrategyRunner:
             return "tradable_option"
         return "unknown"
 
+    def _independent_premium_fallback_eligible(self, symbol: str) -> bool:
+        """Allow own-contract evaluation only for a fresh nearest-ITM alternative."""
+        if (
+            not resolve_entry_policy().is_live
+            or _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
+            or not _env_flag("INDEPENDENT_ITM_PREMIUM_FALLBACK_ENABLED", True)
+        ):
+            return False
+        candidate = normalize_symbol(str(symbol or ""))
+        side = self._contract_side_from_symbol(candidate)
+        selected = normalize_symbol(
+            str(
+                getattr(
+                    self,
+                    "_active_selected_ce" if side == "CE" else "_active_selected_pe",
+                    "",
+                )
+                or ""
+            )
+        )
+        if side not in {"CE", "PE"} or not selected or candidate == selected:
+            return False
+        active = getattr(self, "_active_option_symbols", set()) or set()
+        tokens = getattr(self, "_active_basket_token_by_symbol", {}) or {}
+        whitelist = getattr(self, "_eval_option_whitelist", None)
+        if (
+            candidate not in active
+            or not tokens.get(candidate)
+            or not tokens.get(selected)
+            or (whitelist and candidate not in whitelist)
+        ):
+            return False
+        original_strike = self._extract_strike_from_symbol(selected)
+        candidate_strike = self._extract_strike_from_symbol(candidate)
+        if original_strike is None or candidate_strike is None:
+            return False
+        if candidate_strike != original_strike + (50 if side == "PE" else -50):
+            return False
+        # Reuse the existing same-side, expiry, strike and basket restrictions.
+        # The premium-jump test is only for transplanting a different contract's
+        # signal; this alternative must instead earn its own strategy vote.
+        blocker, _ = self._candidate_replacement_contract_guard(
+            original_symbol=selected,
+            selected_symbol=candidate,
+            original_trade_price=0.0,
+            candidate_trade_price=0.0,
+        )
+        if blocker is not None:
+            return False
+        if self._history_count_for_symbol(candidate) < self._required_bars_for_symbol(
+            candidate
+        ):
+            return False
+        last_bar = (getattr(self, "_last_bar_ts", {}) or {}).get(candidate)
+        if not isinstance(last_bar, datetime) or last_bar.tzinfo is None:
+            return False
+        bar_age_s = (datetime.now(timezone.utc) - last_bar).total_seconds()
+        if not 0.0 <= bar_age_s <= 120.0:
+            return False
+        floor = resolve_entry_policy().execution_min_premium
+        ceiling = resolve_entry_policy().max_premium
+        max_age_ms = float(app_settings.ORDER_MAX_QUOTE_AGE_MS)
+        for quote_symbol in (selected, candidate):
+            quote = self._get_cached_quote_for_live_entry(quote_symbol)
+            if not isinstance(quote, Mapping):
+                return False
+            age_ms = resolve_tick_age_ms(quote)
+            if age_ms is None or not 0 <= age_ms <= max_age_ms:
+                return False
+            try:
+                ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+                bid = float(quote.get("bid") or 0.0)
+                ask = float(quote.get("ask") or 0.0)
+            except (TypeError, ValueError):
+                return False
+            if not all(math.isfinite(x) for x in (ltp, bid, ask)):
+                return False
+            if ltp <= 0 or bid <= 0 or ask <= bid:
+                return False
+            if quote_symbol == selected and ltp >= floor:
+                return False
+            if quote_symbol == candidate and not (floor <= ltp <= ceiling):
+                return False
+        return True
+
     def _roles_for_symbol(self, symbol: str) -> set[str]:
         normalized = normalize_symbol(str(symbol or ""))
         role = self._symbol_role_for_runner(normalized)
@@ -13771,6 +13859,10 @@ class StrategyRunner:
             roles.add("option_context")
         if self._is_selected_option_symbol(normalized):
             roles.add("selected_option")
+            roles.add("trigger_candidate")
+        elif role == "tradable_option" and self._independent_premium_fallback_eligible(
+            normalized
+        ):
             roles.add("trigger_candidate")
         try:
             pm = getattr(self, "_position_manager", None)
@@ -16699,6 +16791,41 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        if (
+                            signal is not None
+                            and route == EntryEvaluationRoute.OPTION_CANDIDATE
+                            and not self._is_selected_option_symbol(symbol)
+                        ):
+                            # A nearby option cannot inherit the selected
+                            # option's setup or remain authorized after a
+                            # quote/pair rotation during its evaluation.
+                            if (
+                                normalize_symbol(str(signal.symbol)) != normalize_symbol(symbol)
+                                or not self._independent_premium_fallback_eligible(symbol)
+                            ):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="independent_premium_fallback_changed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                                signal = None
+                            else:
+                                side = self._contract_side_from_symbol(symbol)
+                                selected_origin = (
+                                    self._active_selected_ce
+                                    if side == "CE"
+                                    else self._active_selected_pe
+                                )
+                                signal = dataclasses.replace(
+                                    signal,
+                                    metadata={
+                                        **dict(signal.metadata or {}),
+                                        "_independent_premium_fallback": True,
+                                        "_independent_premium_selected_origin": selected_origin,
+                                    },
+                                )
                         # A probe is only permission to evaluate. Never pass an
                         # opposite/unknown-direction order unless the combiner
                         # attested the dedicated futures/option-flow reversal.
@@ -19226,7 +19353,25 @@ class StrategyRunner:
                             if option_side == "CE"
                             else candidate_contract_generation.selected_pe
                         )
-                        if normalize_symbol(signal.symbol) != selected_live:
+                        if metadata.get("_independent_premium_fallback") is True:
+                            # This signal was independently evaluated on the
+                            # candidate's own completed candles and quotes.
+                            # Never remap that thesis to the selected ATM leg.
+                            valid_own_signal = (
+                                normalize_symbol(
+                                    str(metadata.get("_independent_premium_selected_origin") or "")
+                                )
+                                == selected_live
+                                and self._independent_premium_fallback_eligible(signal.symbol)
+                            )
+                            ranked_candidates = [
+                                item
+                                for item in ranked_candidates
+                                if valid_own_signal
+                                and normalize_symbol(item.symbol)
+                                == normalize_symbol(signal.symbol)
+                            ]
+                        elif normalize_symbol(signal.symbol) != selected_live:
                             # A rotated setup must requalify on the current selection.
                             ranked_candidates = [
                                 item for item in ranked_candidates
