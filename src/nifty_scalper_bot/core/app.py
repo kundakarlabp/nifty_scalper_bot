@@ -14181,6 +14181,16 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     pe_bars >= _symbol_history_requirement(ctx),
                                 )
                                 if committed_ce and committed_pe:
+                                    # Basket commit precedes runner callback repair. Restore
+                                    # the selected live delivery edges before testing readiness;
+                                    # otherwise a valid pair stays disarmed until the next
+                                    # periodic rearm cycle despite fresh broker quotes.
+                                    _ensure_selected_option_runtime_delivery(
+                                        ctx,
+                                        selected_ce=committed_ce,
+                                        selected_pe=committed_pe,
+                                        reason="dynamic_basket_committed",
+                                    )
                                     await _recompute_and_push_runtime_readiness(
                                         ctx,
                                         reason="dynamic_basket_committed",
