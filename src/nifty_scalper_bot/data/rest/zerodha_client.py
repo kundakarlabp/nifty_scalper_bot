@@ -710,7 +710,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """
         Place order with Robust Idempotency, Symbol Parsing & Type Mapping.
         """
-        import uuid
 
         # 1. Construct Param Dictionary
         params = kwargs.copy()
