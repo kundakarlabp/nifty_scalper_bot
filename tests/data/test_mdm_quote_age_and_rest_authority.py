@@ -141,3 +141,68 @@ def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
     assert mdm.get_latest_tick(SYMBOL) == quote_before
     assert mdm._last_mid[SYMBOL] == mid_before
     assert mdm._last_quote_ts_ms[SYMBOL] == stamp_before
+
+
+def test_fresh_full_book_is_not_downgraded_by_newer_ltp_only_ws_tick() -> None:
+    mdm = _manager()
+    now = time.time()
+    full = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "source": "ws",
+        "timestamp": now,
+        "received_at": now,
+        "timestamp_quality": "exchange",
+        "source_timestamp_valid": True,
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [{"price": 100.1, "quantity": 65}],
+        },
+    }
+    assert mdm._store_tick(SYMBOL, full) is True
+    saved = mdm.get_latest_tick(SYMBOL)
+    assert saved is not None
+
+    degraded = {
+        "symbol": SYMBOL,
+        "ltp": 102.0,
+        "source": "ws",
+        "timestamp": now + 0.01,
+        "received_at": now + 0.01,
+        "timestamp_quality": "exchange",
+        "source_timestamp_valid": True,
+    }
+    assert mdm._store_tick(SYMBOL, degraded) is False
+    assert mdm.get_latest_tick(SYMBOL) == saved
+
+
+def test_verified_full_book_is_not_replaced_by_receipt_only_full_depth() -> None:
+    mdm = _manager()
+    now = time.time()
+    full = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "source": "ws",
+        "timestamp": now,
+        "received_at": now,
+        "timestamp_quality": "exchange",
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [{"price": 100.1, "quantity": 65}],
+        },
+    }
+    assert mdm._store_tick(SYMBOL, full)
+    attempted = {
+        **full,
+        "ltp": 101.0,
+        "timestamp": now + 0.05,
+        "received_at": now + 0.05,
+        "timestamp_quality": "received_at",
+    }
+
+    assert mdm._store_tick(SYMBOL, attempted) is False
+    assert mdm.get_latest_tick(SYMBOL)["ltp"] == 100.0
