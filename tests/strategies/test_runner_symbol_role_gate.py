@@ -698,8 +698,14 @@ def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) ->
         lambda signal, _price, _now, _trace: (captured.append(signal), (True, None))[1]
     )
 
-    assert bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
-    assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
+    assert (
+        bot._entry_evaluation_route(selected)
+        == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+    assert (
+        bot._entry_evaluation_route(candidate)
+        == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
     bot._on_tick(
         candidate,
         {
@@ -714,7 +720,10 @@ def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) ->
         },
     )
 
-    assert any(call.args[0] == candidate for call in manager.generate_signal.call_args_list)
+    assert any(
+        call.args[0] == candidate
+        for call in manager.generate_signal.call_args_list
+    )
     assert len(captured) == 1
     assert captured[0].symbol == candidate
     assert captured[0].metadata["setup_id"] == "own-candidate-closed-bar"
@@ -760,7 +769,10 @@ def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> No
         monkeypatch.setenv("INDEPENDENT_ITM_PREMIUM_FALLBACK_ENABLED", "false")
 
     assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.CONTEXT_ONLY
-    assert bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
+    assert (
+        bot._entry_evaluation_route(selected)
+        == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
 
 
 def test_nonselected_signal_cannot_borrow_selected_atm_setup(monkeypatch) -> None:
