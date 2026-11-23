@@ -1361,3 +1361,66 @@ def test_partially_filled_entry_is_never_repriced(monkeypatch) -> None:
     )
 
     assert modified == []
+
+
+def test_kite_stream_observes_unknown_orders_without_adopting_them() -> None:
+    manager = _manager()
+    manager._lock = threading.RLock()
+    manager._orders = {}
+    journalled: list[tuple[str, dict[str, Any]]] = []
+    applied: list[str] = []
+    manager._log_trade_event = (  # type: ignore[method-assign]
+        lambda event_type, **kwargs: journalled.append((event_type, kwargs))
+    )
+    manager.apply_broker_order_update = (  # type: ignore[method-assign]
+        lambda order_id, _payload: applied.append(order_id)
+    )
+    update = {
+        "order_id": "external-1",
+        "status": "TRIGGER PENDING",
+        "tradingsymbol": "NIFTY26NOV25700CE",
+        "exchange": "NFO",
+        "transaction_type": "SELL",
+        "product": "MIS",
+        "order_type": "SL",
+        "quantity": 65,
+        "filled_quantity": 0,
+        "pending_quantity": 65,
+        "price": 131.9,
+        "trigger_price": 138.85,
+        "exchange_update_timestamp": "2026-11-20 13:40:30",
+    }
+
+    manager.on_broker_stream_update(update)
+
+    assert applied == []
+    assert len(journalled) == 1
+    event_type, data = journalled[0]
+    assert event_type == "BROKER_ORDER_STREAM_OBSERVED"
+    assert data["order_id"] == "external-1"
+    assert data["symbol"] == "NFO:NIFTY26NOV25700CE"
+    assert data["meta"]["broker_status"] == "TRIGGER PENDING"
+    assert data["meta"]["pending_quantity"] == 65
+    assert data["meta"]["product"] == "MIS"
+    assert data["meta"]["exchange_update_timestamp"] == "2026-11-20 13:40:30"
+
+    manager._orders["external-1"] = object()
+    manager.on_broker_stream_update({**update, "status": "COMPLETE"})
+    assert applied == ["external-1"]
+    assert journalled[-1][1]["meta"]["broker_status"] == "COMPLETE"
+
+
+def test_kite_stream_invalid_order_updates_never_mutate_orders() -> None:
+    manager = _manager()
+    manager._lock = threading.RLock()
+    manager._orders = {"entry-1": object()}
+    updates: list[str] = []
+    manager.apply_broker_order_update = (  # type: ignore[method-assign]
+        lambda order_id, _payload: updates.append(order_id)
+    )
+    manager._log_trade_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    manager.on_broker_stream_update({"status": "COMPLETE"})
+    manager.on_broker_stream_update({"order_id": "entry-1", "quantity": "invalid", "status": "OPEN"})
+    manager.on_broker_stream_update({"order_id": "entry-1", "status": ""})
+    assert updates == []
