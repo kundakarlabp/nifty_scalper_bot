@@ -12871,9 +12871,7 @@ class MarketDataManager:
         ohlc_valid = bool(bars)
         depth = tick.get("depth")
         depth_available = bool(
-            isinstance(depth, Mapping)
-            and depth.get("buy")
-            and depth.get("sell")
+            isinstance(depth, Mapping) and depth.get("buy") and depth.get("sell")
         )
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
