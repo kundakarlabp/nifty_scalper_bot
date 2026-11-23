@@ -78,7 +78,8 @@ def test_received_at_quality_preserved_when_it_is_the_only_valid_time_proof() ->
 
     assert quote is not None
     assert quote["timestamp_quality"] == "received_at"
-    assert quote["hard_readiness_eligible"] is True
+    assert quote["hard_readiness_eligible"] is False
+    assert quote["tradable_quote"] is False
 
 
 def test_partial_book_and_explicit_nontradable_state_are_never_upgraded() -> None:
