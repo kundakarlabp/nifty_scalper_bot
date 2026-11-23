@@ -430,8 +430,10 @@ def test_live_trade_plan_allows_matching_explicit_quote_token() -> None:
 
 def test_live_trade_plan_rejects_datahub_token_mismatch_proof() -> None:
     manager = _Manager(
-        {"tradingsymbol": "NIFTY2670724250PE",
-         "quote_identity_token_mismatch": True}
+        {
+            "tradingsymbol": "NIFTY2670724250PE",
+            "quote_identity_token_mismatch": True,
+        }
     )
 
     result = core.OrderManager._validate_trade_plan(manager, _plan())
