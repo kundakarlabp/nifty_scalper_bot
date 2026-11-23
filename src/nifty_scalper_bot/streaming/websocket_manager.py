@@ -11,12 +11,12 @@ Runtime role:
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 import random
 import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from enum import Enum
@@ -208,7 +208,7 @@ class WebSocketManager:
     ) -> None:
         try:
             callback(payload)
-        except Exception as exc:  # noqa: BLE001 - REST reconciliation remains authoritative
+        except Exception as exc:  # noqa: BLE001 - REST remains authoritative
             self._logger.error(
                 "WS_BROKER_ORDER_UPDATE_FAILED order_id=%s error_type=%s",
                 payload.get("order_id"),
@@ -249,7 +249,7 @@ class WebSocketManager:
         except RuntimeError:
             self._order_update_slots.release()
             self._logger.error(
-                "WS_BROKER_ORDER_UPDATE_DISPATCH_UNAVAILABLE broker_reconciliation_required",
+                "WS_BROKER_ORDER_UPDATE_DISPATCH_UNAVAILABLE reconcile_required",
                 extra={"event": "WS_BROKER_ORDER_UPDATE_DISPATCH_UNAVAILABLE"},
             )
 
