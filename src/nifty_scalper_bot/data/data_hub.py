@@ -66,7 +66,11 @@ Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
 _UNUSABLE_TIMESTAMP_QUALITIES = {
-    "synthetic", "unknown", "invalid", "received_at", "received_at_fallback"
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
 }
 _WS_SOURCES = {"ws", "ws_full", "full", "websocket", "stream"}
 _QUOTE_IDENTITY_KEYS = (
