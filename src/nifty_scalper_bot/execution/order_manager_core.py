@@ -5,6 +5,9 @@ Runtime role:
   broker (Kite), handling retries, idempotency, and lifecycle transitions.
 - Coordinates with the bracket manager (SL/TP), position manager, and risk
   guardrails around each order.
+- on_broker_stream_update journals Kite account order-state evidence and sends
+  tracked orders through the existing update owner; unknown orders are not
+  auto-adopted from the account-wide WebSocket.
 
 Position in the pipeline:
     strategies/runner.py -> THIS FILE (order_manager_core.py)
@@ -8021,12 +8024,91 @@ class OrderManager:
         self._apply_broker_order_update(payload)
 
     def on_order_update(self, order_update: dict) -> None:
-        """Compatibility wrapper for broker websocket order updates."""
+        """Compatibility wrapper for existing broker reconciliation callers."""
 
         order_id = order_update.get("order_id")
         if not order_id:
             return
         self.apply_broker_order_update(str(order_id), order_update)
+
+    def on_broker_stream_update(self, order_update: Mapping[str, Any]) -> None:
+        """Journal Kite WS broker evidence; mutate only orders this owner tracks.
+
+        Kite emits account-wide updates, including external/manual orders and
+        exchange SLs not registered in this manager. Those remain observations;
+        only the existing REST/position/bracket owners may adopt or reconcile them.
+        """
+        if not isinstance(order_update, Mapping):
+            return
+        order_id = str(order_update.get("order_id") or "").strip()
+        status = str(order_update.get("status") or "").strip().upper()
+        if not order_id or not status:
+            return
+        try:
+            qty = int(float(order_update.get("quantity") or 0))
+            price = float(order_update.get("price") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            self._logger.warning(
+                "BROKER_WS_ORDER_UPDATE_INVALID_NUMBERS order_id=%s", order_id
+            )
+            return
+        if qty < 0 or not math.isfinite(price) or price < 0:
+            return
+
+        # Existing asynchronous journal is the only persistence owner.
+        # Preserve actual broker timestamps as supplied; receipt time is not
+        # represented as an exchange event time.
+        evidence_fields = (
+            "exchange",
+            "tradingsymbol",
+            "product",
+            "variety",
+            "order_type",
+            "tag",
+            "status_message",
+            "status_message_raw",
+            "exchange_order_id",
+            "cancelled_quantity",
+            "quantity",
+            "filled_quantity",
+            "pending_quantity",
+            "trigger_price",
+            "price",
+            "average_price",
+            "order_timestamp",
+            "exchange_timestamp",
+            "exchange_update_timestamp",
+            "fill_timestamp",
+        )
+        meta: dict[str, object] = {
+            "event_name": "broker.order_update.observed",
+            "source": "kite_websocket",
+            "broker_status": status,
+            **{
+                key: order_update[key] for key in evidence_fields if key in order_update
+            },
+        }
+        symbol = str(order_update.get("tradingsymbol") or "")
+        exchange = str(order_update.get("exchange") or "")
+        if symbol and exchange and ":" not in symbol:
+            symbol = f"{exchange}:{symbol}"
+        self._log_trade_event(
+            "BROKER_ORDER_STREAM_OBSERVED",
+            symbol=symbol,
+            side=str(order_update.get("transaction_type") or ""),
+            qty=qty,
+            price=price,
+            order_id=order_id,
+            meta=meta,
+        )
+
+        # Never auto-adopt an unrelated account-wide stream event as an entry.
+        # A websocket event can precede local registration; existing broker
+        # reconciliation remains authoritative for that race and for stops.
+        with self._lock:
+            if order_id not in self._orders:
+                return
+            self.apply_broker_order_update(order_id, order_update)
 
     def _is_stale_broker_order_update(
         self, order: OrderDetails, payload: Mapping[str, Any]

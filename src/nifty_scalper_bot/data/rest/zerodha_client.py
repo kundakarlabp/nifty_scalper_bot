@@ -2,6 +2,8 @@
 
 Runtime role:
 - Low-level Zerodha REST adapter for instruments, quotes, orders, and history.
+- get_order_history preserves exact Kite order transitions for broker audit;
+  get_order_status reuses that fetch for the latest authoritative status.
 - Provides broker data to owner modules.
 - Must not own live contract selection."""
 
@@ -708,7 +710,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
         """
         Place order with Robust Idempotency, Symbol Parsing & Type Mapping.
         """
-        import uuid
 
         # 1. Construct Param Dictionary
         params = kwargs.copy()
@@ -1237,16 +1238,23 @@ class ZerodhaKiteClient(BaseBrokerClient):
         data = cast(dict[str, Any], response.get("data", {}))
         return cast(list[dict], data.get("candles", []))
 
-    def get_order_status(self, order_id: str) -> dict:
-        """Get order status from broker."""
-
+    def get_order_history(self, order_id: str) -> list[dict[str, Any]]:
+        """Fetch all broker order-state transitions for this exact order ID."""
         self._acquire_bucket(self._GENERAL_BUCKET)
         response = self._ensure_json(self._make_request("GET", f"/orders/{order_id}"))
-        orders = cast(list[dict], response.get("data", []))
-        for order in reversed(orders):
-            if str(order.get("order_id")) == str(order_id):
-                return order
-        return {}
+        rows = response.get("data")
+        if not isinstance(rows, list) or any(
+            not isinstance(row, Mapping) for row in rows
+        ):
+            raise BrokerError("Malformed Zerodha order-history response")
+        return [
+            dict(row) for row in rows if str(row.get("order_id") or "") == str(order_id)
+        ]
+
+    def get_order_status(self, order_id: str) -> dict:
+        """Return the latest state using the same authoritative history fetch."""
+        history = self.get_order_history(order_id)
+        return history[-1] if history else {}
 
     def get_order_trades(self, order_id: str) -> list[dict]:
         """Read broker-confirmed executions for one exact Kite order ID."""

@@ -6208,6 +6208,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
 
+    # KiteTicker postbacks share the existing authenticated market-data socket.
+    # The canonical OrderManager journals every update and processes only known
+    # orders; unknown/manual orders remain with broker-position reconciliation.
+    order_postback_binding = getattr(
+        websocket_manager, "set_order_update_callback", None
+    )
+    if callable(order_postback_binding):
+        order_postback_binding(order_manager.on_broker_stream_update)
+
     if risk_state is not None:
 
         def _sync_risk_state_pnl() -> None:
