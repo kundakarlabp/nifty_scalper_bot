@@ -1084,12 +1084,23 @@ class DataHub:
                 tick["timestamp_ms"] = timestamp_ms
                 timestamp_source = str(tick.get("timestamp_source") or "").lower()
                 timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
-                if not timestamp_quality:
+                if timestamp_source in {
+                    "received_at",
+                    "received_ts",
+                    "received_time",
+                    "received_at_fallback",
+                }:
+                    timestamp_quality = "received_at"
+                elif not timestamp_quality:
                     timestamp_quality = (
                         "exchange" if "exchange" in timestamp_source else "broker"
                     )
-                    tick["timestamp_quality"] = timestamp_quality
-                tick.setdefault("hard_readiness_eligible", True)
+                tick["timestamp_quality"] = timestamp_quality
+                if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+                    tick["hard_readiness_eligible"] = False
+                    tick["tradable_quote"] = False
+                else:
+                    tick.setdefault("hard_readiness_eligible", True)
                 tick.setdefault("quote_source", tick.get("source"))
                 tick.setdefault("exchange_symbol", symbol)
                 tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
