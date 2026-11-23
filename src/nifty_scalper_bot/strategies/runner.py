@@ -19561,13 +19561,15 @@ class StrategyRunner:
                     # needs the existing explicit basket-alternative permit to
                     # accept its token; grant it only after rechecking origin,
                     # current selection, and the live own-contract entry gate.
-                    current_selected = normalize_symbol(
-                        str(
-                            candidate_contract_generation.selected_ce
-                            if option_side == "CE"
-                            else candidate_contract_generation.selected_pe
+                    current_selected = ""
+                    if candidate_contract_generation is not None:
+                        current_selected = normalize_symbol(
+                            str(
+                                candidate_contract_generation.selected_ce
+                                if option_side == "CE"
+                                else candidate_contract_generation.selected_pe
+                            )
                         )
-                    ) if candidate_contract_generation is not None else ""
                     if (
                         not current_selected
                         or current_selected == selected_symbol
