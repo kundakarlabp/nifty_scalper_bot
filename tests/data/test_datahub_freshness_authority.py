@@ -147,7 +147,7 @@ def test_quote_identity_never_relabels_old_basket_token_as_current() -> None:
 
 
 def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
-    hub = _hub(mdm_tick=None, cached_tick=None)
+    hub = _hub(mdm_tick=None, cached_tick={})
     hub._token_by_symbol[_SYMBOL] = 12345
 
     quote = hub._stamp_quote_identity(
