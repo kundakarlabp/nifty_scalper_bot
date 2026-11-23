@@ -1261,9 +1261,11 @@ def _trace_adaptive_no_ratchet(
         source = (
             "protected_tick_bid"
             if protected_bid is not None
-            else "unmatched_book_bid"
-            if book_bid is not None
-            else "ltp_only_not_executable"
+            else (
+                "unmatched_book_bid"
+                if book_bid is not None
+                else "ltp_only_not_executable"
+            )
         )
         config["_adaptive_last_skip_trace_mono"] = now_mono
         depth = book.get("depth")
