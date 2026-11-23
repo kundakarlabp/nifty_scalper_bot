@@ -234,3 +234,41 @@ def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() 
         )
         == []
     )
+
+
+def test_rejection_retains_independent_futures_bar_volume() -> None:
+    owner = _owner({}, {})
+    sample = record_strategy_rejection_sample(
+        owner,
+        strategy="VWAPPro",
+        symbol=CE,
+        reason="distance_outside_band",
+        indicators={
+            "futures_volume_ratio": 0.0,
+            "futures_completed_bar_volume_ratio": 1.25,
+            "futures_completed_bar_volume_ready": True,
+            "futures_completed_bar_volume_symbol": "NFO:NIFTY26NOVFUT",
+            "futures_completed_bar_volume_provenance": {
+                "raw_depth": "must_not_enter_bounded_sample"
+            },
+        },
+        at=STAMP,
+    )
+    assert sample is not None
+    context = sample["context"]
+    assert context["futures_volume_ratio"] == 0.0
+    assert context["futures_completed_bar_volume_ratio"] == 1.25
+    assert context["futures_completed_bar_volume_ready"] is True
+    assert context["futures_completed_bar_volume_symbol"] == "NFO:NIFTY26NOVFUT"
+    assert "futures_completed_bar_volume_provenance" not in context
+    assert (
+        record_strategy_rejection_sample(
+            owner,
+            strategy="VWAPPro",
+            symbol=CE,
+            reason="distance_outside_band",
+            indicators={},
+            at=STAMP,
+        )
+        is None
+    )
