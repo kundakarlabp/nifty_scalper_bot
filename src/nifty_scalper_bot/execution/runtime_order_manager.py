@@ -904,6 +904,9 @@ class RuntimeOrderManager(_core.OrderManager):
         best = None
         best_age = None
         best_rank = 0
+        best_fresh = False
+        # A stale full book cannot defeat a current executable top-of-book.
+        fresh_limit_ms = float(_core.app_settings.ORDER_MAX_QUOTE_AGE_MS)
         normalized_symbol = _core.normalize_symbol(symbol)
         seen_providers: set[int] = set()
 
@@ -938,17 +941,25 @@ class RuntimeOrderManager(_core.OrderManager):
             if candidate_age is None:
                 continue
             candidate_rank = _quote_execution_rank(self, candidate)
+            candidate_fresh = candidate_age <= fresh_limit_ms
             if (
                 best is None
-                or candidate_rank > best_rank
+                or (candidate_fresh and not best_fresh)
                 or (
-                    candidate_rank == best_rank
-                    and (best_age is None or candidate_age < best_age)
+                    candidate_fresh == best_fresh
+                    and (
+                        candidate_rank > best_rank
+                        or (
+                            candidate_rank == best_rank
+                            and (best_age is None or candidate_age < best_age)
+                        )
+                    )
                 )
             ):
                 best = candidate
                 best_age = candidate_age
                 best_rank = candidate_rank
+                best_fresh = candidate_fresh
 
         return dict(best) if isinstance(best, Mapping) else None
 
