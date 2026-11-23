@@ -526,7 +526,12 @@ def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -
     return (
         getter("source_timestamp_valid", None) is not False
         and quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
-        and source not in {"received_at", "received_ts", "received_time", "received_at_fallback"}
+        and source not in {
+            "received_at",
+            "received_ts",
+            "received_time",
+            "received_at_fallback",
+        }
     )
 
 
