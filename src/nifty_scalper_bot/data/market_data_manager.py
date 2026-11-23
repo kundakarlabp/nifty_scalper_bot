@@ -82,6 +82,7 @@ from nifty_scalper_bot.data.time_contract import (
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
+    quote_timestamp_quality_allows_hard_readiness,
     resolve_quote_bid_ask_spread,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -9830,12 +9831,28 @@ class MarketDataManager:
         ):
             return False
 
-        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
+        current_quality = str(current.get("timestamp_quality") or "").lower()
+        incoming_quality = str(incoming.get("timestamp_quality") or "").lower()
+        unusable_quality = {"synthetic", "invalid", "unknown", "received_at"}
+        current_proven = (
+            current.get("source_timestamp_valid") is not False
+            and current_quality not in unusable_quality
+        )
+        incoming_degraded = (
+            not self._is_full_websocket_quote(incoming)
+            or incoming.get("source_timestamp_valid") is False
+            or incoming_quality in unusable_quality
+        )
+        if (
+            current_proven
+            and incoming_degraded
+            and self._is_full_websocket_quote(current)
+        ):
             current_received = self._tick_wallclock(current)
             if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
-                arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
-                event_fresh = max(now_wall - current_event, 0.0) <= threshold
+                arrival_fresh = 0 <= now_wall - current_received <= threshold
+                event_fresh = 0 <= now_wall - current_event <= threshold
                 if arrival_fresh and event_fresh:
                     return False
         return True
@@ -10327,7 +10344,12 @@ class MarketDataManager:
                     )
                     return
                 else:
-                    if token_int is not None:
+                    # A received-only or synthetic WS packet is transport
+                    # activity, not validated current-generation market proof.
+                    valid_market_time = quote_timestamp_quality_allows_hard_readiness(
+                        tick
+                    )
+                    if token_int is not None and valid_market_time:
                         self._confirmed_subscriptions.add(token_int)
                         self._last_valid_live_tick_mono[canonical_symbol] = now_mono
                         self._symbol_first_tick_generation[canonical_symbol] = (
@@ -12802,9 +12824,14 @@ class MarketDataManager:
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
         age = None
-        wallclock = self._tick_wallclock(tick)
-        if wallclock is not None:
-            age = max(0.0, time.time() - wallclock)
+        event_epoch = self._tick_event_wallclock(tick)
+        now_epoch = time.time()
+        if (
+            event_epoch is not None
+            and 0.0 <= now_epoch - event_epoch
+            and quote_timestamp_quality_allows_hard_readiness(tick)
+        ):
+            age = now_epoch - event_epoch
         with self._lock:
             source = str(
                 self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
@@ -12847,8 +12874,9 @@ class MarketDataManager:
             bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
         )
         ohlc_valid = bool(bars)
-        depth_available = isinstance(tick.get("depth"), Mapping) and bool(
-            tick.get("depth")
+        depth = tick.get("depth")
+        depth_available = bool(
+            isinstance(depth, Mapping) and depth.get("buy") and depth.get("sell")
         )
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
@@ -12872,6 +12900,9 @@ class MarketDataManager:
             (not bid_missing and not ask_missing)
             and source_ok
             and (self._quote_api_available or not rest_quote_source)
+            and tick.get("tradable_quote") is not False
+            and tick.get("hard_readiness_eligible") is not False
+            and quote_timestamp_quality_allows_hard_readiness(tick)
         )
         snapshot = MarketSnapshot(
             symbol=str(symbol),
@@ -13747,12 +13778,35 @@ class MarketDataManager:
                 }:
                     return None
                 ts = pd.Timestamp.now(tz="UTC")
-                timestamp_source = raw.get("timestamp_source")
-                source_timestamp_valid = raw.get("source_timestamp_valid")
+                timestamp_source = "synthetic"
+                source_timestamp_valid = False
             else:
                 ts = pd.Timestamp(normalized_ts.timestamp)
-                timestamp_source = normalized_ts.source
-                source_timestamp_valid = True
+                # A second normalization pass must not promote receipt-only
+                # event time into a broker timestamp.
+                timestamp_source = str(
+                    raw.get("timestamp_source") or normalized_ts.source
+                ).lower()
+                source_timestamp_valid = raw.get("source_timestamp_valid") is not False
+            timestamp_quality = str(raw.get("timestamp_quality") or "").lower()
+            if not source_timestamp_valid:
+                timestamp_quality = "synthetic"
+            elif timestamp_source in {
+                "received_at",
+                "received_ts",
+                "received_time",
+                "received_at_fallback",
+            }:
+                timestamp_quality = "received_at"
+            elif timestamp_quality not in {
+                "synthetic",
+                "invalid",
+                "unknown",
+                "received_at",
+            }:
+                timestamp_quality = (
+                    "exchange" if "exchange" in timestamp_source else "broker"
+                )
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
             bid = _coerce_float(
                 raw.get("bid")
@@ -13858,6 +13912,7 @@ class MarketDataManager:
                 ),
                 "timestamp": ts_py,
                 "timestamp_source": timestamp_source,
+                "timestamp_quality": timestamp_quality,
                 "source_timestamp_valid": source_timestamp_valid,
                 "source": (
                     "poll"

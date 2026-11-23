@@ -47,3 +47,31 @@ def test_valid_exchange_timestamp_kept() -> None:
         }
     )
     assert tick["timestamp"] == "2026-04-30T14:45:00+05:30"
+
+
+def test_receipt_only_websocket_tick_stays_untrusted_after_second_pass() -> None:
+    from datetime import datetime, timezone
+
+    mdm = MarketDataManager()
+    mdm._symbol_by_token[1] = "NSE:NIFTY"
+    raw = {
+        "instrument_token": 1,
+        "last_price": 25000.0,
+        "received_at": datetime.now(timezone.utc).timestamp(),
+    }
+    first = mdm._normalize_ws_tick(raw)
+    assert first is not None
+    assert first["timestamp_source"] == "received_at"
+
+    second = mdm.normalize_live_tick(first, source="ws")
+    assert second is not None
+    assert second["timestamp_source"] == "received_at"
+    assert second["timestamp_quality"] == "received_at"
+
+
+def test_missing_market_event_time_remains_synthetic_in_direct_normalization() -> None:
+    mdm = MarketDataManager()
+    tick = mdm.normalize_live_tick({"symbol": "NSE:NIFTY", "ltp": 25000.0}, source="ws")
+    assert tick is not None
+    assert tick["source_timestamp_valid"] is False
+    assert tick["timestamp_quality"] == "synthetic"

@@ -211,7 +211,8 @@ async def test_live_readiness_treats_depth_only_quote_as_tradable(
 
     class DepthSnap(Snap):
         def __init__(self, ltp: float, age: float, bid: float, ask: float):
-            super().__init__(ltp, age, False, None, None, True)
+            # The canonical MDM snapshot marks verified two-sided depth tradable.
+            super().__init__(ltp, age, True, None, None, True)
             self.depth = {
                 "buy": [{"price": bid, "quantity": 100}],
                 "sell": [{"price": ask, "quantity": 100}],

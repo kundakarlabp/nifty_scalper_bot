@@ -141,3 +141,150 @@ def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
     assert mdm.get_latest_tick(SYMBOL) == quote_before
     assert mdm._last_mid[SYMBOL] == mid_before
     assert mdm._last_quote_ts_ms[SYMBOL] == stamp_before
+
+
+def test_fresh_full_book_is_not_downgraded_by_newer_ltp_only_ws_tick() -> None:
+    mdm = _manager()
+    now = time.time()
+    full = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "source": "ws",
+        "timestamp": now,
+        "received_at": now,
+        "timestamp_quality": "exchange",
+        "source_timestamp_valid": True,
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [{"price": 100.1, "quantity": 65}],
+        },
+    }
+    assert mdm._store_tick(SYMBOL, full) is True
+    saved = mdm.get_latest_tick(SYMBOL)
+    assert saved is not None
+
+    degraded = {
+        "symbol": SYMBOL,
+        "ltp": 102.0,
+        "source": "ws",
+        "timestamp": now + 0.01,
+        "received_at": now + 0.01,
+        "timestamp_quality": "exchange",
+        "source_timestamp_valid": True,
+    }
+    assert mdm._store_tick(SYMBOL, degraded) is False
+    assert mdm.get_latest_tick(SYMBOL) == saved
+
+
+def test_verified_full_book_is_not_replaced_by_receipt_only_full_depth() -> None:
+    mdm = _manager()
+    now = time.time()
+    full = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "source": "ws",
+        "timestamp": now,
+        "received_at": now,
+        "timestamp_quality": "exchange",
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [{"price": 100.1, "quantity": 65}],
+        },
+    }
+    assert mdm._store_tick(SYMBOL, full)
+    attempted = {
+        **full,
+        "ltp": 101.0,
+        "timestamp": now + 0.05,
+        "received_at": now + 0.05,
+        "timestamp_quality": "received_at",
+    }
+
+    assert mdm._store_tick(SYMBOL, attempted) is False
+    assert mdm.get_latest_tick(SYMBOL)["ltp"] == 100.0
+
+
+def test_strategy_snapshot_uses_market_event_age_not_new_receipt_age() -> None:
+    mdm = _manager()
+    now = time.time()
+    mdm._tick_cache[SYMBOL] = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "timestamp": now - 90,
+        "received_at": now,
+        "source": "ws",
+        "timestamp_quality": "exchange",
+        "tradable_quote": True,
+    }
+    mdm._latest_ticks[SYMBOL] = dict(mdm._tick_cache[SYMBOL])
+
+    snap = mdm.get_symbol_snapshot(SYMBOL)
+
+    assert snap.tick_age_s is not None
+    assert snap.tick_age_s >= 89.0
+
+
+def test_strategy_snapshot_rejects_untrusted_book_and_one_sided_depth() -> None:
+    mdm = _manager()
+    now = time.time()
+    mdm._tick_cache[SYMBOL] = {
+        "symbol": SYMBOL,
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "timestamp": now,
+        "received_at": now,
+        "timestamp_quality": "received_at",
+        "timestamp_source": "received_at",
+        "source": "ws",
+        "tradable_quote": False,
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [],
+        },
+    }
+    mdm._latest_ticks[SYMBOL] = dict(mdm._tick_cache[SYMBOL])
+
+    snap = mdm.get_symbol_snapshot(SYMBOL)
+
+    assert snap.depth_available is False
+    assert snap.tradable_quote is False
+    assert snap.tick_age_s is None
+
+
+def test_receipt_only_ws_event_cannot_confirm_current_generation() -> None:
+    mdm = MarketDataManager(kite=None)
+    token = 127654
+    assert mdm.request_token_subscription(token, symbol=SYMBOL)
+    now = time.time()
+    tick = {
+        "symbol": SYMBOL,
+        "instrument_token": token,
+        "ltp": 100.0,
+        "timestamp": now,
+        "received_at": now,
+        "source": "ws",
+        "timestamp_source": "received_at",
+        "timestamp_quality": "received_at",
+        "source_timestamp_valid": True,
+    }
+
+    mdm._ingest_normalized_tick(tick)
+
+    assert mdm.time_since_last_live_ws_tick(SYMBOL) is None
+    assert mdm._symbol_first_tick_generation.get(SYMBOL) is None
+
+    valid = {
+        **tick,
+        "timestamp_source": "exchange_timestamp",
+        "timestamp_quality": "exchange",
+    }
+    mdm._ingest_normalized_tick(valid)
+
+    assert mdm.time_since_last_live_ws_tick(SYMBOL) is not None

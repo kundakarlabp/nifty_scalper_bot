@@ -145,9 +145,8 @@ def evaluate_execution_quote(
         payload
     )
     has_bid_ask = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
-    spread_pct = _float(payload, "spread_pct")
-    if spread_pct is None:
-        spread_pct = derived_spread_pct
+    # The current executable BBO, not a cached summary field, owns spread.
+    spread_pct = derived_spread_pct if has_bid_ask else _float(payload, "spread_pct")
     tick_age_ms = resolve_tick_age_ms(payload)
     quote_version = resolve_quote_version(payload)
     depth = _value(payload, "depth")
@@ -167,7 +166,11 @@ def evaluate_execution_quote(
         )
     )
     explicit_tradable = _value(payload, "tradable_quote")
-    tradable_quote = bool(has_bid_ask and explicit_tradable is not False)
+    tradable_quote = bool(
+        has_bid_ask
+        and explicit_tradable is not False
+        and _value(payload, "hard_readiness_eligible") is not False
+    )
     real_ticks, derived = resolve_real_tick_count(
         payload,
         tick_age_ms=tick_age_ms,

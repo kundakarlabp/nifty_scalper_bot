@@ -18,7 +18,13 @@ from typing import Mapping
 from nifty_scalper_bot.config.env_utils import parse_float_env
 
 LOGGER = logging.getLogger(__name__)
-_UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
+_UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
+}
 _TRUTHY = {"1", "true", "yes", "y", "on"}
 _PNL_DIAGNOSTIC_REASONS = {
     "pnl_baseline_uninitialized",
@@ -520,7 +526,18 @@ def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -
         return True
     getter = _quote_getter(quote)
     quality = str(getter("timestamp_quality", "") or "").strip().lower()
-    return quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
+    source = str(getter("timestamp_source", "") or "").strip().lower()
+    return (
+        getter("source_timestamp_valid", None) is not False
+        and quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
+        and source
+        not in {
+            "received_at",
+            "received_ts",
+            "received_time",
+            "received_at_fallback",
+        }
+    )
 
 
 def _quote_float(payload: dict | object, *keys: str) -> float | None:
@@ -715,7 +732,11 @@ def evaluate_quote_readiness(
     ltp = _quote_float(quote, "ltp", "last_price", "last_traded_price")
     ltp_ready = bool(ltp is not None and ltp > 0)
     depth = getter("depth", None)
-    depth_available = bool(getter("depth_available", False) or depth)
+    depth_available = (
+        bool(depth.get("buy") and depth.get("sell"))
+        if isinstance(depth, Mapping)
+        else bool(getter("depth_available", False))
+    )
     bid, ask, spread_pct, source = resolve_quote_bid_ask_spread(quote)
     bid_ask_available = bool(
         bid is not None and ask is not None and bid > 0 and ask > bid
@@ -738,6 +759,11 @@ def evaluate_quote_readiness(
             reason = "bid_ask_crossed"
         else:
             reason = "bid_ask_missing"
+    elif (
+        getter("tradable_quote", None) is False
+        or getter("hard_readiness_eligible", None) is False
+    ):
+        reason = "quote_not_tradable"
     else:
         reason = "ready"
     if reason == "ready" and require_fresh:

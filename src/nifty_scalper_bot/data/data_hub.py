@@ -65,8 +65,14 @@ LOGGER = logging.getLogger(__name__)
 Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
-_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
-_WS_SOURCES = {"ws", "websocket", "stream"}
+_UNUSABLE_TIMESTAMP_QUALITIES = {
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
+}
+_WS_SOURCES = {"ws", "ws_full", "full", "websocket", "stream"}
 _QUOTE_IDENTITY_KEYS = (
     "symbol",
     "tradingsymbol",
@@ -1078,19 +1084,34 @@ class DataHub:
                 tick["timestamp_ms"] = timestamp_ms
                 timestamp_source = str(tick.get("timestamp_source") or "").lower()
                 timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
-                if not timestamp_quality:
+                if timestamp_source in {
+                    "received_at",
+                    "received_ts",
+                    "received_time",
+                    "received_at_fallback",
+                }:
+                    timestamp_quality = "received_at"
+                elif not timestamp_quality:
                     timestamp_quality = (
                         "exchange" if "exchange" in timestamp_source else "broker"
                     )
-                    tick["timestamp_quality"] = timestamp_quality
-                tick.setdefault("hard_readiness_eligible", True)
+                tick["timestamp_quality"] = timestamp_quality
+                if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+                    tick["hard_readiness_eligible"] = False
+                    tick["tradable_quote"] = False
+                else:
+                    tick.setdefault("hard_readiness_eligible", True)
                 tick.setdefault("quote_source", tick.get("source"))
                 tick.setdefault("exchange_symbol", symbol)
                 tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
                 return tick
 
         tick = dict(payload)
-        timestamp_quality = _timestamp_quality(tick)
+        timestamp_quality = (
+            "invalid"
+            if tick.get("source_timestamp_valid") is False
+            else _timestamp_quality(tick)
+        )
         symbol = str(tick.get("symbol") or "").strip()
         token_raw = tick.get("instrument_token") or tick.get("token")
         price_raw = tick.get("ltp") or tick.get("last_price") or tick.get("price")
@@ -1119,14 +1140,18 @@ class DataHub:
             tick.setdefault("spread_pct", spread_pct)
         if bid_ask_source != "missing":
             tick.setdefault("bid_ask_source", bid_ask_source)
-        if tick.get("depth"):
-            tick["depth_available"] = True
+        depth = tick.get("depth")
+        if isinstance(depth, Mapping):
+            tick["depth_available"] = bool(depth.get("buy") and depth.get("sell"))
         else:
             tick.setdefault("depth_available", False)
-        if bid is not None and ask is not None and bid > 0 and ask > bid:
-            tick["tradable_quote"] = True
-        else:
-            tick.setdefault("tradable_quote", False)
+        tick["tradable_quote"] = bool(
+            bid is not None
+            and ask is not None
+            and bid > 0
+            and ask > bid
+            and tick.get("tradable_quote") is not False
+        )
         if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
             tick["synthetic_timestamp"] = True
             tick["hard_readiness_eligible"] = False
@@ -1399,7 +1424,7 @@ class DataHub:
                 # Replay/cache authority can stamp a newer synthetic event time
                 # than subsequent live WS ticks. Still deliver those WS ticks to
                 # Runner so entry evaluation does not stop after startup replay.
-                if source not in {"ws", "websocket", "stream"}:
+                if source not in _WS_SOURCES:
                     return
                 deliver_older_ws = True
             if (not deliver_older_ws) and ts_ms == last_ts and now_ms <= last_arr:
@@ -1427,7 +1452,7 @@ class DataHub:
                 self._last_ts[symbol] = ts_ms
                 self._last_arrival[symbol] = now_ms
                 self._last_arrival_mono[symbol] = mono_now
-            if source in {"ws", "websocket", "stream"}:
+            if source in _WS_SOURCES:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
                 if not deliver_older_ws:
