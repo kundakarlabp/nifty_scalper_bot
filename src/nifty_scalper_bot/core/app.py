@@ -6211,7 +6211,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # KiteTicker postbacks share the existing authenticated market-data socket.
     # The canonical OrderManager journals every update and processes only known
     # orders; unknown/manual orders remain with broker-position reconciliation.
-    if websocket_manager is not None:
+    if isinstance(websocket_manager, WebSocketManager):
         websocket_manager.set_order_update_callback(
             order_manager.on_broker_stream_update
         )
