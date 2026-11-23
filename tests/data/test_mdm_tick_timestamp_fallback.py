@@ -71,9 +71,7 @@ def test_receipt_only_websocket_tick_stays_untrusted_after_second_pass() -> None
 
 def test_missing_market_event_time_remains_synthetic_in_direct_normalization() -> None:
     mdm = MarketDataManager()
-    tick = mdm.normalize_live_tick(
-        {"symbol": "NSE:NIFTY", "ltp": 25000.0}, source="ws"
-    )
+    tick = mdm.normalize_live_tick({"symbol": "NSE:NIFTY", "ltp": 25000.0}, source="ws")
     assert tick is not None
     assert tick["source_timestamp_valid"] is False
     assert tick["timestamp_quality"] == "synthetic"
