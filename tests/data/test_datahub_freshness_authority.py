@@ -144,3 +144,16 @@ def test_quote_identity_never_relabels_old_basket_token_as_current() -> None:
     assert quote["quote_identity_token_mismatch"] is True
     assert quote["tradable_quote"] is False
     assert quote["hard_readiness_eligible"] is False
+
+
+def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
+    hub = _hub(mdm_tick=None, cached_tick=None)
+    hub._token_by_symbol[_SYMBOL] = 12345
+
+    quote = hub._stamp_quote_identity(
+        _SYMBOL, {"instrument_token": 0, "ltp": 100.0}
+    )
+
+    assert quote["instrument_token"] == 0
+    assert quote["quote_identity_token_mismatch"] is True
+    assert quote["tradable_quote"] is False
