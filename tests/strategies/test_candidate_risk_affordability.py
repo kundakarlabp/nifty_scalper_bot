@@ -564,3 +564,37 @@ def test_runner_reuses_current_net_day_loss_across_ranked_candidates() -> None:
         item["remaining_daily_risk_budget"] == pytest.approx(317.117811)
         for item in decisions.values()
     )
+
+
+def test_execution_floor_and_replacement_premium_guard_have_a_dead_zone(
+    monkeypatch,
+) -> None:
+    """Do not bypass a contract-specific setup when the premium floors conflict."""
+    monkeypatch.setenv("ALLOW_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("STRICT_CANDIDATE_REPLACEMENT", "true")
+    monkeypatch.setenv("MAX_REPLACEMENT_STRIKE_DISTANCE", "50")
+    monkeypatch.setenv("MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT", "35")
+    runner = object.__new__(StrategyRunner)
+    original = "NFO:NIFTY26NOV25400PE"
+    adjacent = "NFO:NIFTY26NOV25450PE"
+    runner._active_option_symbols = {original, adjacent}
+
+    # The ₹40 execution floor is incompatible with a ≤35% jump from ₹28.
+    blocked, policy = runner._candidate_replacement_contract_guard(
+        original_symbol=original,
+        selected_symbol=adjacent,
+        original_trade_price=28.0,
+        candidate_trade_price=40.0,
+    )
+    assert blocked == "premium_jump"
+    assert policy["max_replacement_premium_deviation_pct"] == 35.0
+
+    # The existing policy still allows a same-expiry/side/adjacent-strike
+    # candidate within the configured deviation and active option basket.
+    allowed, _ = runner._candidate_replacement_contract_guard(
+        original_symbol=original,
+        selected_symbol=adjacent,
+        original_trade_price=30.0,
+        candidate_trade_price=40.0,
+    )
+    assert allowed is None

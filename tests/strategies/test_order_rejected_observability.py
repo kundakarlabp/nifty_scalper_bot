@@ -380,3 +380,54 @@ def test_reject_signal_execution_forwards_capacity_details_to_existing_journal()
         captured[0]["candidate_capacity_decisions"]
         == details["candidate_capacity_decisions"]
     )
+
+
+def test_replacement_premium_block_preserves_exact_cause_in_trade_journal() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                snapshot
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTY26NOV25400PE",
+        direction="PE",
+        final_reason="no_execution_ready_candidate",
+        candidate_count=4,
+        candidate_rejects={"premium_out_of_range": 3},
+        candidate_capacity_decisions={
+            "NFO:NIFTY26NOV25450PE": {
+                "reason": "replacement_not_permitted",
+                "replacement_blocker": "premium_jump",
+                "original_symbol": "NFO:NIFTY26NOV25400PE",
+                "original_trade_price": 28.0,
+                "candidate_trade_price": 53.0,
+                "execution_min_option_premium": 40.0,
+                "max_replacement_premium_deviation_pct": 35.0,
+                "max_replacement_strike_distance": 50.0,
+                "trace_id": "private-trace-do-not-copy",
+                "unrelated_state": object(),
+            }
+        },
+        trace_id="blocked-candidate",
+    )
+
+    assert captured[0]["order_submitted"] is False
+    assert captured[0]["candidate_rejects"]["premium_out_of_range"] == 3
+    decision = captured[0]["candidate_capacity_decisions"]["NFO:NIFTY26NOV25450PE"]
+    assert decision["reason"] == "replacement_not_permitted"
+    assert decision["replacement_blocker"] == "premium_jump"
+    assert decision["original_symbol"] == "NFO:NIFTY26NOV25400PE"
+    assert decision["original_trade_price"] == 28.0
+    assert decision["candidate_trade_price"] == 53.0
+    assert decision["execution_min_option_premium"] == 40.0
+    assert decision["max_replacement_premium_deviation_pct"] == 35.0
+    assert "trace_id" not in decision
+    assert "unrelated_state" not in decision
