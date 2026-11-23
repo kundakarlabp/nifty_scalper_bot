@@ -9830,12 +9830,23 @@ class MarketDataManager:
         ):
             return False
 
-        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
+        current_quality = str(current.get("timestamp_quality") or "").lower()
+        incoming_quality = str(incoming.get("timestamp_quality") or "").lower()
+        current_proven = (
+            current.get("source_timestamp_valid") is not False
+            and current_quality not in {"synthetic", "invalid", "unknown", "received_at"}
+        )
+        incoming_degraded = (
+            not self._is_full_websocket_quote(incoming)
+            or incoming.get("source_timestamp_valid") is False
+            or incoming_quality in {"synthetic", "invalid", "unknown", "received_at"}
+        )
+        if current_proven and incoming_degraded and self._is_full_websocket_quote(current):
             current_received = self._tick_wallclock(current)
             if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
-                arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
-                event_fresh = max(now_wall - current_event, 0.0) <= threshold
+                arrival_fresh = 0 <= now_wall - current_received <= threshold
+                event_fresh = 0 <= now_wall - current_event <= threshold
                 if arrival_fresh and event_fresh:
                     return False
         return True
@@ -13747,12 +13758,35 @@ class MarketDataManager:
                 }:
                     return None
                 ts = pd.Timestamp.now(tz="UTC")
-                timestamp_source = raw.get("timestamp_source")
-                source_timestamp_valid = raw.get("source_timestamp_valid")
+                timestamp_source = "synthetic"
+                source_timestamp_valid = False
             else:
                 ts = pd.Timestamp(normalized_ts.timestamp)
-                timestamp_source = normalized_ts.source
-                source_timestamp_valid = True
+                # A second normalization pass must not promote receipt-only
+                # event time into a broker timestamp.
+                timestamp_source = str(
+                    raw.get("timestamp_source") or normalized_ts.source
+                ).lower()
+                source_timestamp_valid = raw.get("source_timestamp_valid") is not False
+            timestamp_quality = str(raw.get("timestamp_quality") or "").lower()
+            if not source_timestamp_valid:
+                timestamp_quality = "synthetic"
+            elif timestamp_source in {
+                "received_at",
+                "received_ts",
+                "received_time",
+                "received_at_fallback",
+            }:
+                timestamp_quality = "received_at"
+            elif timestamp_quality not in {
+                "synthetic",
+                "invalid",
+                "unknown",
+                "received_at",
+            }:
+                timestamp_quality = (
+                    "exchange" if "exchange" in timestamp_source else "broker"
+                )
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
             bid = _coerce_float(
                 raw.get("bid")
@@ -13858,6 +13892,7 @@ class MarketDataManager:
                 ),
                 "timestamp": ts_py,
                 "timestamp_source": timestamp_source,
+                "timestamp_quality": timestamp_quality,
                 "source_timestamp_valid": source_timestamp_valid,
                 "source": (
                     "poll"
