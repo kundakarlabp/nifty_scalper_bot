@@ -739,6 +739,10 @@ def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) ->
         "candidate_below_floor",
         "candidate_quote_stale",
         "selected_quote_stale",
+        "candidate_timestamp_invalid",
+        "selected_timestamp_invalid",
+        "candidate_spread_wide",
+        "candidate_not_tradable",
         "candidate_not_tokenized",
         "option_bar_old",
         "selected_only",
@@ -757,6 +761,15 @@ def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> No
         quotes[candidate]["tick_age_ms"] = 100_000
     elif change == "selected_quote_stale":
         quotes[selected]["tick_age_ms"] = 100_000
+    elif change == "candidate_timestamp_invalid":
+        quotes[candidate]["timestamp_quality"] = "invalid"
+    elif change == "selected_timestamp_invalid":
+        quotes[selected]["timestamp_quality"] = "synthetic"
+    elif change == "candidate_spread_wide":
+        quotes[candidate]["bid"] = 40.0
+        quotes[candidate]["ask"] = 60.0
+    elif change == "candidate_not_tradable":
+        quotes[candidate]["tradable_quote"] = False
     elif change == "candidate_not_tokenized":
         bot._active_basket_token_by_symbol.pop(candidate)
     elif change == "option_bar_old":
@@ -771,6 +784,24 @@ def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> No
     assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.CONTEXT_ONLY
     assert (
         bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+
+
+def test_itm_fallback_accepts_full_depth_quote(monkeypatch) -> None:
+    bot, _manager, _risk, _orders, _selected, candidate, quotes = (
+        _independent_fallback_runner(monkeypatch)
+    )
+    # Zerodha FULL can expose top-of-book prices through depth, not flat keys.
+    quotes[candidate].pop("bid")
+    quotes[candidate].pop("ask")
+    quotes[candidate]["depth"] = {
+        "buy": [{"price": 54.85}],
+        "sell": [{"price": 55.05}],
+    }
+
+    assert bot._independent_premium_fallback_eligible(candidate)
+    assert (
+        bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
     )
 
 
