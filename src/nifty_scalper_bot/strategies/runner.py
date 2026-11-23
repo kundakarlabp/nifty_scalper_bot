@@ -13827,22 +13827,30 @@ class StrategyRunner:
         floor = policy.execution_min_premium
         ceiling = policy.max_premium
         max_age_ms = float(app_settings.ORDER_MAX_QUOTE_AGE_MS)
+        max_spread_pct = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
         for quote_symbol in (selected, candidate):
             quote = self._get_cached_quote_for_live_entry(quote_symbol)
             if not isinstance(quote, Mapping):
                 return False
-            age_ms = resolve_tick_age_ms(quote)
-            if age_ms is None or not 0 <= age_ms <= max_age_ms:
+            # Reuse the execution quote authority: Zerodha FULL depth may have
+            # top-of-book prices without top-level bid/ask fields. Invalid time,
+            # crossed quotes, non-tradability and excessive spread fail closed.
+            quote_proof = evaluate_execution_quote(
+                quote_symbol,
+                quote,
+                live_mode=True,
+                max_tick_age_ms=max_age_ms,
+                max_spread_pct=max_spread_pct,
+                require_depth=False,
+                min_real_ticks_last_60s=0,
+            )
+            if not quote_proof.allowed:
                 return False
             try:
                 ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
-                bid = float(quote.get("bid") or 0.0)
-                ask = float(quote.get("ask") or 0.0)
             except (TypeError, ValueError):
                 return False
-            if not all(math.isfinite(x) for x in (ltp, bid, ask)):
-                return False
-            if ltp <= 0 or bid <= 0 or ask <= bid:
+            if not math.isfinite(ltp) or ltp <= 0:
                 return False
             if quote_symbol == selected and ltp >= floor:
                 return False
