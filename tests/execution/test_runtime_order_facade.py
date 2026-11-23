@@ -1383,6 +1383,9 @@ def test_kite_stream_observes_unknown_orders_without_adopting_them() -> None:
         "transaction_type": "SELL",
         "product": "MIS",
         "order_type": "SL",
+        "exchange_order_id": "exchange-77",
+        "tag": "bot-stop",
+        "status_message": "exchange pending",
         "quantity": 65,
         "filled_quantity": 0,
         "pending_quantity": 65,
@@ -1402,6 +1405,9 @@ def test_kite_stream_observes_unknown_orders_without_adopting_them() -> None:
     assert data["meta"]["broker_status"] == "TRIGGER PENDING"
     assert data["meta"]["pending_quantity"] == 65
     assert data["meta"]["product"] == "MIS"
+    assert data["meta"]["exchange_order_id"] == "exchange-77"
+    assert data["meta"]["status_message"] == "exchange pending"
+    assert data["meta"]["tag"] == "bot-stop"
     assert data["meta"]["exchange_update_timestamp"] == "2026-11-20 13:40:30"
 
     manager._orders["external-1"] = object()
