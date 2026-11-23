@@ -197,9 +197,7 @@ class WebSocketManager:
             self._logger.warning("WS|Replacing existing tick callback")
         self._on_tick_callback = callback
 
-    def set_order_update_callback(
-        self, callback: OrderUpdateCallback | None
-    ) -> None:
+    def set_order_update_callback(self, callback: OrderUpdateCallback | None) -> None:
         """Route broker postbacks to the existing order owner, not the tick bus."""
         self._on_order_update_callback = callback
 
