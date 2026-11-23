@@ -20,8 +20,9 @@ Runtime role:
 - Delegates position sizing and ATR-based trailing to execution owners.
 - ENGINE_SUMMARY reports actual interval option-evaluation regime vetoes
   from StrategyManager, not an unwritten local counter.
-- Persists bounded, read-only candidate cash/risk rejection evidence in the
-  existing trade-decision journal without adding a second risk authority.
+- Persists bounded, read-only candidate cash/risk and replacement-contract
+  rejection evidence in the existing trade-decision journal without adding a
+  second risk authority.
 - Checks independent original/replacement expiry, strike, side, premium,
   and basket eligibility before affordability and again before final order routing.
 - Rejects changed-contract premium plans whose materialized stop widens beyond
@@ -5016,6 +5017,15 @@ class StrategyRunner:
                         "original_symbol": preferred,
                         "reason": "replacement_not_permitted",
                         "replacement_blocker": replacement_blocker,
+                        "original_trade_price": float(preferred_entry_price or 0.0),
+                        "candidate_trade_price": float(
+                            getattr(ranked, "entry_price", 0.0) or 0.0
+                        ),
+                        "execution_min_option_premium": getattr(
+                            getattr(self, "_trade_candidate_selector", None),
+                            "min_option_premium",
+                            None,
+                        ),
                         "trace_id": trace_id,
                         **replacement_policy,
                     }
@@ -5545,6 +5555,16 @@ class StrategyRunner:
                             "plan_risk_shortfall",
                             "effective_one_lot_risk_budget",
                             "remaining_daily_risk_budget",
+                            # Preserve the actual replacement rejection in the
+                            # existing journal, rather than only the generic
+                            # "replacement_not_permitted" summary.
+                            "replacement_blocker",
+                            "original_symbol",
+                            "original_trade_price",
+                            "candidate_trade_price",
+                            "execution_min_option_premium",
+                            "max_replacement_premium_deviation_pct",
+                            "max_replacement_strike_distance",
                         )
                         if key in decision
                     }
