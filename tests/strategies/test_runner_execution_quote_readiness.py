@@ -23,7 +23,4 @@ def test_runner_uses_canonical_order_quote_age_setting_at_every_stage() -> None:
     assert source.count("app_settings.ORDER_MAX_QUOTE_AGE_MS") >= 4
     fallback_start = source.index("def _independent_premium_fallback_eligible")
     fallback_end = source.index("def _roles_for_symbol", fallback_start)
-    assert (
-        "app_settings.ORDER_MAX_QUOTE_AGE_MS"
-        in source[fallback_start:fallback_end]
-    )
+    assert "app_settings.ORDER_MAX_QUOTE_AGE_MS" in source[fallback_start:fallback_end]
