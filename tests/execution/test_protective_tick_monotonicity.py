@@ -151,3 +151,40 @@ def test_same_second_option_update_remains_eligible_after_arming_grace() -> None
 
     assert bracket.last_ltp == 90.0
     manager._fire_exits_batch.assert_called_once()
+
+
+def test_canonical_iso_exchange_time_beats_recent_receipt() -> None:
+    from datetime import datetime, timezone
+
+    from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
+
+    event_epoch = time.time() - 20.0
+    event_iso = datetime.fromtimestamp(event_epoch, tz=timezone.utc).isoformat()
+    parsed = tick_exchange_epoch(
+        {"exchange_timestamp": event_iso, "received_at": time.time()}
+    )
+
+    assert parsed is not None
+    assert abs(parsed - event_epoch) < 0.001
+
+
+def test_iso_timestamped_old_tick_cannot_reverse_bracket_protection() -> None:
+    from datetime import datetime, timezone
+
+    manager, bracket = _manager()
+    now = time.time()
+    recent = datetime.fromtimestamp(now - 1.0, tz=timezone.utc).isoformat()
+    older = datetime.fromtimestamp(now - 20.0, tz=timezone.utc).isoformat()
+
+    manager.on_tick_event(
+        {"symbol": SYMBOL, "ltp": 110.0, "bid": 109.8, "ask": 110.0,
+         "exchange_timestamp": recent, "received_at": now}
+    )
+    manager.on_tick_event(
+        {"symbol": SYMBOL, "ltp": 90.0, "bid": 89.8, "ask": 90.0,
+         "exchange_timestamp": older, "received_at": now}
+    )
+
+    assert bracket.last_ltp == 110.0
+    assert manager._executable_exit_price(bracket, 110.0) == (109.8, "bid")
+    manager._fire_exits_batch.assert_not_called()
