@@ -44,6 +44,9 @@ class FakeMarketData:
                 "symbol": FUTURE,
                 "ltp": 24_755.0 if strong else 24_620.0,
                 "received_at": time(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp_source": "exchange_timestamp",
+                "source_timestamp_valid": True,
             },
             "NFO:NIFTY2681124500PE": {
                 "symbol": "NFO:NIFTY2681124500PE",
@@ -1231,6 +1234,38 @@ def test_completed_futures_volume_cannot_be_replaced_by_provisional_spike():
     assert ratio == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    "bad_clock", ["missing", "unverified", "old_exchange", "future_exchange", "old_receive"]
+)
+def test_futures_activity_requires_fresh_verified_exchange_and_receive_time(
+    bad_clock,
+):
+    manager = FakeManager(strong=True)
+    quote = manager._market_data.quotes[FUTURE]
+    if bad_clock == "missing":
+        quote.pop("timestamp", None)
+        quote.pop("timestamp_source", None)
+        quote.pop("source_timestamp_valid", None)
+    elif bad_clock == "unverified":
+        quote["source_timestamp_valid"] = False
+    elif bad_clock in {"old_exchange", "future_exchange"}:
+        delta = -30 if bad_clock == "old_exchange" else 30
+        quote["timestamp"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=delta)
+        ).isoformat()
+    else:
+        quote["received_at"] = time() - 30
+
+    ratio, bar_age = profit_extension._verified_futures_volume_ratio(
+        manager, FUTURE, quote
+    )
+    assert ratio is None
+    assert bar_age is None
+    decision = assess_continuation(manager, _bracket(), 120.0)
+    assert decision.snapshot["futures_volume_verified"] is False
+    assert "futures_volume_confirmation" not in decision.positive
+
+
 def test_old_completed_futures_bar_does_not_authorize_strong_continuation():
     manager = FakeManager(strong=True)
     history = manager._indicator_engine.get_history(FUTURE, count=22, field="bars")
@@ -1377,6 +1412,51 @@ def test_adaptive_skip_trace_distinguishes_exchange_from_receive_age(
     assert bracket.sl_trigger_price == 94.0
 
 
+@pytest.mark.parametrize("evidence", ["unmatched_bid", "ltp_only"])
+def test_adaptive_skip_records_missing_protected_tick_bid_without_trading(
+    monkeypatch, evidence,
+):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=False)
+    bracket.exchange_stop_order_id = "stop-1"
+    bracket.exchange_stop_trigger_price = 94.0
+    bracket.exchange_stop_quantity = 65
+    quote = _adaptive_market(manager, bid=115.0)
+    manager._exit_quotes = {}
+    if evidence == "ltp_only":
+        quote.pop("bid")
+
+    messages = []
+
+    def capture_warning(fmt, *args, **_kwargs):
+        if fmt.startswith("ADAPTIVE_PROFIT_LOCK_SKIP"):
+            messages.append(fmt % args)
+
+    monkeypatch.setattr(profit_extension.LOGGER, "warning", capture_warning)
+
+    assert not profit_extension.tighten_adaptive_profit_lock(
+        manager, bracket, 115.0
+    )
+    assert not profit_extension.tighten_adaptive_profit_lock(
+        manager, bracket, 115.0
+    )
+    assert len(messages) == 1
+    assert "protected_tick_bid_missing" in messages[0]
+    assert bracket.sl_trigger_price == 94.0
+    assert bracket.trailing_config["_adaptive_last_skip_evidence_source"] == (
+        "unmatched_book_bid"
+        if evidence == "unmatched_bid"
+        else "ltp_only_not_executable"
+    )
+    if evidence == "ltp_only":
+        assert bracket.trailing_config["_adaptive_last_skip_bid"] is None
+        assert "observed_bid=None" in messages[0]
+    else:
+        assert bracket.trailing_config["_adaptive_last_skip_bid"] == 115.0
+
+
 def _ready_verified_tier_fallback(*, bid=107.0, depth_qty=65):
     """Live broker-free bracket with genuine current full-size book evidence."""
     manager = FakeManager(strong=True)
@@ -1408,6 +1488,7 @@ def _ready_verified_tier_fallback(*, bid=107.0, depth_qty=65):
 
 
 def test_verified_tier_fallback_ratchets_only_on_full_lot_bid(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
     assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107)
@@ -1433,6 +1514,7 @@ def test_verified_tier_fallback_ratchets_only_on_full_lot_bid(monkeypatch):
     ],
 )
 def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, failure):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, quote, syncs = _ready_verified_tier_fallback()
     if failure == "depth_small":
@@ -1468,6 +1550,7 @@ def test_live_verified_tiers_refuse_unverified_profit_protection(monkeypatch, fa
 def test_live_verified_tiers_reject_ltp_only_peak_even_if_tier_threshold_crossed(
     monkeypatch,
 ):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, quote, syncs = _ready_verified_tier_fallback(bid=105.0)
     bracket.last_ltp = 125.0
@@ -1492,7 +1575,7 @@ def test_raised_stop_candidate_validator_must_fail_closed():
     assert not syncs
 
 
-def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
+def test_live_adaptive_noop_keeps_exclusive_policy_without_fallback(monkeypatch):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, _quote, _syncs = _ready_verified_tier_fallback()
@@ -1515,8 +1598,9 @@ def test_live_owner_falls_back_once_after_adaptive_noop(monkeypatch):
     owner._trail_activation_r = lambda _: 0.6
     owner._sync_exchange_protective_stop = lambda _: calls.append("sync")
     bracket.last_ltp = 107.0
-    assert owner._apply_trailing_math(bracket)
-    assert calls == ["adaptive", "verified_tiers"]
+    assert not owner._apply_trailing_math(bracket)
+    assert calls == ["adaptive"]
+    assert bracket.trailing_config["_optional_trail_owner"] == "adaptive_only"
     assert bracket.trailing_config["_optional_trail_eval_count"] == 1
 
 
@@ -1527,6 +1611,7 @@ def test_20261120_archived_286_bid_samples_are_not_full_lot_exit_proof(
     import json
     from pathlib import Path
 
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     fixture = (
         Path(__file__).resolve().parents[1]
@@ -1669,7 +1754,7 @@ def test_adaptive_does_not_discard_changed_book_with_same_second_timestamp(
     assert bracket.trailing_config["_adaptive_profit_last_sample"] != first
 
 
-def test_unconfirmed_adaptive_virtual_stop_does_not_take_broker_owner(monkeypatch):
+def test_unconfirmed_adaptive_virtual_stop_never_invokes_competing_tiers(monkeypatch):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     monkeypatch.setenv("VERIFIED_TIER_FALLBACK_ENABLED", "true")
     manager, bracket, _quote, syncs = _ready_verified_tier_fallback()
@@ -1680,9 +1765,9 @@ def test_unconfirmed_adaptive_virtual_stop_does_not_take_broker_owner(monkeypatc
     }
     bracket.trailing_config["_adaptive_profit_has_ratcheted"] = True
 
-    assert profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
-    assert syncs
-    assert bracket.sl_trigger_price > 94.0
+    assert not profit_extension.tighten_verified_tier_fallback(manager, bracket, 107.0)
+    assert not syncs
+    assert bracket.sl_trigger_price == 94.0
 
 
 @pytest.mark.parametrize("broken", ["missing", "unverified", "stale", "future"])
