@@ -356,9 +356,7 @@ def test_independent_itm_fallback_reaches_broker_free_order_preflight(
         independent: 54321,
     }
     runner._eval_option_whitelist = {selected, independent}
-    runner._indicator_engine = SimpleNamespace(
-        get_history=lambda _symbol: [{}] * 20
-    )
+    runner._indicator_engine = SimpleNamespace(get_history=lambda _symbol: [{}] * 20)
     runner._option_required_bars = 5
     runner._last_bar_ts = {independent: datetime.now(timezone.utc)}
     quotes = {
