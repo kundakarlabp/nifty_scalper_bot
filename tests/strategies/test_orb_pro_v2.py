@@ -291,7 +291,7 @@ def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> 
     assert signal.metadata["underlying_current_penetration_atr"] < 0.2
 
 
-def test_retest_cannot_rescue_low_participation_breakout(monkeypatch) -> None:
+def test_retest_cannot_rescue_low_participation_breakout(monkeypatch, caplog) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
@@ -328,10 +328,16 @@ def test_retest_cannot_rescue_low_participation_breakout(monkeypatch) -> None:
     )
     second = _base_indicators("CE", rows[-1]["timestamp"])
 
-    assert strategy.generate_signal(CE, second, 50.0) is None
+    with caplog.at_level("INFO"):
+        assert strategy.generate_signal(CE, second, 50.0) is None
     assert strategy.last_no_vote_reason == "orb_structural_contract_not_passed"
     assert strategy.last_structural_failure_reasons == (
         "underlying_volume_confirmation",
+    )
+    assert any(
+        "ORB_STRUCTURAL_EVIDENCE_REJECTED" in record.getMessage()
+        and "underlying_volume_confirmation" in record.getMessage()
+        for record in caplog.records
     )
 
 
