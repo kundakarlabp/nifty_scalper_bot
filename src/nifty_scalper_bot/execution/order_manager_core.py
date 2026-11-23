@@ -5,6 +5,9 @@ Runtime role:
   broker (Kite), handling retries, idempotency, and lifecycle transitions.
 - Coordinates with the bracket manager (SL/TP), position manager, and risk
   guardrails around each order.
+- on_broker_stream_update journals Kite account order-state evidence and sends
+  tracked orders through the existing update owner; unknown orders are not
+  auto-adopted from the account-wide WebSocket.
 
 Position in the pipeline:
     strategies/runner.py -> THIS FILE (order_manager_core.py)
