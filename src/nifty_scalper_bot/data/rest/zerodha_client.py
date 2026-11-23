@@ -1248,9 +1248,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         ):
             raise BrokerError("Malformed Zerodha order-history response")
         return [
-            dict(row)
-            for row in rows
-            if str(row.get("order_id") or "") == str(order_id)
+            dict(row) for row in rows if str(row.get("order_id") or "") == str(order_id)
         ]
 
     def get_order_status(self, order_id: str) -> dict:
