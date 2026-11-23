@@ -8079,7 +8079,11 @@ class OrderManager:
             "event_name": "broker.order_update.observed",
             "source": "kite_websocket",
             "broker_status": status,
-            **{key: order_update[key] for key in evidence_fields if key in order_update},
+            **{
+                key: order_update[key]
+                for key in evidence_fields
+                if key in order_update
+            },
         }
         symbol = str(order_update.get("tradingsymbol") or "")
         exchange = str(order_update.get("exchange") or "")
