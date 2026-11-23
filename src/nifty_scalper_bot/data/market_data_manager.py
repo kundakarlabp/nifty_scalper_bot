@@ -10346,9 +10346,10 @@ class MarketDataManager:
                 else:
                     # A received-only or synthetic WS packet is transport
                     # activity, not validated current-generation market proof.
-                    if token_int is not None and quote_timestamp_quality_allows_hard_readiness(
+                    valid_market_time = quote_timestamp_quality_allows_hard_readiness(
                         tick
-                    ):
+                    )
+                    if token_int is not None and valid_market_time:
                         self._confirmed_subscriptions.add(token_int)
                         self._last_valid_live_tick_mono[canonical_symbol] = now_mono
                         self._symbol_first_tick_generation[canonical_symbol] = (
