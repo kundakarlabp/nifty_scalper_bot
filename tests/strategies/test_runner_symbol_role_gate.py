@@ -787,7 +787,7 @@ def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> No
     )
 
 
-def test_independent_itm_fallback_accepts_canonical_full_depth_quote(monkeypatch) -> None:
+def test_itm_fallback_accepts_full_depth_quote(monkeypatch) -> None:
     bot, _manager, _risk, _orders, _selected, candidate, quotes = (
         _independent_fallback_runner(monkeypatch)
     )
@@ -800,7 +800,9 @@ def test_independent_itm_fallback_accepts_canonical_full_depth_quote(monkeypatch
     }
 
     assert bot._independent_premium_fallback_eligible(candidate)
-    assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
+    assert (
+        bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
 
 
 def test_nonselected_signal_cannot_borrow_selected_atm_setup(monkeypatch) -> None:
