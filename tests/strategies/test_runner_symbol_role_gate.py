@@ -646,9 +646,7 @@ def test_generated_candidate_and_terminal_result_share_one_trace(monkeypatch):
         "SIGNAL_CANDIDATE_GENERATED",
         "SIGNAL_EXECUTION_RESULT",
     ]
-    assert {event["trace_id"] for event in events} == {
-        "candidate-terminal-contract"
-    }
+    assert {event["trace_id"] for event in events} == {"candidate-terminal-contract"}
     assert events[-1]["broker_attempted"] is False
     order_manager.submit.assert_not_called()
 
@@ -694,17 +692,18 @@ def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) ->
         metadata={"strategy": "VWAPPro", "setup_id": "own-candidate-closed-bar"},
     )
     captured = []
-    bot._schedule_signal_preparation = (
-        lambda signal, _price, _now, _trace: (captured.append(signal), (True, None))[1]
-    )
+
+    def capture_signal(signal, _price, _now, _trace):
+        captured.append(signal)
+        return True, None
+
+    bot._schedule_signal_preparation = capture_signal
 
     assert (
-        bot._entry_evaluation_route(selected)
-        == EntryEvaluationRoute.OPTION_CANDIDATE
+        bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
     )
     assert (
-        bot._entry_evaluation_route(candidate)
-        == EntryEvaluationRoute.OPTION_CANDIDATE
+        bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
     )
     bot._on_tick(
         candidate,
@@ -720,10 +719,8 @@ def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) ->
         },
     )
 
-    assert any(
-        call.args[0] == candidate
-        for call in manager.generate_signal.call_args_list
-    )
+    manager_calls = manager.generate_signal.call_args_list
+    assert any(call.args[0] == candidate for call in manager_calls)
     assert len(captured) == 1
     assert captured[0].symbol == candidate
     assert captured[0].metadata["setup_id"] == "own-candidate-closed-bar"
