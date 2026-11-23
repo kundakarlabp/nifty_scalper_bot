@@ -19555,6 +19555,35 @@ class StrategyRunner:
                         metadata["_runner_approved_replacement_symbol"] = (
                             selected_symbol
                         )
+                elif metadata.get("_independent_premium_fallback") is True:
+                    # An independently qualified ITM signal is not a transfer
+                    # of the selected ATM contract's thesis. OrderManager still
+                    # needs the existing explicit basket-alternative permit to
+                    # accept its token; grant it only after rechecking origin,
+                    # current selection, and the live own-contract entry gate.
+                    current_selected = normalize_symbol(
+                        str(
+                            candidate_contract_generation.selected_ce
+                            if option_side == "CE"
+                            else candidate_contract_generation.selected_pe
+                        )
+                    ) if candidate_contract_generation is not None else ""
+                    if (
+                        not current_selected
+                        or current_selected == selected_symbol
+                        or normalize_symbol(
+                            str(metadata.get("_independent_premium_selected_origin") or "")
+                        )
+                        != current_selected
+                        or not self._independent_premium_fallback_eligible(
+                            selected_symbol
+                        )
+                    ):
+                        return _reject_after_dedup(
+                            reason="independent_premium_fallback_changed",
+                            details={"candidate_symbol": selected_symbol},
+                        )
+                    metadata["_runner_approved_replacement_symbol"] = selected_symbol
 
                 # The final order symbol, candidate, quote snapshot and premium plan
                 # are one atomic decision. A rejected replacement must never leak
