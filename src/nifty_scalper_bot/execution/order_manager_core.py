@@ -5215,7 +5215,9 @@ class OrderManager:
         if quote is None:
             return OrderPreflightResult(False, "quote_unavailable", {})
         if live_entry and plan.instrument_token is not None:
-            quote_token = quote.get("instrument_token") or quote.get("token")
+            quote_token = quote.get("instrument_token")
+            if quote_token is None:
+                quote_token = quote.get("token")
             if quote_token is not None:
                 try:
                     token_matches = int(quote_token) == int(plan.instrument_token)
