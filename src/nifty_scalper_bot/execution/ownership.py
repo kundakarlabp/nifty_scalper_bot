@@ -14,6 +14,8 @@ Key responsibilities:
       exchange-time events; clear BBO for an explicit new quote-less tick.
     - Count optional trail assessments in existing per-bracket state to
       distinguish missed dispatch from a legitimate no-ratchet decision.
+    - Select adaptive exclusively in LIVE when enabled; use verified tiers
+      only under an explicit adaptive opt-out.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
@@ -314,7 +316,7 @@ class BoundBracketManager(RuntimeBracketManager):
         return bool(super()._sync_exchange_protective_stop(bracket))
 
     def _apply_trailing_math(self, bracket: Any) -> bool:
-        """Collect canonical, market-aware and adaptive proposals before sync.
+        """Select one optional trail policy and synchronize its proposal once.
 
         Ratchets remain monotonic. Synchronize once after all proposals even if
         an optional assessment errors; never hold the bracket lock across I/O.
@@ -336,7 +338,7 @@ class BoundBracketManager(RuntimeBracketManager):
             broker_live = bool(self._is_live_execution())
             policy_config = getattr(bracket, "trailing_config", None)
             selected = (
-                "adaptive_then_verified_tiers"
+                "adaptive_only"
                 if adaptive_selected
                 else ("verified_tiers_live" if broker_live else "legacy_paper")
             )
@@ -362,24 +364,31 @@ class BoundBracketManager(RuntimeBracketManager):
                         self._trail_activation_r(bracket),
                     )
 
-            if adaptive_selected or broker_live:
+            if adaptive_selected:
+                # A legitimate adaptive NOOP is a policy decision, never an
+                # invitation for competing tiers to tighten the same stop.
                 if ltp is None:
                     return False
-                if adaptive_selected:
-                    try:
-                        if _profit_extension.tighten_adaptive_profit_lock(
-                            self, bracket, ltp
-                        ):
-                            return True
-                    except Exception as exc:  # noqa: BLE001 - hard stop survives
-                        _profit_extension.LOGGER.warning(
-                            "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
-                            getattr(bracket, "symbol", ""),
-                            type(exc).__name__,
-                        )
                 try:
-                    # Eligibility is rechecked against the current full-size
-                    # book; no unchecked legacy LTP fallback in real LIVE.
+                    return bool(
+                        _profit_extension.tighten_adaptive_profit_lock(
+                            self, bracket, ltp
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - hard stop survives
+                    _profit_extension.LOGGER.warning(
+                        "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                        getattr(bracket, "symbol", ""),
+                        type(exc).__name__,
+                    )
+                    return False
+
+            if broker_live:
+                if ltp is None:
+                    return False
+                try:
+                    # Only an explicit adaptive opt-out may select verified
+                    # live tiers. LTP-only legacy trailing is never used.
                     return bool(
                         _profit_extension.tighten_verified_tier_fallback(
                             self, bracket, ltp
