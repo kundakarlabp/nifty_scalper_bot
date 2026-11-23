@@ -374,7 +374,7 @@ def test_independent_itm_fallback_reaches_broker_free_order_preflight(
 
     # Pin the runner-to-plan handoff contract, then exercise the actual
     # OrderManager live preflight with no broker access.
-    source = inspect.getsource(StrategyRunner._handle_signal)
+    source = inspect.getsource(StrategyRunner._handle_entry_signal_inner)
     start = source.index('elif metadata.get("_independent_premium_fallback") is True:')
     end = source.index("# The final order symbol", start)
     assert (
