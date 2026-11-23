@@ -1235,7 +1235,8 @@ def test_completed_futures_volume_cannot_be_replaced_by_provisional_spike():
 
 
 @pytest.mark.parametrize(
-    "bad_clock", ["missing", "unverified", "old_exchange", "future_exchange", "old_receive"]
+    "bad_clock",
+    ["missing", "unverified", "old_exchange", "future_exchange", "old_receive"],
 )
 def test_futures_activity_requires_fresh_verified_exchange_and_receive_time(
     bad_clock,
