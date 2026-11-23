@@ -1418,9 +1418,13 @@ def test_kite_stream_invalid_order_updates_never_mutate_orders() -> None:
     manager.apply_broker_order_update = (  # type: ignore[method-assign]
         lambda order_id, _payload: updates.append(order_id)
     )
-    manager._log_trade_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    manager._log_trade_event = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: None
+    )
 
     manager.on_broker_stream_update({"status": "COMPLETE"})
-    manager.on_broker_stream_update({"order_id": "entry-1", "quantity": "invalid", "status": "OPEN"})
+    manager.on_broker_stream_update(
+        {"order_id": "entry-1", "quantity": "invalid", "status": "OPEN"}
+    )
     manager.on_broker_stream_update({"order_id": "entry-1", "status": ""})
     assert updates == []
