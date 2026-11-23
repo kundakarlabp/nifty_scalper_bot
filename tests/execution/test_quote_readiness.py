@@ -274,3 +274,62 @@ def test_flagged_one_sided_depth_cannot_satisfy_full_book_requirement():
     assert readiness.allowed is False
     assert readiness.reason == "quote_depth_missing"
     assert readiness.depth_available is False
+
+
+def test_receipt_only_timestamp_and_explicit_hard_veto_block_live_quote():
+    payload = {
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "quote_age_s": 0.1,
+        "tradable_quote": True,
+        "timestamp_quality": "received_at",
+    }
+    symbol = "NFO:NIFTY26JUN24000CE"
+    rejected = evaluate_execution_quote(
+        symbol,
+        payload,
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=1.0,
+        require_depth=False,
+    )
+    assert rejected.allowed is False
+    assert rejected.reason == "timestamp_quality_unusable"
+
+    payload["timestamp_quality"] = "exchange"
+    payload["hard_readiness_eligible"] = False
+    rejected = evaluate_execution_quote(
+        symbol,
+        payload,
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=1.0,
+        require_depth=False,
+    )
+    assert rejected.allowed is False
+    assert rejected.reason == "quote_not_tradable"
+
+
+def test_current_bid_ask_spread_overrides_stale_cached_spread_percentage():
+    symbol = "NFO:NIFTY26JUN24000CE"
+    payload = {
+        "ltp": 100.0,
+        "bid": 99.0,
+        "ask": 101.0,
+        "spread_pct": 0.1,
+        "tick_age_ms": 100,
+        "timestamp_quality": "exchange",
+        "tradable_quote": True,
+    }
+    result = evaluate_execution_quote(
+        symbol,
+        payload,
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=1.0,
+        require_depth=False,
+    )
+    assert result.allowed is False
+    assert result.reason == "spread_too_wide"
+    assert result.spread_pct == 2.0
