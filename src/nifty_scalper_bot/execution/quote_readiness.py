@@ -151,13 +151,19 @@ def evaluate_execution_quote(
     tick_age_ms = resolve_tick_age_ms(payload)
     quote_version = resolve_quote_version(payload)
     depth = _value(payload, "depth")
-    depth_available = bool(
-        _value(payload, "depth_available") is True
-        or _value(payload, "quote_depth_valid") is True
-        or (
-            isinstance(depth, Mapping)
-            and bool(depth.get("buy"))
-            and bool(depth.get("sell"))
+    # A supplied (possibly partial) broker book outranks summary flags.
+    # Legacy quote-only fixtures without depth retain their declared proof.
+    depth_available = (
+        bool(
+            isinstance(depth.get("buy"), (list, tuple))
+            and depth.get("buy")
+            and isinstance(depth.get("sell"), (list, tuple))
+            and depth.get("sell")
+        )
+        if isinstance(depth, Mapping)
+        else bool(
+            _value(payload, "depth_available") is True
+            or _value(payload, "quote_depth_valid") is True
         )
     )
     explicit_tradable = _value(payload, "tradable_quote")

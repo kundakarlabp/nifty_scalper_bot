@@ -768,8 +768,17 @@ class DataHub:
         stamped["exchange_symbol"] = symbol
         token = self._token_from_symbol(symbol)
         if token is not None:
-            stamped["instrument_token"] = token
-            stamped["token"] = token
+            observed_token = stamped.get("instrument_token")
+            if observed_token is None:
+                observed_token = stamped.get("token")
+            if observed_token is not None and str(observed_token) != str(token):
+                # Never relabel an old basket quote as the new contract.
+                stamped["quote_identity_token_mismatch"] = True
+                stamped["tradable_quote"] = False
+                stamped["hard_readiness_eligible"] = False
+            else:
+                stamped["instrument_token"] = token
+                stamped["token"] = token
         version = self.quote_update_version(symbol)
         if version is not None:
             stamped["quote_update_version"] = int(version)

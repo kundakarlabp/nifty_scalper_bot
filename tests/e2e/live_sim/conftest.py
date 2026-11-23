@@ -388,6 +388,12 @@ class LiveSimSystem:
                 ask=float(latest_tick.get("ask", entry)),
                 ltp=float(latest_tick.get("ltp", entry)),
             )
+        if self._entry_order_id and self._filled_entry_seen:
+            # Broker fill and market ticks must use the same virtual clock.
+            # Production exchange-time parsing must not be weakened for tests.
+            bracket = self.bracket_manager.get_bracket(self._entry_order_id)
+            if bracket is not None and bracket.entry_confirmed:
+                bracket.entry_fill_ts = self.clock.time()
 
     def _on_closed_bar(self, bar: dict[str, Any]) -> None:
         symbol = str(bar.get("symbol") or "")

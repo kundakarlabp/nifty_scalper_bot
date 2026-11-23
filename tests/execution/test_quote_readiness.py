@@ -249,3 +249,28 @@ def test_nonfinite_option_bid_ask_cannot_prove_executable_quote():
                 ).tradable_quote_ready
                 is False
             )
+
+
+def test_flagged_one_sided_depth_cannot_satisfy_full_book_requirement():
+    payload = {
+        "bid": 99.9,
+        "ask": 100.1,
+        "quote_age_s": 0.1,
+        "depth_available": True,
+        "tradable_quote": True,
+        "depth": {
+            "buy": [{"price": 99.9, "quantity": 65}],
+            "sell": [],
+        },
+    }
+    readiness = evaluate_execution_quote(
+        "NFO:NIFTY26JUN24000CE",
+        payload,
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=1.0,
+        require_depth=True,
+    )
+    assert readiness.allowed is False
+    assert readiness.reason == "quote_depth_missing"
+    assert readiness.depth_available is False

@@ -404,3 +404,48 @@ def test_independent_itm_fallback_reaches_broker_free_order_preflight(
     plan.instrument_token = 99999
     mismatched = core.OrderManager._validate_trade_plan(manager, plan)
     assert mismatched.allowed is False
+
+
+def test_live_trade_plan_rejects_old_quote_token_after_rotation() -> None:
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724250PE", "instrument_token": 54321}
+    )
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is False
+    assert result.reason == "quote_instrument_token_mismatch"
+    assert result.details["expected_token"] == 12345
+
+
+def test_live_trade_plan_allows_matching_explicit_quote_token() -> None:
+    manager = _Manager(
+        {"tradingsymbol": "NIFTY2670724250PE", "instrument_token": 12345}
+    )
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is True
+
+
+def test_live_trade_plan_rejects_datahub_token_mismatch_proof() -> None:
+    manager = _Manager(
+        {
+            "tradingsymbol": "NIFTY2670724250PE",
+            "quote_identity_token_mismatch": True,
+        }
+    )
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is False
+    assert result.reason == "quote_instrument_token_mismatch"
+
+
+def test_live_trade_plan_rejects_explicit_zero_quote_token() -> None:
+    manager = _Manager({"tradingsymbol": "NIFTY2670724250PE", "instrument_token": 0})
+
+    result = core.OrderManager._validate_trade_plan(manager, _plan())
+
+    assert result.allowed is False
+    assert result.reason == "quote_instrument_token_mismatch"

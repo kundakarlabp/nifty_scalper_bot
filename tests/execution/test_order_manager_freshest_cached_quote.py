@@ -358,3 +358,18 @@ def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
     assert slippage == 0.0
     assert historical is None
     assert data_hub.pull_attempts == 0
+
+
+def test_expired_full_depth_cannot_outrank_fresh_executable_quote() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    stale = _depth_quote(symbol, marker="stale_full")
+    stale["exchange_timestamp"] = datetime.now(timezone.utc) - timedelta(seconds=45)
+    stale["timestamp_quality"] = "exchange"
+    fresh = _quote(symbol, marker="fresh_executable", age_s=0.02)
+    fresh.pop("ask_quantity")
+    manager = _manager(data_hub=_TickProvider(stale), mdm=_TickProvider(fresh))
+
+    quote = manager._get_latest_quote_safe(symbol)
+
+    assert quote is not None
+    assert quote["marker"] == "fresh_executable"
