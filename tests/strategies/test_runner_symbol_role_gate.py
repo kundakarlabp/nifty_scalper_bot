@@ -646,8 +646,163 @@ def test_generated_candidate_and_terminal_result_share_one_trace(monkeypatch):
         "SIGNAL_CANDIDATE_GENERATED",
         "SIGNAL_EXECUTION_RESULT",
     ]
-    assert {event["trace_id"] for event in events} == {
-        "candidate-terminal-contract"
-    }
+    assert {event["trace_id"] for event in events} == {"candidate-terminal-contract"}
     assert events[-1]["broker_attempted"] is False
     order_manager.submit.assert_not_called()
+
+
+def _independent_fallback_runner(monkeypatch):
+    bot, manager, risk, orders, selected = _build_phase9_runner(monkeypatch)
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    candidate = "NFO:NIFTY26JUN23950CE"
+    bot._active_symbols.add(candidate)
+    bot._tracked_symbols.add(candidate)
+    bot._active_option_symbols = {selected, candidate}
+    bot._active_basket_token_by_symbol = {selected: 1, candidate: 2}
+    bot._eval_option_whitelist = {selected, candidate}
+    bot._last_bar_ts[candidate] = datetime.now(timezone.utc)
+    bot._symbol_history[candidate] = [{"timestamp": time.time()}] * 100
+    bot._history_ready_by_symbol[candidate] = True
+    bot._data_phase[candidate] = "LIVE"
+    bot._symbol_state[candidate] = SymbolRuntimeState(candidate, 55)
+    bot._symbol_state[candidate].active = True
+    bot._symbol_states[candidate] = SymbolState.READY
+
+    quotes = {
+        selected: {"ltp": 28.0, "bid": 27.85, "ask": 27.95, "tick_age_ms": 100},
+        candidate: {"ltp": 55.0, "bid": 54.85, "ask": 55.05, "tick_age_ms": 100},
+    }
+    bot._get_cached_quote_for_live_entry = lambda symbol: quotes.get(symbol, {})
+    return bot, manager, risk, orders, selected, candidate, quotes
+
+
+def test_cheap_selected_option_evaluates_itm_contract_own_signal(monkeypatch) -> None:
+    bot, manager, _risk, orders, selected, candidate, _quotes = (
+        _independent_fallback_runner(monkeypatch)
+    )
+    # The adjacent contract is an independent strategy input, not a rewrite
+    # of a signal for the cheaper selected CE.
+    manager.generate_signal.return_value = Signal(
+        "BUY",
+        candidate,
+        75,
+        0.9,
+        "VWAPPro",
+        50.0,
+        65.0,
+        metadata={"strategy": "VWAPPro", "setup_id": "own-candidate-closed-bar"},
+    )
+    captured = []
+
+    def capture_signal(signal, _price, _now, _trace):
+        captured.append(signal)
+        return True, None
+
+    bot._schedule_signal_preparation = capture_signal
+
+    assert (
+        bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+    assert (
+        bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+    bot._on_tick(
+        candidate,
+        {
+            "symbol": candidate,
+            "ltp": 55.0,
+            "last_price": 55.0,
+            "bid": 54.85,
+            "ask": 55.05,
+            "timestamp": time.time(),
+            "source": "ws",
+            "trace_id": "independent-itm-setup",
+        },
+    )
+
+    manager_calls = manager.generate_signal.call_args_list
+    assert any(call.args[0] == candidate for call in manager_calls)
+    assert len(captured) == 1
+    assert captured[0].symbol == candidate
+    assert captured[0].metadata["setup_id"] == "own-candidate-closed-bar"
+    assert captured[0].metadata["_independent_premium_fallback"] is True
+    assert captured[0].metadata["_independent_premium_selected_origin"] == selected
+    orders.submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "selected_no_longer_cheap",
+        "candidate_below_floor",
+        "candidate_quote_stale",
+        "selected_quote_stale",
+        "candidate_not_tokenized",
+        "option_bar_old",
+        "selected_only",
+        "disabled",
+    ],
+)
+def test_independent_itm_fallback_remains_fail_closed(monkeypatch, change) -> None:
+    bot, _manager, _risk, _orders, selected, candidate, quotes = (
+        _independent_fallback_runner(monkeypatch)
+    )
+    if change == "selected_no_longer_cheap":
+        quotes[selected]["ltp"] = 45.0
+    elif change == "candidate_below_floor":
+        quotes[candidate]["ltp"] = 38.0
+    elif change == "candidate_quote_stale":
+        quotes[candidate]["tick_age_ms"] = 100_000
+    elif change == "selected_quote_stale":
+        quotes[selected]["tick_age_ms"] = 100_000
+    elif change == "candidate_not_tokenized":
+        bot._active_basket_token_by_symbol.pop(candidate)
+    elif change == "option_bar_old":
+        bot._last_bar_ts[candidate] = datetime.fromtimestamp(
+            time.time() - 600, tz=timezone.utc
+        )
+    elif change == "selected_only":
+        monkeypatch.setenv("LIVE_ENTRY_SELECTED_ONLY", "true")
+    elif change == "disabled":
+        monkeypatch.setenv("INDEPENDENT_ITM_PREMIUM_FALLBACK_ENABLED", "false")
+
+    assert bot._entry_evaluation_route(candidate) == EntryEvaluationRoute.CONTEXT_ONLY
+    assert (
+        bot._entry_evaluation_route(selected) == EntryEvaluationRoute.OPTION_CANDIDATE
+    )
+
+
+def test_nonselected_signal_cannot_borrow_selected_atm_setup(monkeypatch) -> None:
+    bot, manager, _risk, orders, selected, candidate, _quotes = (
+        _independent_fallback_runner(monkeypatch)
+    )
+    manager.generate_signal.return_value = Signal(
+        "BUY", selected, 75, 0.9, "VWAPPro", 24.0, 40.0, metadata={}
+    )
+    dispatched = []
+    bot._schedule_signal_preparation = (
+        lambda signal, _price, _now, _trace: dispatched.append(signal)
+    )
+
+    bot._on_tick(
+        candidate,
+        {
+            "symbol": candidate,
+            "ltp": 55.0,
+            "last_price": 55.0,
+            "bid": 54.85,
+            "ask": 55.05,
+            "timestamp": time.time(),
+            "source": "ws",
+            "trace_id": "identity-conflict",
+        },
+    )
+
+    assert dispatched == []
+    assert orders.submit.call_count == 0
+    assert any(
+        call.kwargs.get("reason") == "independent_premium_fallback_changed"
+        for call in bot._emit_runner_eval_decision.call_args_list
+    )
