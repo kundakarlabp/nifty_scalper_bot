@@ -4,6 +4,8 @@ Runtime role:
 - WebSocket token transport: set_tokens/subscribe/unsubscribe/reconnect replay.
 - Preserve KiteTicker host-local naive event time as an aware instant at ingress.
 - Consumes clean token sets from MDM.
+- set_order_update_callback delivers Kite account order postbacks serially to
+  the canonical order owner off the market tick thread.
 - Must not contain futures/options business logic."""
 
 from __future__ import annotations
