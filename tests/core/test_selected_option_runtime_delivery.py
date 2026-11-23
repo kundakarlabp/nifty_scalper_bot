@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -264,3 +265,15 @@ def test_selected_pair_liveness_repairs_only_missing_runner_callback() -> None:
     assert runner.subscribe_calls == [symbol]
     assert len(hub.subscribe_calls) == 1
     assert hub.has_tick_subscription(symbol, runner.on_datahub_tick, token=token)
+
+
+def test_dynamic_basket_repairs_delivery_before_readiness_decision() -> None:
+    # Regression for 23 November's 09:38 basket rotation: fresh quotes were
+    # available but entry remained disarmed until the next periodic rearm.
+    source = Path(app.__file__).read_text(encoding="utf-8")
+    start = source.index("if committed_ce and committed_pe:")
+    end = source.index('if "data_pipeline_overloaded" in set(', start)
+    committed_pair_path = source[start:end]
+    assert committed_pair_path.index("_ensure_selected_option_runtime_delivery(") < (
+        committed_pair_path.index("await _recompute_and_push_runtime_readiness(")
+    )
