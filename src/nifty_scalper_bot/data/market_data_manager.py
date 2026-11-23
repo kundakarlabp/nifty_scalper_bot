@@ -8864,8 +8864,10 @@ class MarketDataManager:
             or (sell_top or {}).get("quantity")
         )
         depth_available = bool(
-            (isinstance(buy_levels, list) and buy_levels)
-            or (isinstance(sell_levels, list) and sell_levels)
+            isinstance(buy_levels, list)
+            and buy_levels
+            and isinstance(sell_levels, list)
+            and sell_levels
         )
         spread = (
             (ask - bid) if (bid is not None and ask is not None and ask > bid) else None
@@ -9786,11 +9788,13 @@ class MarketDataManager:
     def _is_full_websocket_quote(tick: Mapping[str, Any]) -> bool:
         source = str(tick.get("source") or "").strip().lower()
         websocket_source = source in {"ws", "ws_full", "full", "websocket"}
-        full_quote = (
-            bool(tick.get("depth_available"))
-            or bool(tick.get("depth"))
-            or str(tick.get("bid_ask_source") or "").lower()
-            in {"market_depth", "ws_full"}
+        depth = tick.get("depth")
+        full_quote = bool(
+            isinstance(depth, Mapping)
+            and isinstance(depth.get("buy"), (list, tuple))
+            and depth.get("buy")
+            and isinstance(depth.get("sell"), (list, tuple))
+            and depth.get("sell")
         )
         return websocket_source and full_quote
 
@@ -13772,8 +13776,14 @@ class MarketDataManager:
                 depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
             )
             bid_ask_source = "missing"
+            depth_complete = bool(
+                isinstance(buy_levels, list)
+                and buy_levels
+                and isinstance(sell_levels, list)
+                and sell_levels
+            )
             if bid is not None and ask is not None:
-                bid_ask_source = "ws_full"
+                bid_ask_source = "ws_full" if depth_complete else "quote"
             elif depth_obj:
                 if isinstance(buy_levels, list) and buy_levels:
                     bid = _coerce_float((buy_levels[0] or {}).get("price"))
@@ -13837,7 +13847,7 @@ class MarketDataManager:
                 "volume_delta_reset": bool(raw.get("volume_delta_reset")),
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
-                "depth_available": bool(depth_obj),
+                "depth_available": depth_complete,
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
                 "tick_direction": tick_direction or None,
