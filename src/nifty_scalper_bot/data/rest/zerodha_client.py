@@ -2,6 +2,8 @@
 
 Runtime role:
 - Low-level Zerodha REST adapter for instruments, quotes, orders, and history.
+- get_order_history preserves exact Kite order transitions for broker audit;
+  get_order_status reuses that fetch for the latest authoritative status.
 - Provides broker data to owner modules.
 - Must not own live contract selection."""
 
