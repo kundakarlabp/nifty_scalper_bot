@@ -367,3 +367,26 @@ def test_zero_volume_rejection_has_bounded_provenance_log_without_admission_chan
     assert '"_option_volume_parity_sampled_at"' in manager_source
     assert 'self._no_vote("option_candle_no_trades")' in vwap_source
     assert "if vol <= 0:" in vwap_source
+
+
+def test_engine_regime_block_count_reads_only_canonical_hard_vetoes() -> None:
+    """One denied option evaluation is not 709 unrelated regime warnings."""
+    import inspect
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    manager = StrategyManager([], None, None)
+    assert manager.get_regime_hard_block_count() == 0
+    manager._observability_counters["signals_blocked_by_regime"] = 3
+    manager._observability_counters["regime_gate_denials_observed"] = 9
+
+    assert manager.get_regime_hard_block_count() == 3
+    assert manager._observability_counters["regime_gate_denials_observed"] == 9
+
+    # Protect the runner's existing reporting seam without starting a
+    # trading engine or duplicating the strategy manager's veto authority.
+    summary_source = inspect.getsource(StrategyRunner._on_tick_safe)
+    assert "get_regime_hard_block_count" in summary_source
+    assert "current - previous if current >= previous else current" in summary_source
+    assert '"regime_blocks": self._regime_block_counter' in summary_source

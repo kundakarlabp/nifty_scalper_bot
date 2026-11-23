@@ -9,6 +9,8 @@ Runtime role:
 - Must not select contracts or call broker instruments.
 - Raw regime safety denials block option signals even in adaptive mode;
   adaptive weighting is applied only after the canonical regime gate passes.
+- get_regime_hard_block_count exposes the existing cumulative option-evaluation
+  safety vetoes for accurate, read-only runner interval summaries.
 - can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
   actual reversal admission remains owned by the verified range vote contract.
 - _derive_context_direction applies an ATR-scaled floor to EMA spreads and
@@ -5204,6 +5206,10 @@ class StrategyManager(_BaseStrategyManager):
 
         if key in self._observability_counters:
             self._observability_counters[key] += 1
+
+    def get_regime_hard_block_count(self) -> int:
+        """Return cumulative canonical regime vetoes of option evaluations."""
+        return int(self._observability_counters.get("signals_blocked_by_regime", 0))
 
     def _extract_regime_scale(self, adjustments: t.Mapping[str, t.Any]) -> float:
         """Args: adjustments. Returns: float. Raises: Exception."""

@@ -18,6 +18,8 @@ Runtime role:
   untrusted cumulative observations remain excluded.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
+- ENGINE_SUMMARY reports actual interval option-evaluation regime vetoes
+  from StrategyManager, not an unwritten local counter.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
 - Checks independent original/replacement expiry, strike, side, premium,
@@ -1277,6 +1279,7 @@ class StrategyRunner:
         self._candidate_total_count = 0
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
+        self._last_regime_hard_block_count = 0
         self._capital_block_counter = 0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
@@ -8620,6 +8623,25 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
             if now - self._last_summary_log >= 60.0:
+                # StrategyManager owns canonical regime vetoes. Read only its
+                # cumulative count and report the interval delta; strategy
+                # subtype ineligibility is a distinct no-vote metric.
+                counter_getter = getattr(
+                    self._strategy_manager, "get_regime_hard_block_count", None
+                )
+                if callable(counter_getter):
+                    try:
+                        current = max(0, int(counter_getter()))
+                        previous = self._last_regime_hard_block_count
+                        self._regime_block_counter = (
+                            current - previous if current >= previous else current
+                        )
+                        self._last_regime_hard_block_count = current
+                    except Exception:  # noqa: BLE001 - telemetry cannot interrupt exits
+                        self._logger.warning(
+                            "ENGINE_REGIME_COUNTER_UNAVAILABLE",
+                            extra={"event": "ENGINE_REGIME_COUNTER_UNAVAILABLE"},
+                        )
                 self._logger.info(
                     "ENGINE_SUMMARY evals=%d evals_semantics=legacy_activity "
                     "runner_ticks=%d phase9_evals=%d candidate_generated=%d "
@@ -8641,6 +8663,7 @@ class StrategyRunner:
                         "candidate_generated": self._candidate_counter,
                         "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
+                        "regime_blocks_semantics": "strategy_manager_option_eval_vetoes_per_interval",
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
                     },
