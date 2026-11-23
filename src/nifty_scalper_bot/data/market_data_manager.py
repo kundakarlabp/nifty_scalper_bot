@@ -9832,16 +9832,21 @@ class MarketDataManager:
 
         current_quality = str(current.get("timestamp_quality") or "").lower()
         incoming_quality = str(incoming.get("timestamp_quality") or "").lower()
+        unusable_quality = {"synthetic", "invalid", "unknown", "received_at"}
         current_proven = (
             current.get("source_timestamp_valid") is not False
-            and current_quality not in {"synthetic", "invalid", "unknown", "received_at"}
+            and current_quality not in unusable_quality
         )
         incoming_degraded = (
             not self._is_full_websocket_quote(incoming)
             or incoming.get("source_timestamp_valid") is False
-            or incoming_quality in {"synthetic", "invalid", "unknown", "received_at"}
+            or incoming_quality in unusable_quality
         )
-        if current_proven and incoming_degraded and self._is_full_websocket_quote(current):
+        if (
+            current_proven
+            and incoming_degraded
+            and self._is_full_websocket_quote(current)
+        ):
             current_received = self._tick_wallclock(current)
             if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
