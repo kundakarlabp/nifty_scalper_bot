@@ -236,7 +236,7 @@ def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() 
     )
 
 
-def test_rejection_keeps_verified_completed_futures_volume_separate_from_quote_ratio() -> None:
+def test_rejection_retains_independent_futures_bar_volume() -> None:
     owner = _owner({}, {})
     sample = record_strategy_rejection_sample(
         owner,
