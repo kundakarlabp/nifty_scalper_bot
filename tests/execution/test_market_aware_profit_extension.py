@@ -1437,12 +1437,8 @@ def test_adaptive_skip_records_missing_protected_tick_bid_without_trading(
 
     monkeypatch.setattr(profit_extension.LOGGER, "warning", capture_warning)
 
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
-    assert not profit_extension.tighten_adaptive_profit_lock(
-        manager, bracket, 115.0
-    )
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115.0)
     assert len(messages) == 1
     assert "protected_tick_bid_missing" in messages[0]
     assert bracket.sl_trigger_price == 94.0
