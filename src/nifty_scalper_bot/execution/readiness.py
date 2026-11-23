@@ -19,7 +19,11 @@ from nifty_scalper_bot.config.env_utils import parse_float_env
 
 LOGGER = logging.getLogger(__name__)
 _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {
-    "synthetic", "unknown", "invalid", "received_at", "received_at_fallback"
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
 }
 _TRUTHY = {"1", "true", "yes", "y", "on"}
 _PNL_DIAGNOSTIC_REASONS = {
@@ -526,7 +530,8 @@ def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -
     return (
         getter("source_timestamp_valid", None) is not False
         and quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
-        and source not in {
+        and source
+        not in {
             "received_at",
             "received_ts",
             "received_time",
