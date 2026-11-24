@@ -9,6 +9,8 @@ Runtime role:
   CandleEngine registry used as the finalized-OHLC SSOT.
 - Fast WebSocket receipt caching refuses retired option/futures tokens and
   cannot demote a validated exchange-time quote to an unverified arrival.
+- Rejects wrong-token and retired-generation queued ticks before candle mutation;
+  preserves original ingress receipt time through normalized quote delivery.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
   drains ordered ticks on a dedicated serial worker rather than the shared
   asyncio executor, and exports bounded tick latency percentiles.
@@ -7099,6 +7101,7 @@ class MarketDataManager:
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(tick_payload, raw_receive_mono)
         tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
+        tick_payload.setdefault("received_at", time.time())
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
@@ -8659,14 +8662,17 @@ class MarketDataManager:
             "quote",
             "rest_quote",
         }
-        token_raw = raw.get("instrument_token") or raw.get("token")
+        token_raw = raw.get("instrument_token")
+        if token_raw is None:
+            token_raw = raw.get("token")
         token: int | None = None
         if token_raw is not None:
             try:
                 token = int(token_raw)
-            except Exception:
-                if not approved_rest_fallback:
-                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if token <= 0:
+                return None
 
         raw_symbol = (
             raw.get("symbol") or raw.get("tradingsymbol") or raw.get("trading_symbol")
@@ -8678,12 +8684,26 @@ class MarketDataManager:
                     symbol = self._canonical_symbol(str(raw_symbol))
                 except Exception:
                     symbol = str(raw_symbol)
-            if symbol is None and token is not None:
-                symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+            if token is not None:
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
                     token
                 )
-            if approved_rest_fallback and symbol is not None and token is None:
-                token = self._token_by_symbol.get(symbol)
+                if mapped is not None:
+                    mapped = self._canonical_symbol(mapped)
+                    if symbol is not None and symbol != mapped:
+                        return None
+                    symbol = mapped
+            if symbol is not None:
+                expected_token = self._current_symbol_token_locked(symbol)
+                if token is not None and expected_token is not None:
+                    if token != expected_token:
+                        return None
+                if approved_rest_fallback and token is None:
+                    token = expected_token
+                generation = raw.get("_mdm_subscription_generation")
+                if not approved_rest_fallback and generation is not None:
+                    if generation != self._generation_for_raw_ingress(symbol, token):
+                        return None
 
         if token is None and not (approved_rest_fallback and symbol):
             return None
@@ -13911,6 +13931,7 @@ class MarketDataManager:
                     else ("market_tick" if tick_direction else None)
                 ),
                 "timestamp": ts_py,
+                "received_at": self._tick_received_at_epoch(raw),
                 "timestamp_source": timestamp_source,
                 "timestamp_quality": timestamp_quality,
                 "source_timestamp_valid": source_timestamp_valid,
