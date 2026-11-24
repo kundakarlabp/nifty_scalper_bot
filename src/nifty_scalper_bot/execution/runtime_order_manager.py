@@ -5,7 +5,8 @@ Key responsibilities:
     - Apply unresolved-exit entry blocking before broker submission.
     - Run bounded entry recovery and finalize partial-entry reconciliation.
     - Reject costly VWAP continuation retries against durable first-attempt prices.
-    - Own bracket-anchor provenance and execution preflight quote selection directly.
+    - Own bracket-anchor provenance and execution preflight quote selection directly;
+      extract cached quote diagnostics once per candidate.
     - Delegate unchanged order operations to ``order_manager_core``.
 
 Operational constraints:
@@ -798,37 +799,6 @@ def _depth_top_quantity(quote: Any, side: str) -> int:
     return 0
 
 
-def _quote_age_ms(manager: Any, quote: Any) -> float | None:
-    """Return a finite quote age from the existing canonical diagnostics."""
-    if not isinstance(quote, Mapping):
-        return None
-    try:
-        age = manager._extract_quote_diagnostics(quote).get("age_ms")
-        parsed = float(age) if age is not None else None
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
-        return None
-    return parsed
-
-
-def _quote_execution_rank(manager: Any, quote: Any) -> int:
-    """Rank cached quote evidence without treating LTP-only data as executable."""
-    if not isinstance(quote, Mapping):
-        return 0
-    try:
-        diagnostics = manager._extract_quote_diagnostics(quote)
-        bid = float(diagnostics.get("bid") or 0.0)
-        ask = float(diagnostics.get("ask") or 0.0)
-        bid_qty = int(diagnostics.get("bid_qty") or 0)
-        ask_qty = int(diagnostics.get("ask_qty") or 0)
-    except (AttributeError, TypeError, ValueError):
-        return 0
-    if bid <= 0.0 or ask < bid:
-        return 0
-    return 2 if bid_qty > 0 and ask_qty > 0 else 1
-
-
 def _cached_quote(provider: Any, symbol: str) -> Mapping[str, Any] | None:
     """Read cached quote evidence without triggering broker/HTTP pulls."""
     getter = getattr(provider, "get_latest_tick", None)
@@ -933,14 +903,24 @@ class RuntimeOrderManager(_core.OrderManager):
             try:
                 diagnostics = self._extract_quote_diagnostics(candidate)
                 candidate_ltp = float(diagnostics.get("ltp") or 0.0)
-            except (AttributeError, TypeError, ValueError):
+                age = diagnostics.get("age_ms")
+                candidate_age = float(age) if age is not None else None
+                bid = float(diagnostics.get("bid") or 0.0)
+                ask = float(diagnostics.get("ask") or 0.0)
+                bid_qty = int(diagnostics.get("bid_qty") or 0)
+                ask_qty = int(diagnostics.get("ask_qty") or 0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
                 continue
-            if candidate_ltp <= 0.0:
+            if (
+                candidate_ltp <= 0.0
+                or candidate_age is None
+                or not math.isfinite(candidate_age)
+                or candidate_age < 0.0
+            ):
                 continue
-            candidate_age = _quote_age_ms(self, candidate)
-            if candidate_age is None:
-                continue
-            candidate_rank = _quote_execution_rank(self, candidate)
+            candidate_rank = 0
+            if 0.0 < bid < ask:
+                candidate_rank = 2 if bid_qty > 0 and ask_qty > 0 else 1
             candidate_fresh = candidate_age <= fresh_limit_ms
             if (
                 best is None
