@@ -2562,3 +2562,29 @@ def test_fast_arrival_cannot_invent_exchange_time_or_downgrade_verified_book() -
     assert actual["ltp"] == verified["ltp"]
     assert actual["source_timestamp_valid"] is True
     assert mdm._last_tick_time[symbol] == original_receipt
+
+
+@pytest.mark.asyncio
+async def test_bounded_worker_batch_avoids_per_tick_dispatch(monkeypatch):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm.set_open_position_symbols([symbol])
+    monkeypatch.setattr(mdm, "_tick_drain_budget_s", 1.0)
+    monkeypatch.setattr(mdm, "_tick_drain_invocation_max_ticks", 3)
+    seen: list[int] = []
+    monkeypatch.setattr(
+        mdm, "_process_queued_tick", lambda raw: seen.append(raw["last_price"])
+    )
+    for i in range(9):
+        mdm._enqueue_tick_threadsafe(
+            {"instrument_token": 1, "last_price": i, "timestamp": i}
+        )
+    mdm.set_event_loop(asyncio.get_running_loop())
+    await mdm.drain_pending_ticks(timeout=3.0)
+
+    assert seen == list(range(9))
+    stats = mdm.get_tick_pressure_stats()
+    assert stats["tick_latency_percentiles"]["worker_dispatch_wait"]["samples"] == 3
+    assert stats["unexplained_loss"] == 0
+    assert stats["max_active_drains"] == 1
+    await _stop_mdm(mdm)
