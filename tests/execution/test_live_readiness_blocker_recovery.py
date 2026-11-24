@@ -13,7 +13,12 @@ from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketMa
 SYMBOL = "NFO:NIFTY26JUN24050CE"
 
 
-def test_execution_quote_accepts_fresh_full_depth_without_top_level_bid_ask() -> None:
+def test_execution_quote_accepts_fresh_full_depth_without_top_level_bid_ask(
+    monkeypatch,
+) -> None:
+    import nifty_scalper_bot.execution.readiness as readiness
+
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_782_443_000.15)
     verdict = evaluate_execution_quote(
         SYMBOL,
         {
