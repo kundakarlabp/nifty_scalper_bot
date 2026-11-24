@@ -587,8 +587,8 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
     """Prefer event-time evidence to cached age; never clamp future time to zero."""
     timestamp_ms = _quote_float(payload, "last_tick_ts_ms", "timestamp_ms")
     if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
-        age_ms = time.time() * 1000.0 - timestamp_ms
-        return age_ms / 1000.0 if age_ms >= 0.0 else None
+        event_age_ms = time.time() * 1000.0 - timestamp_ms
+        return event_age_ms / 1000.0 if event_age_ms >= 0.0 else None
     age_ms = _quote_float(
         payload,
         "tick_age_ms",
