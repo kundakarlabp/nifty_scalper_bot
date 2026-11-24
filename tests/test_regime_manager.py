@@ -154,9 +154,22 @@ async def test_refresh_ignores_price_only_inputs_instead_of_fabricating_range() 
 
 
 @pytest.mark.asyncio
-async def test_verified_completed_session_history_feeds_range_momentum() -> None:
+async def test_verified_completed_session_history_feeds_range_momentum(
+    monkeypatch,
+) -> None:
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
+
+    from nifty_scalper_bot.core import market_regime_manager as regime_module
+
+    session_now = datetime(2026, 11, 20, 11, 30, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    class FixedSessionDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return session_now.astimezone(tz) if tz is not None else session_now
+
+    monkeypatch.setattr(regime_module, "datetime", FixedSessionDateTime)
 
     class HistoryIndicators:
         def get_indicators(self, symbol, names=None):
@@ -164,9 +177,7 @@ async def test_verified_completed_session_history_feeds_range_momentum() -> None
 
         def get_history(self, symbol, count=None, *, field="close"):
             assert field == "bars" and count == 16
-            last = datetime.now(ZoneInfo("Asia/Kolkata")).replace(
-                second=0, microsecond=0
-            ) - timedelta(minutes=1)
+            last = session_now.replace(second=0, microsecond=0) - timedelta(minutes=1)
             return [
                 {
                     "timestamp": last - timedelta(minutes=idx),
