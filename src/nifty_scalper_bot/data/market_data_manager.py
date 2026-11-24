@@ -7101,7 +7101,8 @@ class MarketDataManager:
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(tick_payload, raw_receive_mono)
         tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
-        tick_payload.setdefault("received_at", time.time())
+        # Ingress receipt is not a substitute for a missing market timestamp.
+        tick_payload.setdefault("_mdm_received_at", time.time())
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
@@ -8807,9 +8808,11 @@ class MarketDataManager:
 
     @staticmethod
     def _tick_received_at_epoch(raw: Mapping[str, Any]) -> float:
-        value = raw.get("received_at")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        for key in ("_mdm_received_at", "received_at"):
+            value = raw.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if math.isfinite(value) and value > 0:
+                    return float(value)
         return time.time()
 
     @staticmethod
