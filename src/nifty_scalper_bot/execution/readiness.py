@@ -512,7 +512,7 @@ class HistoryReadinessPolicy:
 def _quote_getter(payload: dict | object):
     return (
         payload.get
-        if isinstance(payload, dict)
+        if isinstance(payload, Mapping)
         else lambda key, default=None: getattr(payload, key, default)
     )
 
