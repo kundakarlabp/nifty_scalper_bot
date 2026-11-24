@@ -807,7 +807,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce,
             basket.selected_ce_token,
             116.0,
-            timestamp=base_tick_time + pd.Timedelta(seconds=0.5),
+            timestamp=pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)),
             buy_qty=1800,
             sell_qty=500,
             tick_direction="UP",
@@ -870,7 +870,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce,
             basket.selected_ce_token,
             200.0,
-            timestamp=base_tick_time + pd.Timedelta(seconds=0.6),
+            timestamp=pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)),
         )
         _wait_until(
             loop,
