@@ -4794,6 +4794,26 @@ class OrderManager:
                     normalized = normalize_market_tick_timestamp(payload)
                     stamp = normalized.timestamp
                     ts_key = normalized.source
+                    # A malformed supplied event clock must not be rescued by
+                    # recent transport receipt. Preserve legacy receipt-only
+                    # diagnostics when there was no event clock at all.
+                    if ts_key.startswith("received_") and any(
+                        payload.get(key) not in (None, "")
+                        for key in (
+                            "exchange_timestamp",
+                            "last_trade_time",
+                            "last_traded_time",
+                            "last_trade_timestamp",
+                            "exchange_update_time",
+                            "last_price_time",
+                            "timestamp",
+                            "timestamp_ms",
+                            "ts",
+                            "date",
+                            "datetime",
+                        )
+                    ):
+                        raise ValueError("unusable market event timestamp")
                 event_age_ms = (time.time() - stamp.timestamp()) * 1000.0
                 if math.isfinite(event_age_ms) and event_age_ms >= 0.0:
                     age_ms = event_age_ms
