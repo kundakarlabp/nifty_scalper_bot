@@ -755,7 +755,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         # order-preflight exchange-event freshness, masking the intended E2E.
         base_tick_time = pd.Timestamp(
             datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)
-        ).tz_convert("UTC")
+        ).tz_convert("UTC") - pd.Timedelta(seconds=1)
         startup_ticks = (
             ("NSE:NIFTY", basket.spot_token, 25000.0, 0.1),
             (basket.futures_symbol, basket.futures_token, 25020.0, 0.2),
