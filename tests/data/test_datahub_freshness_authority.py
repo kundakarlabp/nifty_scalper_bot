@@ -160,7 +160,11 @@ def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
 def test_quote_identity_prefers_current_mdm_mapping_over_old_facade_token() -> None:
     old_tick = _tick(0.2)
     current_token = _TOKEN + 1
-    current_tick = {**old_tick, "instrument_token": current_token, "token": current_token}
+    current_tick = {
+        **old_tick,
+        "instrument_token": current_token,
+        "token": current_token,
+    }
     hub = _hub(mdm_tick=current_tick, cached_tick=old_tick)
     hub._token_by_symbol[_SYMBOL] = _TOKEN
     hub._mdm._token_by_symbol = {_SYMBOL: current_token}
