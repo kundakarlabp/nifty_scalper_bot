@@ -155,3 +155,25 @@ def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
     assert quote["instrument_token"] == 0
     assert quote["quote_identity_token_mismatch"] is True
     assert quote["tradable_quote"] is False
+
+
+def test_quote_identity_prefers_current_mdm_mapping_over_old_facade_token() -> None:
+    old_tick = _tick(0.2)
+    current_token = _TOKEN + 1
+    current_tick = {**old_tick, "instrument_token": current_token, "token": current_token}
+    hub = _hub(mdm_tick=current_tick, cached_tick=old_tick)
+    hub._token_by_symbol[_SYMBOL] = _TOKEN
+    hub._mdm._token_by_symbol = {_SYMBOL: current_token}
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["instrument_token"] == current_token
+    assert not quote.get("quote_identity_token_mismatch")
+
+    hub._mdm.tick = old_tick
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["instrument_token"] == _TOKEN
+    assert quote["quote_identity_token_mismatch"] is True
+    assert quote["hard_readiness_eligible"] is False
+    hub.close()
