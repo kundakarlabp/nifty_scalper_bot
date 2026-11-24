@@ -177,9 +177,7 @@ async def test_verified_completed_session_history_feeds_range_momentum(
 
         def get_history(self, symbol, count=None, *, field="close"):
             assert field == "bars" and count == 16
-            last = session_now.replace(second=0, microsecond=0) - timedelta(
-                minutes=1
-            )
+            last = session_now.replace(second=0, microsecond=0) - timedelta(minutes=1)
             return [
                 {
                     "timestamp": last - timedelta(minutes=idx),
