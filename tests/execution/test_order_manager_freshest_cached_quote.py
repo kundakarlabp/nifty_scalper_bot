@@ -373,3 +373,37 @@ def test_expired_full_depth_cannot_outrank_fresh_executable_quote() -> None:
 
     assert quote is not None
     assert quote["marker"] == "fresh_executable"
+
+
+def test_attested_canonical_time_is_used_without_reinterpreting_raw_time() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(data_hub=_TickProvider({}), mdm=_TickProvider({}))
+    now = datetime.now(timezone.utc)
+    quote = {
+        **_depth_quote(symbol),
+        "timestamp": now - timedelta(seconds=45),
+        "exchange_timestamp": now,
+        "timestamp_source": "exchange_timestamp",
+        "source_timestamp_valid": True,
+    }
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] > 40_000
+    quote["timestamp"] = now + timedelta(milliseconds=500)
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] is None
+
+
+def test_quote_selection_extracts_diagnostics_once_per_provider(monkeypatch) -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(
+        data_hub=_TickProvider(_depth_quote(symbol)),
+        mdm=_TickProvider(_depth_quote(symbol)),
+    )
+    original = manager._extract_quote_diagnostics
+    calls = []
+
+    def track(quote):
+        calls.append(quote)
+        return original(quote)
+
+    monkeypatch.setattr(manager, "_extract_quote_diagnostics", track)
+    assert manager._get_latest_quote_safe(symbol) is not None
+    assert len(calls) == 2
