@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
 import nifty_scalper_bot.execution.order_manager_core as order_manager_core
+import nifty_scalper_bot.execution.readiness as readiness
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.core.message_bus import MessageBus
 from nifty_scalper_bot.core.strategy_manager import (
@@ -570,6 +572,9 @@ def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
         order_manager_core, "get_time_status", lambda: (True, "live_sim_market_open")
     )
     clock = VirtualClock(datetime(2026, 7, 15, 9, 35, tzinfo=IST))
+    # Quote readiness must use the same event clock as the simulated exchange.
+    # Replace only this module's clock, not the process-wide wall clock.
+    monkeypatch.setattr(readiness, "time", SimpleNamespace(time=clock.time))
     recorder = EventRecorder(clock)
     broker = SimulatedBroker(clock, recorder)
     exchange = SimulatedExchange(clock, broker, recorder)
