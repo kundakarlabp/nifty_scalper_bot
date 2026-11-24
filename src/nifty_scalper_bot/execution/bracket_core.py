@@ -661,7 +661,8 @@ class BracketManager:
         if SafeATRProvider and indicator_engine:
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
         self._recent_ticks: Dict[str, deque] = {}
-        # symbol -> (bid, ask, captured_at). Stop breach must be judged on the
+        # symbol -> (bid, ask, event time in LIVE; receipt time in replay).
+        # Stop breach must be judged on the
         # side the position is actually liquidated into, not on LTP.
         self._exit_quotes: Dict[str, tuple[float, float, float]] = {}
         self._exit_quote_max_age = max(
@@ -2745,8 +2746,21 @@ class BracketManager:
         # Cache receipt time alone cannot make an old exchange event safe:
         # the watchdog consumes this quote even when core.on_tick rejects it.
         event_epoch = tick_exchange_epoch(tick)
+        now_ts = time.time()
+        if self._is_live_execution():
+            # Receipt-only clocks cannot attest an executable live book.
+            if not any(tick.get(key) is not None for key in (
+                "exchange_timestamp", "timestamp", "last_trade_time",
+                "last_traded_time", "last_trade_timestamp",
+            )) or event_epoch is None or not (
+                0.0 <= now_ts - event_epoch <= self._exit_quote_max_age
+            ):
+                return False
+            captured_at = event_epoch
+        else:
+            # Preserve broker-free replay's virtual exchange clock.
+            captured_at = now_ts
         if event_epoch is not None:
-            now_ts = time.time()
             with self._lock:
                 for entry_id in self._symbol_map.get(symbol, ()):
                     bracket = self._brackets.get(entry_id)
@@ -2773,7 +2787,7 @@ class BracketManager:
             or ask < bid
         ):
             return False
-        self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
+        self._exit_quotes[symbol] = (float(bid), float(ask), captured_at)
         return True
 
     def _executable_exit_price(
