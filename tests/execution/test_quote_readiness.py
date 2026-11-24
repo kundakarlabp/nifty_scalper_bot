@@ -370,3 +370,13 @@ def test_runtime_and_execution_share_event_age_authority(monkeypatch):
 def test_negative_age_is_not_fresh_market_evidence():
     assert resolve_tick_age_ms({"tick_age_ms": -100}) is None
     assert resolve_tick_age_ms({"quote_age_s": -0.1}) is None
+
+
+def test_readonly_mapping_keeps_canonical_quote_age(monkeypatch):
+    from types import MappingProxyType
+
+    import nifty_scalper_bot.execution.readiness as readiness
+
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_800_000_000.0)
+    quote = MappingProxyType({"last_tick_ts_ms": 1_799_999_999_500.0})
+    assert resolve_tick_age_ms(quote) == 500.0
