@@ -154,6 +154,7 @@ async def test_affordable_active_otm_candidate_can_supply_capacity(
     otm = "NFO:NIFTY26AUG25100CE"
     ctx, calls = _context({CE: 172.0, PE: 180.0, otm: 100.0}, 10_000.0)
     ctx.active_trading_universe["option_symbols"].append(otm)
+    ctx.active_trading_universe["token_by_symbol"][otm] = 13
     ctx.active_symbol_tokens[otm] = 13
     ctx.strategy_runner._live_entry_candidate_eligibility = lambda symbol: (
         eligible and symbol == otm,

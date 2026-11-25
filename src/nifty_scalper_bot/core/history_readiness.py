@@ -2,6 +2,7 @@
 
 Runtime role:
 - Pure computation layer for symbol hydration status and history readiness.
+- Any option marked execution-ready requires its own verified token and quote.
 - Owns the canonical readiness functions consumed by app.py's live-arming gate
   and by the runner: build_symbol_hydration_status, _hydration_status_map,
   compute_history_readiness, compute_selected_option_history_readiness,

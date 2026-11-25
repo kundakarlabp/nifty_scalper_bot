@@ -3,6 +3,7 @@
 Runtime role:
 - SSOT for NIFTY instrument identity, symbol-token mapping, and active contract selection.
 - Owns NIFTY spot token, active future, selected ATM CE/PE, nearby option universe.
+- Bounded live universe prefers OTM at equal distance to preserve cheaper alternatives.
 - Other modules must consume ActiveContractBasket and must not regenerate symbols.
 """
 

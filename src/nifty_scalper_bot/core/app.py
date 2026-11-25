@@ -10188,6 +10188,7 @@ async def _recompute_and_push_runtime_readiness(
                 allowed
                 and status is not None
                 and expected_token is not None
+                and expected_token > 0
                 and status.token == expected_token
                 and status.ready_for_execution
                 and status.live_tick_fresh
