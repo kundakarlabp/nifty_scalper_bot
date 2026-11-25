@@ -10,7 +10,8 @@ Runtime role:
   callback path; reuses the already-bound canonical CandleEngine per symbol.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
-- Maintains active history counts and uses shared direction-context resolution.
+- Maintains active history counts and uses shared direction-context resolution;
+  authoritative spot/futures snapshots cannot be overridden by old option bias.
 - Exposes inspect_recent_canonical_history for a bounded, read-only OHLCV
   check of latest completed MDM, runner and indicator candles after reseeding;
   count-based readiness is not misreported as full content parity.
@@ -121,7 +122,7 @@ from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role,
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
-from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.strategy_manager import StrategyManager, _context_snapshot_fresh
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -11263,23 +11264,30 @@ class StrategyRunner:
                 )
             except (TypeError, ValueError):
                 ts = 0.0
-            age = max(0.0, now - ts) if ts > 0 else max_age + 1.0
+            raw_market_ms = _extract_float(payload, "last_tick_ts_ms")
+            if raw_market_ms is not None and raw_market_ms > 10_000_000_000:
+                ts = raw_market_ms / 1000.0
+            age = now - ts if ts > 0 else max_age + 1.0
             bias = str(
                 payload.get("underlying_direction_bias")
                 or payload.get("direction_bias")
                 or ""
             ).upper()
-            return payload, bool(ts > 0 and age <= max_age), bias, age
+            return payload, _context_snapshot_fresh(payload, max_age_seconds=max_age, now_ts=now), bias, age
 
         spot_ctx, spot_fresh, spot_bias, spot_age = _ctx_state("spot_context")
         fut_ctx, fut_fresh, fut_bias, fut_age = _ctx_state("futures_context")
         output: dict[str, Any] = {}
         if spot_ctx:
-            output["spot_context"] = spot_ctx
-            output["spot_fresh"] = spot_fresh
+            output.update(spot_context=spot_ctx, spot_fresh=spot_fresh)
+            output["spot_ltp"] = spot_ctx.get("ltp")
+            output["spot_vwap"] = spot_ctx.get("vwap")
         if fut_ctx:
-            output["futures_context"] = fut_ctx
-            output["futures_fresh"] = fut_fresh
+            output.update(futures_context=fut_ctx, futures_fresh=fut_fresh)
+            output["futures_ltp"] = fut_ctx.get("ltp")
+            output["futures_vwap"] = fut_ctx.get("vwap") if fut_ctx.get("vwap_source") == "active_future_quote_vwap" else None
+            output["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
+            output["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
         if spot_ctx or fut_ctx:
             # Clear any earlier option/runtime directional conclusion when the
             # current authoritative snapshots cannot resolve a direction.
@@ -11287,6 +11295,8 @@ class StrategyRunner:
                 direction_bias=None,
                 underlying_direction_bias=None,
                 underlying_direction_confidence=None,
+                direction_confidence=None,
+                context_age_seconds=None,
                 context_fresh=spot_fresh or fut_fresh,
             )
         if (
@@ -11311,6 +11321,7 @@ class StrategyRunner:
         output["underlying_direction_confidence"] = selected_ctx.get(
             "underlying_direction_confidence"
         )
+        output["direction_confidence"] = output["underlying_direction_confidence"]
         output["context_age_seconds"] = selected_age
         output["context_fresh"] = True
         output["direction_context_source"] = selected_ctx.get(
@@ -12481,7 +12492,8 @@ class StrategyRunner:
             "reason": reason,
             **dict(details),
         }
-        self._logger.info(
+        logger = self._logger.debug if reason == "same_bar_periodic_eval_throttled" else self._logger.info
+        logger(
             "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s bar_key=%s same_bar_elapsed_s=%s same_bar_interval_s=%s quote_update_version=%s",
             payload["symbol"],
             reason,
@@ -13572,42 +13584,33 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 return default
 
-        spot_snapshot = indicators_ctx.get("spot_snapshot")
-        futures_snapshot = indicators_ctx.get("futures_snapshot")
+        spot_snapshot = indicators_ctx.get("spot_context") or indicators_ctx.get("spot_snapshot")
+        futures_snapshot = indicators_ctx.get("futures_context") or indicators_ctx.get("futures_snapshot")
+        spot_context = spot_snapshot if isinstance(spot_snapshot, Mapping) else {}
+        futures_context = futures_snapshot if isinstance(futures_snapshot, Mapping) else {}
         spot_bars = _safe_int(
             indicators_ctx.get("spot_bars")
             or indicators_ctx.get("context_bar_count")
             or indicators_ctx.get("underlying_context_bar_count")
+            or spot_context.get("history_bars")
         )
         futures_bars = _safe_int(
             indicators_ctx.get("futures_bars")
             or indicators_ctx.get("futures_context_bar_count")
+            or futures_context.get("history_bars")
         )
-        spot_fresh = not bool(
+        spot_fresh = bool(indicators_ctx.get("spot_fresh")) and not bool(
             indicators_ctx.get("spot_stale")
             or indicators_ctx.get("stale_context")
             or indicators_ctx.get("context_stale")
         )
-        fut_fresh = not bool(
+        fut_fresh = bool(indicators_ctx.get("futures_fresh") or indicators_ctx.get("fut_fresh")) and not bool(
             indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
         )
-        spot_vwap = indicators_ctx.get(
-            "spot_vwap",
-            indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")),
-        )
-        futures_vwap = indicators_ctx.get("futures_vwap")
-        futures_vwap_slope = indicators_ctx.get(
-            "futures_vwap_slope",
-            indicators_ctx.get(
-                "vwap_slope", indicators_ctx.get("underlying_vwap_slope")
-            ),
-        )
-        futures_volume_ratio = indicators_ctx.get(
-            "futures_volume_ratio",
-            indicators_ctx.get(
-                "volume_ratio", indicators_ctx.get("underlying_volume_ratio")
-            ),
-        )
+        spot_vwap = indicators_ctx.get("spot_vwap", spot_context.get("vwap"))
+        futures_vwap = indicators_ctx.get("futures_vwap", futures_context.get("vwap"))
+        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope", futures_context.get("vwap_slope"))
+        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio", futures_context.get("futures_volume_ratio"))
         regime_available = bool(
             indicators_ctx.get("regime_snapshot")
             or indicators_ctx.get("regime")
@@ -16299,13 +16302,12 @@ class StrategyRunner:
                         context_ctx = self._underlying_context_from_strategy_manager()
                         if context_ctx:
                             runtime_ctx.update(context_ctx)
-                        existing_bias = (
-                            runtime_ctx.get("direction_bias")
-                            or runtime_ctx.get("underlying_direction_bias")
-                            or indicators_ctx.get("direction_bias")
-                            or indicators_ctx.get("underlying_direction_bias")
-                            or getattr(self, "_latest_direction_bias", None)
-                        )
+                        existing_bias = runtime_ctx.get("underlying_direction_bias") or runtime_ctx.get("direction_bias")
+                        if not context_ctx:
+                            if os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE":
+                                runtime_ctx.update(direction_bias=None, underlying_direction_bias=None, direction_confidence=None, underlying_direction_confidence=None, context_age_seconds=None, spot_fresh=False, futures_fresh=False, context_fresh=False)
+                            else:
+                                existing_bias = indicators_ctx.get("underlying_direction_bias") or indicators_ctx.get("direction_bias") or getattr(self, "_latest_direction_bias", None)
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
                             runtime_ctx["underlying_direction_bias"] = str(
