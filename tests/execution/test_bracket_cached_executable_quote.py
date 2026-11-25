@@ -347,3 +347,22 @@ def test_rejected_prefill_tick_cannot_poison_watchdog_exit_quote() -> None:
     assert bracket.last_ltp == 110.0
     assert manager._executable_exit_price(bracket, 110.0) == (110.0, "bid")
     assert manager._sl_crossed(bracket, bracket.last_ltp) is False
+
+
+def test_live_exit_quote_uses_event_age_not_processing_age(monkeypatch) -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(_CachedMarketData({}))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager._exit_quote_max_age = 3.0
+    now = time()
+    quote = {"symbol": symbol, "ltp": 100.0, "bid": 99.9, "ask": 100.1}
+    for stamp in (now - 30.0, now + 30.0):
+        assert not manager._capture_exit_quote(symbol, {**quote, "timestamp": stamp})
+    assert not manager._capture_exit_quote(symbol, {**quote, "received_at": now})
+    assert symbol not in manager._exit_quotes
+
+    stamp = now - 1.0
+    assert manager._capture_exit_quote(symbol, {**quote, "timestamp": stamp})
+    assert manager._exit_quotes[symbol] == (99.9, 100.1, stamp)
