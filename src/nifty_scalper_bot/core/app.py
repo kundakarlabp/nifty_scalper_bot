@@ -8,8 +8,8 @@ Runtime role:
 - Computes the canonical readiness/arming decision (history + quote freshness)
   and pushes it to the runner, synchronizing DataHub and regime indicator
   readiness as genuine selected-option history becomes sufficient or regresses.
-- Requires both selected sides for evaluation, but permits execution only on
-  the separately verified side when the opposite option quote is unusable.
+- Requires both selected sides for evaluation, but recognizes independently
+  verified, affordable near-ATM basket candidates for execution readiness.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
@@ -9484,17 +9484,29 @@ async def _ensure_active_basket_history(
     reqs = getattr(ctx, "history_hydration_requirement_by_symbol", {})
     cooldown = _runtime_hydration_cooldown_seconds()
     now_mono = time_module.monotonic()
-    for symbol, spec in requirements.items():
+    context_quality_repair_started = False
+    for symbol, spec in sorted(
+        requirements.items(), key=lambda item: not item[1]["gating"]
+    ):
         required = int(spec["required"])
         role = str(spec["role"])
         status = build_symbol_hydration_status(ctx, symbol, role, required)
         mdm_short = int(status.mdm_bars or 0) < required
         runner_short = int(status.runner_bars or 0) < required
         indicator_short = int(status.indicator_bars or 0) < required
-        quality_gating = bool(spec["gating"])
-        stale = quality_gating and required > 0 and not bool(status.latest_bar_fresh)
+        # Non-gating option context can become an execution candidate. Repair
+        # its stale/gapped history only with a current tradable quote, after
+        # required symbols, and at most once per readiness pass.
+        repair_context = bool(
+            role == "option_context"
+            and get_market_state() == MarketState.OPEN
+            and status.live_tick_fresh
+            and status.tradable_quote
+        )
+        quality_repair = bool(spec["gating"]) or repair_context
+        stale = quality_repair and required > 0 and not bool(status.latest_bar_fresh)
         gap = (
-            quality_gating
+            quality_repair
             and required > 0
             and not bool(status.recent_window_contiguous)
         )
@@ -9537,6 +9549,17 @@ async def _ensure_active_basket_history(
             ):
                 result[symbol] = {"skipped": True, "reason": "cooldown"}
                 continue
+            if repair_context and ensure_reason in {
+                "history_stale",
+                "recovery_gap_fill",
+            }:
+                if context_quality_repair_started:
+                    result[symbol] = {
+                        "skipped": True,
+                        "reason": "context_quality_repair_budget",
+                    }
+                    continue
+                context_quality_repair_started = True
             attempts[symbol] = now_mono
             reqs[symbol] = required
             hydration_phase = (
@@ -10143,7 +10166,42 @@ async def _recompute_and_push_runtime_readiness(
     selected_options_data_exec_ready = bool(
         ce_market_exec_ready or pe_market_exec_ready
     )
-    selected_option_exec_ready = bool(ce_exec_ready or pe_exec_ready)
+    if live_mode and basket_hard_ready:
+        # The ATM pair still owns context/evaluation readiness. An alternative
+        # may contribute execution capacity only under the existing runner
+        # near-ATM policy, with its own token, delivery, history and quote proof.
+        eligible = getattr(
+            getattr(ctx, "strategy_runner", None),
+            "_live_entry_candidate_eligibility",
+            None,
+        )
+        for symbol in option_symbols:
+            if symbol in execution_ready_by_symbol or not callable(eligible):
+                continue
+            side = symbol[-2:]
+            if side not in {"CE", "PE"}:
+                continue
+            status = statuses.get(symbol)
+            expected_token = (selection.token_by_symbol or {}).get(symbol)
+            allowed, _, _ = eligible(symbol)
+            if not (
+                allowed
+                and status is not None
+                and expected_token is not None
+                and status.token == expected_token
+                and status.ready_for_execution
+                and status.live_tick_fresh
+                and status.tradable_quote
+                and _runner_delivery_ready(symbol)
+            ):
+                continue
+            selected_options_data_exec_ready = True
+            decision = _minimum_lot_capacity(symbol, status)
+            execution_ready_by_symbol[symbol] = bool(
+                decision is not None and decision.determinate and decision.affordable
+            )
+        execution_capacity_ready = any(execution_ready_by_symbol.values())
+    selected_option_exec_ready = any(execution_ready_by_symbol.values())
     live_orders_armed = bool(
         live_mode
         and market_open
@@ -10157,10 +10215,10 @@ async def _recompute_and_push_runtime_readiness(
     if pipeline_overloaded:
         missing.append("data_pipeline_overloaded")
     if live_mode and selected_options_data_exec_ready and not execution_capacity_ready:
-        capacity_decisions = [
-            item for item in (ce_affordability, pe_affordability) if item is not None
-        ]
-        if capacity_decisions and all(item.determinate for item in capacity_decisions):
+        capacity_decisions = list(affordability_by_symbol.values())
+        if capacity_decisions and all(
+            item.get("determinate") for item in capacity_decisions
+        ):
             missing.append("minimum_lot_unaffordable")
         else:
             missing.append("execution_capacity_unavailable")

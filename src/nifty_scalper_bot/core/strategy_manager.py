@@ -3786,7 +3786,11 @@ class StrategyManager(_BaseStrategyManager):
                         "reason": "not_eligible",
                     },
                 )
-                reason = "strategy_regime_or_direction_ineligible"
+                reason = (
+                    "strategy_regime_ineligible"
+                    if regime_blocked
+                    else "strategy_direction_ineligible"
+                )
                 strategy_reasons[strategy_name] = reason
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 self._record_strategy_no_vote_observability(strategy_name, reason)

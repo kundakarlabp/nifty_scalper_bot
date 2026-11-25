@@ -145,6 +145,32 @@ async def test_one_affordable_side_keeps_global_arming_and_side_gate(
     assert calls[-1]["live_orders_armed"] is True
 
 
+@pytest.mark.parametrize("eligible", [True, False])
+@pytest.mark.asyncio
+async def test_affordable_active_otm_candidate_can_supply_capacity(
+    monkeypatch, eligible: bool
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    otm = "NFO:NIFTY26AUG25100CE"
+    ctx, calls = _context({CE: 172.0, PE: 180.0, otm: 100.0}, 10_000.0)
+    ctx.active_trading_universe["option_symbols"].append(otm)
+    ctx.active_symbol_tokens[otm] = 13
+    ctx.strategy_runner._live_entry_candidate_eligibility = lambda symbol: (
+        eligible and symbol == otm,
+        "test",
+        {},
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason="otm_capacity")
+
+    assert ctx.evaluation_ready is True
+    assert ctx.execution_capacity_ready is eligible
+    assert ctx.live_orders_armed is eligible
+    assert ctx.execution_ready_by_symbol[CE] is False
+    assert ctx.execution_ready_by_symbol[PE] is False
+    assert ctx.execution_ready_by_symbol.get(otm, False) is eligible
+    assert calls[-1]["live_orders_armed"] is eligible
+
+
 @pytest.mark.asyncio
 async def test_pipeline_overload_disarms_canonical_runtime_readiness(
     monkeypatch,

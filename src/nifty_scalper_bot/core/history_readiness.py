@@ -671,7 +671,7 @@ def build_symbol_hydration_status(
     ready_for_execution = bool(
         ready_for_evaluation
         and (
-            not selected_role
+            role not in {"selected_ce", "selected_pe", "option_context"}
             or (token is not None and tradable_quote and quote_ready.reason == "ready")
         )
     )

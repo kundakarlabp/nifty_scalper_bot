@@ -705,6 +705,7 @@ class InstrumentManager:
                 selected_pe=self._exchange_qualified(selected_pe[4]),
                 atm_strike=float(atm),
                 max_options=max_options,
+                prefer_otm=True,
             )
             kept_tokens = {item[1] for item in capped}
             full_count = len(selected_options)

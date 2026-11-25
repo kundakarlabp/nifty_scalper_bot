@@ -48,6 +48,23 @@ def test_cap_fills_nearest_strikes_alternating_sides() -> None:
     assert sides.count("CE") == 3 and sides.count("PE") == 3  # balanced
 
 
+def test_live_cap_preserves_atm_and_prefers_otm_at_equal_distance() -> None:
+    capped = cap_option_universe(
+        _full_universe(),
+        selected_ce="NFO:NIFTY2661623300CE",
+        selected_pe="NFO:NIFTY2661623300PE",
+        atm_strike=23300.0,
+        max_options=8,
+        prefer_otm=True,
+    )
+    strikes = {(item[2], item[3]) for item in capped}
+    assert len(capped) == 8
+    assert {(23300, "CE"), (23300, "PE")} <= strikes
+    assert {(23400, "CE"), (23200, "PE")} <= strikes
+    assert (23200, "CE") not in strikes
+    assert (23400, "PE") not in strikes
+
+
 def test_cap_noop_when_under_limit_or_disabled() -> None:
     universe = _full_universe(around=1)  # 6 options
     assert cap_option_universe(universe, selected_ce=universe[0][0], selected_pe=universe[1][0], atm_strike=23300.0, max_options=8) == universe
