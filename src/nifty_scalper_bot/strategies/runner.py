@@ -13589,15 +13589,13 @@ class StrategyRunner:
         spot_context = spot_snapshot if isinstance(spot_snapshot, Mapping) else {}
         futures_context = futures_snapshot if isinstance(futures_snapshot, Mapping) else {}
         spot_bars = _safe_int(
-            indicators_ctx.get("spot_bars")
-            or indicators_ctx.get("context_bar_count")
-            or indicators_ctx.get("underlying_context_bar_count")
-            or spot_context.get("history_bars")
+            spot_context.get("history_bars")
+            or indicators_ctx.get("spot_bars")
         )
         futures_bars = _safe_int(
-            indicators_ctx.get("futures_bars")
+            futures_context.get("history_bars")
+            or indicators_ctx.get("futures_bars")
             or indicators_ctx.get("futures_context_bar_count")
-            or futures_context.get("history_bars")
         )
         spot_fresh = bool(indicators_ctx.get("spot_fresh")) and not bool(
             indicators_ctx.get("spot_stale")
@@ -15836,23 +15834,14 @@ class StrategyRunner:
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
                     if self._is_tradable_symbol(symbol):
-                        selected_only_bias = str(
-                            (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("underlying_direction_bias")
-                            or (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("direction_bias")
-                            or ""
-                        ).upper()
+                        # This early gate concerns contract membership only.
+                        # Direction is resolved below from current underlying
+                        # snapshots, never from a previous option evaluation.
                         (
                             selected_only_ok,
                             selected_only_reason,
                             selected_only_details,
-                        ) = self._live_entry_candidate_eligibility(
-                            symbol,
-                            direction_bias=selected_only_bias,
-                        )
+                        ) = self._live_entry_candidate_eligibility(symbol)
                         if (
                             _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
                             and not selected_only_ok
@@ -15879,7 +15868,6 @@ class StrategyRunner:
                                 },
                             )
                             return
-                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     log_throttled(
                         self._logger,
                         f"strategy_evaluation_triggered:{symbol}",
@@ -16237,6 +16225,11 @@ class StrategyRunner:
                                             },
                                         )
                                     return
+                    # Only an admitted option evaluation needs both underlying
+                    # snapshots refreshed. Same-bar/quote vetoes already returned;
+                    # the completed-context generation retry remains unchanged.
+                    if _is_option_pregate:
+                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     self._mark_symbol_eval_allowed(
                         symbol,
                         bar_key=(

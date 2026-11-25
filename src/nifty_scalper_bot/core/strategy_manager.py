@@ -2367,6 +2367,15 @@ class StrategyManager(_BaseStrategyManager):
         quote_vwap = _safe_float_value((quote or {}).get("vwap") or (quote or {}).get("average_price"))
         live_price = quote_ltp if market_time_valid and quote_ltp is not None and isfinite(quote_ltp) and quote_ltp > 0 else _num("ltp", "close", "price")
         exchange_vwap = quote_vwap if role == "futures_context" and market_time_valid and quote_vwap is not None and isfinite(quote_vwap) and quote_vwap > 0 else None
+        market_now = time.time()
+        market_epoch = quote_ms / 1000.0 if market_time_valid else (None if require_market_time else market_now)
+        history_bars = None
+        history_counter = getattr(getattr(self, "_indicator_engine", None), "history_count", None)
+        if callable(history_counter):
+            try:
+                history_bars = max(0, int(history_counter(symbol)))
+            except (TypeError, ValueError, OverflowError):
+                pass
         direction_inputs = dict(indicators)
         if live_price is not None:
             direction_inputs.update(ltp=live_price, price=live_price)
@@ -2384,6 +2393,8 @@ class StrategyManager(_BaseStrategyManager):
             direction_inputs,
             role=role,
         )
+        if require_market_time and (market_epoch is None or market_now - market_epoch > self._live_context_max_age_seconds()):
+            derived_direction, derived_confidence, derived_reasons = None, 0.0, ["underlying_market_time_unavailable_or_stale"]
         stabilised = self._stabilize_context_direction(
             symbol=symbol,
             role=role,
@@ -2397,11 +2408,12 @@ class StrategyManager(_BaseStrategyManager):
         self._context_snapshot_version = int(getattr(self, "_context_snapshot_version", 0) or 0) + 1
         snapshot_version = self._context_snapshot_version
         snapshot = {
-            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
+            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": market_epoch,
             "context_snapshot_version": snapshot_version,
+            "history_bars": history_bars,
             "ltp": live_price, "close": _num("close", "ltp", "price"),
             "last_tick_ts_ms": quote_ms if market_time_valid else None,
-            "context_market_time_valid": market_time_valid if require_market_time or quote is not None else None,
+            "context_market_time_valid": market_time_valid if require_market_time or quote_ms is not None else None,
             "vwap": exchange_vwap if exchange_vwap is not None else _num("exchange_vwap", "session_vwap", "vwap"),
             "vwap_source": (
                 "active_future_quote_vwap"
@@ -2422,7 +2434,7 @@ class StrategyManager(_BaseStrategyManager):
             "underlying_direction_confidence": derived_confidence,
             "direction_score_kind": "evidence_corroboration_not_probability",
             "direction_context_reasons": derived_reasons,
-            "context_timestamp_epoch": time.time(),
+            "context_timestamp_epoch": market_epoch,
             "regime": indicators.get("regime") or indicators.get("market_regime"),
             "futures_volume_ratio_source": futures_volume_ratio_source,
             "vwap_slope_source": vwap_slope_source,
@@ -3792,6 +3804,7 @@ class StrategyManager(_BaseStrategyManager):
                 and indicators.get("regime") is not None
                 and (
                     not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                    or (stable_regime_name is not None and not strategy_regime_eligible(strategy_name, stable_regime_name))
                     or (
                         raw_regime_name is not None
                         and not strategy_regime_eligible(strategy_name, raw_regime_name)
@@ -4380,7 +4393,8 @@ class StrategyManager(_BaseStrategyManager):
             # Persist the regime source distinction through the order/ledger
             # boundary; a stable TREND label is not raw detector verification.
             if isinstance(combined.metadata, dict):
-                combined.metadata.setdefault("regime_stable", regime_name)
+                combined.metadata.setdefault("regime_stable", stable_regime_name)
+                combined.metadata.setdefault("regime_effective", regime_name)
                 combined.metadata.setdefault("regime_raw", raw_regime_name)
                 combined.metadata.setdefault("regime_gate_allowed", regime_allowed)
                 combined.metadata.setdefault(
@@ -4804,8 +4818,6 @@ class StrategyManager(_BaseStrategyManager):
             # back to CONFIRMING would be ignored by the monotonic registry.
             # This is observability only: no additional vote or admission.
             for candidate_signal, evidence in smc_trigger_votes:
-                if str(evidence.strategy or "").strip().upper() != "SMC":
-                    continue
                 metadata = dict(candidate_signal.metadata or {})
                 setup_id = metadata.get("setup_id") or (
                     evidence.metadata or {}

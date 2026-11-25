@@ -82,11 +82,13 @@ def test_one_valid_underlying_source_can_still_supply_direction(
     assert result["direction_context_source"] == "spot_context"
 
 
-def test_future_market_clock_cannot_be_rescued_by_recent_processing_time(monkeypatch) -> None:
+def test_future_market_clock_rejects_recent_processing_time(monkeypatch) -> None:
     runner = _runner_with_context(
         monkeypatch,
         spot=_context(timestamp=1001.0, underlying_direction_bias="CE"),
-        futures=_context(context_market_time_valid=False, underlying_direction_bias="PE"),
+        futures=_context(
+            context_market_time_valid=False, underlying_direction_bias="PE"
+        ),
     )
     result = runner._underlying_context_from_strategy_manager()
     assert result["spot_fresh"] is False
