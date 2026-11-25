@@ -96,6 +96,31 @@ def test_future_market_clock_rejects_recent_processing_time(monkeypatch) -> None
     assert result["underlying_direction_bias"] is None
 
 
+def test_stale_or_rolled_future_cannot_supply_context_metrics(monkeypatch) -> None:
+    runner = _runner_with_context(
+        monkeypatch,
+        spot=_context(timestamp=900.0, ltp=25000.0, vwap=24990.0),
+        futures=_context(
+            symbol="NFO:NIFTY26NOVFUT",
+            ltp=25020.0,
+            vwap=25010.0,
+            vwap_source="active_future_quote_vwap",
+            underlying_direction_bias="CE",
+        ),
+    )
+    runner._active_futures_symbol = "NFO:NIFTY26DECFUT"
+
+    result = runner._underlying_context_from_strategy_manager()
+
+    assert result["spot_fresh"] is False
+    assert result["futures_fresh"] is False
+    assert result["spot_context"] == {}
+    assert result["futures_context"] == {}
+    assert result["spot_vwap"] is None
+    assert result["futures_vwap"] is None
+    assert result["direction_bias"] is None
+
+
 def test_direction_diagnostics_never_use_option_vwap_or_volume() -> None:
     runner = StrategyRunner.__new__(StrategyRunner)
     _, details = runner._direction_context_missing_reason(

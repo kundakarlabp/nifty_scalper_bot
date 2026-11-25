@@ -8,6 +8,7 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- LIVE executable bid/ask cache ages from broker event time, never receipt time.
 - _record_trade_quality_shadow separates cached top bids from same-tick
   full-lot, timestamp-attested bid evidence for research only; never controls stops.
 - _is_replayed_protection_tick permanently vetoes provably pre-fill or
@@ -215,8 +216,10 @@ def _existing_owner(
 STALE_TICK_ARM_WINDOW_SEC = 5.0
 
 
-def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
-    """Read the actual market event epoch, including MDM's UTC ISO timestamps."""
+def tick_exchange_epoch(
+    tick: Mapping[str, Any], *, allow_receipt: bool = True
+) -> float | None:
+    """Read event epoch; receipt fallback is for legacy protection routing only."""
     for key in (
         "exchange_timestamp",
         "timestamp",
@@ -227,6 +230,8 @@ def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
         "received_ts",
         "received_time",
     ):
+        if not allow_receipt and key.startswith("received_"):
+            break
         raw = tick.get(key)
         if raw is None or isinstance(raw, bool):
             continue
@@ -661,7 +666,8 @@ class BracketManager:
         if SafeATRProvider and indicator_engine:
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
         self._recent_ticks: Dict[str, deque] = {}
-        # symbol -> (bid, ask, captured_at). Stop breach must be judged on the
+        # symbol -> (bid, ask, event time in LIVE; receipt time in replay).
+        # Stop breach must be judged on the
         # side the position is actually liquidated into, not on LTP.
         self._exit_quotes: Dict[str, tuple[float, float, float]] = {}
         self._exit_quote_max_age = max(
@@ -2744,9 +2750,20 @@ class BracketManager:
         """Cache executable bid/ask only from an eligible post-fill event."""
         # Cache receipt time alone cannot make an old exchange event safe:
         # the watchdog consumes this quote even when core.on_tick rejects it.
-        event_epoch = tick_exchange_epoch(tick)
+        live = self._is_live_execution()
+        event_epoch = tick_exchange_epoch(tick, allow_receipt=not live)
+        now_ts = time.time()
+        if live:
+            # Receipt-only clocks cannot attest an executable live book.
+            if event_epoch is None or not (
+                0.0 <= now_ts - event_epoch <= self._exit_quote_max_age
+            ):
+                return False
+            captured_at = event_epoch
+        else:
+            # Preserve broker-free replay's virtual exchange clock.
+            captured_at = now_ts
         if event_epoch is not None:
-            now_ts = time.time()
             with self._lock:
                 for entry_id in self._symbol_map.get(symbol, ()):
                     bracket = self._brackets.get(entry_id)
@@ -2773,7 +2790,7 @@ class BracketManager:
             or ask < bid
         ):
             return False
-        self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
+        self._exit_quotes[symbol] = (float(bid), float(ask), captured_at)
         return True
 
     def _executable_exit_price(

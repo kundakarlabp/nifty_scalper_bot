@@ -811,13 +811,7 @@ class DataHub:
     def _token_from_symbol(self, symbol: str) -> int | None:
         """Resolve instrument token from symbol aliases. Args: symbol. Returns: token. Raises: none."""
         normalized = self._canonical_quote_symbol(symbol)
-        token = self._token_by_symbol.get(normalized)
-        if token is not None:
-            try:
-                return int(token)
-            except Exception:
-                return None
-
+        # The canonical MDM mapping can rotate before this facade receives a tick.
         mdm = getattr(self, "_mdm", None)
         for attr in ("_token_by_symbol", "_symbol_to_token"):
             mapping = getattr(mdm, attr, None)
@@ -828,6 +822,13 @@ class DataHub:
                         return int(token)
                     except Exception:
                         return None
+
+        token = self._token_by_symbol.get(normalized)
+        if token is not None:
+            try:
+                return int(token)
+            except Exception:
+                return None
 
         resolver = getattr(self, "_resolver", None)
         for method_name in ("token_for_symbol", "resolve_token", "get_token", "instrument_token"):

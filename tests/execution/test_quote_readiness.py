@@ -194,9 +194,9 @@ def test_max_quote_age_seconds_invalid_non_empty_uses_default(monkeypatch):
 
 
 def test_tick_age_prefers_real_quote_timestamp_over_stale_cached_age(monkeypatch):
-    import nifty_scalper_bot.execution.quote_readiness as quote_readiness
+    import nifty_scalper_bot.execution.readiness as readiness
 
-    monkeypatch.setattr(quote_readiness.time, "time", lambda: 1_800_000_000.0)
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_800_000_000.0)
     age_ms = resolve_tick_age_ms(
         {
             "tick_age_ms": 2_287_265.0,
@@ -208,9 +208,9 @@ def test_tick_age_prefers_real_quote_timestamp_over_stale_cached_age(monkeypatch
 
 
 def test_future_dated_broker_tick_cannot_prove_fresh_quote(monkeypatch):
-    import nifty_scalper_bot.execution.quote_readiness as quote_readiness
+    import nifty_scalper_bot.execution.readiness as readiness
 
-    monkeypatch.setattr(quote_readiness.time, "time", lambda: 1_800_000_000.0)
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_800_000_000.0)
     payload = {
         "last_tick_ts_ms": 1_800_000_000_500.0,
         "tick_age_ms": 100,
@@ -333,3 +333,50 @@ def test_current_bid_ask_spread_overrides_stale_cached_spread_percentage():
     assert result.allowed is False
     assert result.reason == "spread_too_wide"
     assert result.spread_pct == 2.0
+
+
+def test_runtime_and_execution_share_event_age_authority(monkeypatch):
+    import nifty_scalper_bot.execution.readiness as readiness
+
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_800_000_000.0)
+    symbol = "NFO:NIFTY26JUN24000CE"
+    quote = {
+        "ltp": 100.0,
+        "bid": 99.9,
+        "ask": 100.1,
+        "tradable_quote": True,
+        "tick_age_ms": 100,
+    }
+    for key in ("last_tick_ts_ms", "timestamp_ms"):
+        for stamp, allowed in (
+            (1_800_000_000_500.0, False),
+            (1_799_999_990_000.0, False),
+            (1_799_999_999_500.0, True),
+        ):
+            payload = {**quote, key: stamp}
+            runtime = evaluate_quote_readiness(symbol, payload, max_age_s=2.5)
+            execution = evaluate_execution_quote(
+                symbol,
+                payload,
+                live_mode=True,
+                max_tick_age_ms=2500,
+                max_spread_pct=1.0,
+                require_depth=False,
+            )
+            assert runtime.tradable_quote_ready is allowed
+            assert execution.allowed is allowed
+
+
+def test_negative_age_is_not_fresh_market_evidence():
+    assert resolve_tick_age_ms({"tick_age_ms": -100}) is None
+    assert resolve_tick_age_ms({"quote_age_s": -0.1}) is None
+
+
+def test_readonly_mapping_keeps_canonical_quote_age(monkeypatch):
+    from types import MappingProxyType
+
+    import nifty_scalper_bot.execution.readiness as readiness
+
+    monkeypatch.setattr(readiness.time, "time", lambda: 1_800_000_000.0)
+    quote = MappingProxyType({"last_tick_ts_ms": 1_799_999_999_500.0})
+    assert resolve_tick_age_ms(quote) == 500.0

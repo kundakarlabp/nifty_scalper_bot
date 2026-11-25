@@ -11277,18 +11277,25 @@ class StrategyRunner:
 
         spot_ctx, spot_fresh, spot_bias, spot_age = _ctx_state("spot_context")
         fut_ctx, fut_fresh, fut_bias, fut_age = _ctx_state("futures_context")
+        active_future = getattr(self, "_active_futures_symbol", None)
+        if active_future and fut_ctx and normalize_symbol(str(fut_ctx.get("symbol") or "")) != normalize_symbol(str(active_future)):
+            fut_fresh = False
         output: dict[str, Any] = {}
-        if spot_ctx:
-            output.update(spot_context=spot_ctx, spot_fresh=spot_fresh)
-            output["spot_ltp"] = spot_ctx.get("ltp")
-            output["spot_vwap"] = spot_ctx.get("vwap")
-        if fut_ctx:
-            output.update(futures_context=fut_ctx, futures_fresh=fut_fresh)
-            output["futures_ltp"] = fut_ctx.get("ltp")
-            output["futures_vwap"] = fut_ctx.get("vwap") if fut_ctx.get("vwap_source") == "active_future_quote_vwap" else None
-            output["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
-            output["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
-        if spot_ctx or fut_ctx:
+        if spot_ctx or fut_ctx or os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE":
+            # Overwrite both roles together; a missing or stale role must not
+            # leave previous indicator-context values available as live inputs.
+            output.update(
+                spot_context=spot_ctx if spot_fresh else {},
+                futures_context=fut_ctx if fut_fresh else {},
+                spot_fresh=spot_fresh,
+                futures_fresh=fut_fresh,
+                spot_ltp=spot_ctx.get("ltp") if spot_fresh else None,
+                spot_vwap=spot_ctx.get("vwap") if spot_fresh else None,
+                futures_ltp=fut_ctx.get("ltp") if fut_fresh else None,
+                futures_vwap=fut_ctx.get("vwap") if fut_fresh and fut_ctx.get("vwap_source") == "active_future_quote_vwap" else None,
+                futures_vwap_slope=fut_ctx.get("vwap_slope") if fut_fresh else None,
+                futures_volume_ratio=fut_ctx.get("futures_volume_ratio") if fut_fresh else None,
+            )
             # Clear any earlier option/runtime directional conclusion when the
             # current authoritative snapshots cannot resolve a direction.
             output.update(
