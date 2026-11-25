@@ -2575,11 +2575,11 @@ async def test_bounded_worker_batch_avoids_per_tick_dispatch(monkeypatch):
     monkeypatch.setattr(
         mdm, "_process_queued_tick", lambda raw: seen.append(raw["last_price"])
     )
+    mdm.set_event_loop(asyncio.get_running_loop())
     for i in range(9):
         mdm._enqueue_tick_threadsafe(
             {"instrument_token": 1, "last_price": i, "timestamp": i}
         )
-    mdm.set_event_loop(asyncio.get_running_loop())
     await mdm.drain_pending_ticks(timeout=3.0)
 
     assert seen == list(range(9))
