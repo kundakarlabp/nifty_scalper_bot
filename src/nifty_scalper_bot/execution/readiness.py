@@ -3,13 +3,15 @@
 Responsibilities: Resolve finite bid/ask, spread, quote age and tradability;
 provide arming and gate diagnostics without inventing market evidence.
 Boundaries: Trading strategy and broker submission remain with their owners.
-Safety: Non-finite prices and crossed quote books cannot prove tradability.
+Safety: Non-finite prices, crossed books and future-dated quotes cannot prove
+tradability.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from math import isfinite
@@ -510,7 +512,7 @@ class HistoryReadinessPolicy:
 def _quote_getter(payload: dict | object):
     return (
         payload.get
-        if isinstance(payload, dict)
+        if isinstance(payload, Mapping)
         else lambda key, default=None: getattr(payload, key, default)
     )
 
@@ -582,6 +584,11 @@ def resolve_max_quote_age_seconds(
 
 
 def resolve_quote_age_seconds(payload: dict | object) -> float | None:
+    """Prefer event-time evidence to cached age; never clamp future time to zero."""
+    timestamp_ms = _quote_float(payload, "last_tick_ts_ms", "timestamp_ms")
+    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
+        event_age_ms = time.time() * 1000.0 - timestamp_ms
+        return event_age_ms / 1000.0 if event_age_ms >= 0.0 else None
     age_ms = _quote_float(
         payload,
         "tick_age_ms",
@@ -590,7 +597,7 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
         "market_data_age_ms",
     )
     if age_ms is not None:
-        return max(0.0, age_ms / 1000.0)
+        return age_ms / 1000.0 if age_ms >= 0.0 else None
     age_s = _quote_float(
         payload,
         "tick_age_s",
@@ -602,7 +609,7 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
         "market_data_age_s",
     )
     if age_s is not None:
-        return max(0.0, age_s)
+        return age_s if age_s >= 0.0 else None
     return None
 
 
@@ -768,10 +775,6 @@ def evaluate_quote_readiness(
         reason = "ready"
     if reason == "ready" and require_fresh:
         age = resolve_quote_age_seconds(quote)
-        if age is None:
-            ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
-            if ts and ts > 10_000_000_000:
-                age = max(0.0, datetime.now(timezone.utc).timestamp() - (ts / 1000.0))
         if age is None:
             reason = "quote_age_unknown"
         elif max_age_s is not None and age > max_age_s:

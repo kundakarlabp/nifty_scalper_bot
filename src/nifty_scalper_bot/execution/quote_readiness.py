@@ -10,7 +10,6 @@ Safety: Missing, non-finite, or future-dated broker ticks cannot authorize LIVE.
 
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
@@ -44,12 +43,6 @@ def _float(payload: Mapping[str, Any] | object | None, *keys: str) -> float | No
 
 
 def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:
-    timestamp_ms = _float(payload, "last_tick_ts_ms")
-    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
-        # Do not clamp a future broker timestamp to zero: that would make an
-        # invalid tick appear fresh to both strategy context and order gates.
-        age_ms = time.time() * 1000.0 - timestamp_ms
-        return age_ms if age_ms >= 0.0 else None
     age_s = resolve_quote_age_seconds(payload)
     return None if age_s is None else age_s * 1000.0
 
