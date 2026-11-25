@@ -338,6 +338,8 @@ def test_full_five_level_book_reaches_runner_preflight_and_adaptive_exit() -> No
     }
     delivered: list[dict] = []
     hub.subscribe_ticks(selected, delivered.append, token=1)
+    assert hub.flush_pending_live_subscriptions() == 1
+    assert mdm.has_subscription(selected, hub.ingest_tick_sync)
     raw = {
         "instrument_token": 1,
         "last_price": 123.45,
