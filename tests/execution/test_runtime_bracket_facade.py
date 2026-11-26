@@ -239,6 +239,19 @@ def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) 
     assert manager.has_unresolved_exit() is False
 
 
+def test_promoted_resting_stop_records_broker_reason_not_manual_intent(
+    tmp_path, monkeypatch
+) -> None:
+    manager, _, _ = _exit_manager(tmp_path, monkeypatch)
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "STOP-1"
+    manager._reconcile_exit_state = lambda *_args, **_kwargs: True
+    assert manager._promote_filled_exchange_stop(bracket, reason="manual_exit")
+    assert bracket.exit_reason == "exchange_protective_stop_fill"
+    assert bracket.trade_provenance["stop_fill_prior_intent"] == "manual_exit"
+
+
 def test_confirmed_resting_stop_fill_has_specific_exit_reason(
     tmp_path, monkeypatch
 ) -> None:
