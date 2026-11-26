@@ -29,7 +29,9 @@ from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_futur
 from nifty_scalper_bot.strategies.futures_volume_quality import (
     analyze_completed_futures_volume,
 )
-from nifty_scalper_bot.strategies.quote_update_identity import resolve_quote_update_identity
+from nifty_scalper_bot.strategies.quote_update_identity import (
+    resolve_quote_update_identity,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
