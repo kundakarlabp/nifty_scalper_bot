@@ -143,8 +143,8 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
     )
     fallback = SimpleNamespace(
         symbol="NFO:NIFTY2691523450PE",
-        entry_price=80.00,
-        stop_loss=77.00,
+        entry_price=50.00,
+        stop_loss=49.00,
     )
     snapshots = [
         {
@@ -154,8 +154,8 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
         },
         {
             "symbol": fallback.symbol,
-            "bid": 79.90,
-            "ask": 80.00,
+            "bid": 49.90,
+            "ask": 50.00,
         },
     ]
 
@@ -175,12 +175,16 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
     assert decisions[preferred.symbol]["capacity_blocker"] == "risk"
     assert decisions[preferred.symbol]["reason"] == "minimum_lot_risk_unaffordable"
     assert decisions[fallback.symbol]["plan_risk_affordable"] is True
+    assert (
+        decisions[fallback.symbol]["plan_stop_limit_cost_inclusive_risk"]
+        <= decisions[fallback.symbol]["effective_one_lot_risk_budget"]
+    )
     assert decisions[fallback.symbol]["affordable"] is True
 
 
 @pytest.mark.parametrize(
     ("entry", "expected_affordable"),
-    [(200.0, False), (100.0, True)],
+    [(200.0, False), (100.0, False), (75.0, True)],
 )
 def test_live_balance_uses_actual_strategy_candidate_stop_geometry(
     monkeypatch, entry: float, expected_affordable: bool
