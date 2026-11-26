@@ -16332,10 +16332,22 @@ class StrategyRunner:
                         existing_bias = (
                             runtime_ctx.get("direction_bias")
                             or runtime_ctx.get("underlying_direction_bias")
-                            or indicators_ctx.get("direction_bias")
-                            or indicators_ctx.get("underlying_direction_bias")
-                            or getattr(self, "_latest_direction_bias", None)
                         )
+                        # In LIVE mode only the current, timestamp-checked
+                        # spot/futures snapshots may authorize direction.
+                        # An older option indicator or prior runner bias can
+                        # otherwise resurrect a CE/PE vote after the current
+                        # authorities turn neutral or disagree.
+                        if (
+                            not existing_bias
+                            and str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                            != "LIVE"
+                        ):
+                            existing_bias = (
+                                indicators_ctx.get("direction_bias")
+                                or indicators_ctx.get("underlying_direction_bias")
+                                or getattr(self, "_latest_direction_bias", None)
+                            )
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
                             runtime_ctx["underlying_direction_bias"] = str(
