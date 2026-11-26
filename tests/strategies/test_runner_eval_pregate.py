@@ -175,7 +175,7 @@ def test_same_bar_skip_log_includes_bar_key_elapsed_interval_and_quote_version(
         OPTION, {}, bar_key="bar-1"
     )
 
-    with caplog.at_level(logging.INFO, logger="same-bar-pregate-test"):
+    with caplog.at_level(logging.DEBUG, logger="same-bar-pregate-test"):
         runner._log_eval_pregate_skip(OPTION, reason, details)
 
     assert skipped is True
@@ -184,6 +184,7 @@ def test_same_bar_skip_log_includes_bar_key_elapsed_interval_and_quote_version(
         for rec in caplog.records
         if getattr(rec, "event", "") == "RUNNER_EVAL_PREGATE_SKIPPED"
     )
+    assert record.levelno == logging.DEBUG
     assert record.reason == "same_bar_periodic_eval_throttled"
     assert record.bar_key == "bar-1"
     assert record.same_bar_elapsed_s == 2.0
