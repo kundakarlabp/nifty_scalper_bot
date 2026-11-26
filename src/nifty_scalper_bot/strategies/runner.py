@@ -20708,8 +20708,12 @@ class StrategyRunner:
                     "context_confirmation_evidence": metadata.get(
                         "context_confirmation_evidence"
                     ),
-                    "vwap_reference_evidence": metadata.get("vwap_reference_evidence"),
-                    "vwap_signal_bar_evidence": metadata.get("vwap_signal_bar_evidence"),
+                    "vwap_reference_evidence": metadata.get(
+                        "vwap_reference_evidence"
+                    ),
+                    "vwap_signal_bar_evidence": metadata.get(
+                        "vwap_signal_bar_evidence"
+                    ),
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),
                     "entry_quote_ask": selected_snapshot.get("ask"),

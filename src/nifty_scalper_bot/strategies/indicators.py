@@ -1069,9 +1069,10 @@ class IndicatorEngine:
                     )
                     if not bool(provisional)
                 ]
-                if filtered_pairs:
-                    prices = [pair[0] for pair in filtered_pairs]
-                    volumes = [pair[1] for pair in filtered_pairs]
+                if not filtered_pairs:
+                    return None
+                prices = [pair[0] for pair in filtered_pairs]
+                volumes = [pair[1] for pair in filtered_pairs]
 
             # Pre-check: skip calculation if all volumes are zero
             if not volumes or all(v == 0 for v in volumes):
@@ -1184,8 +1185,10 @@ class IndicatorEngine:
     def get_session_vwap(self, symbol: str) -> float | None:
         """Return the session-anchored VWAP for *symbol*. NEVER raises.
 
-        get_vwap() is a rolling `period`-bar volume-weighted mean, which is not
-        VWAP. This anchors at the session open, matching the exchange figure.
+        get_vwap() is a rolling close-price weighted mean. This uses available
+        session bars and typical-price weighting, an approximation distinct
+        from exchange trade-level VWAP. Use get_session_vwap_at() when verified
+        full minute coverage is required.
         """
         try:
             with self._lock:

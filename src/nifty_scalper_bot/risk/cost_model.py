@@ -8,7 +8,9 @@ Rates current as of June 2026 (post Budget 2026-27, effective 1 Apr 2026):
 - GST: 18% on (brokerage + exchange txn charge + SEBI charges)
 - Stamp duty: 0.003% of premium, buy side only
 
-Includes a conservative protective stop-limit execution-loss estimate.
+Responsibility: Own transaction-fee and protective stop-limit loss estimates.
+Safety: A stop-limit reserve assumes execution at the limit; it is not a
+maximum-loss guarantee.
 
 All rates are env-overridable so future Budget changes need no code edit:
 COST_BROKERAGE_PER_ORDER, COST_STT_SELL_PCT, COST_EXCH_TXN_PCT,

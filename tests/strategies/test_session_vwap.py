@@ -191,3 +191,19 @@ def test_historical_session_vwap_preserves_complete_zero_volume_minutes():
     engine = _engine_with_bars(bars)
 
     assert engine.get_session_vwap_at(symbol, bars[-1][0]) == pytest.approx(150.0)
+
+
+def test_rolling_vwap_does_not_use_only_provisional_bars():
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = IndicatorEngine()
+    for minute in range(3):
+        stamp, price, volume = _session_bar(minute, 100.0 + minute, 100)
+        engine.update_price(
+            symbol,
+            {"open": price, "high": price, "low": price, "close": price},
+            volume=volume,
+            timestamp=stamp,
+            is_complete=False,
+            is_provisional=True,
+        )
+    assert engine.get_vwap(symbol) is None
