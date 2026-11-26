@@ -333,6 +333,15 @@ def canonicalize_range_excursions(
                 "side": side,
                 "symbol": symbol,
                 "regime": first.get("regime"),
+                "regime_raw": first.get("regime_raw"),
+                "regime_gate_allowed": first.get("regime_gate_allowed"),
+                "local_range_candidate": first.get("local_range_candidate"),
+                "local_rolling_center_slope_bps_per_min": first.get(
+                    "local_rolling_center_slope_bps_per_min"
+                ),
+                "local_range_session_vwap_setup": first.get(
+                    "local_range_session_vwap_setup"
+                ),
                 "structural_reason": first.get("structural_reason"),
                 "first_rejection_reason": initial_rejection,
                 "observed_decision_reasons": reasons,

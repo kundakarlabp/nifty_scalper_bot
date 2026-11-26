@@ -639,6 +639,10 @@ def _range_excursion_markouts(
                     "counterfactual_range_width_candidate": (
                         first_rejection == "range_width_unproven"
                     ),
+                    "shadow_local_range_in_trend_candidate": (
+                        row.get("local_range_session_vwap_setup") is True
+                        and first_rejection == "strategy_regime_ineligible"
+                    ),
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
                     ),
@@ -664,6 +668,7 @@ def _range_excursion_markouts(
         ("current_admission", "baseline_signal_emitted_at_first_decision"),
         ("ignore_center_disagreement_only", "counterfactual_center_gate_candidate"),
         ("ignore_range_width_only", "counterfactual_range_width_candidate"),
+        ("shadow_local_range_in_trend", "shadow_local_range_in_trend_candidate"),
     ):
         for horizon in (300, 600, 900):
             group = [

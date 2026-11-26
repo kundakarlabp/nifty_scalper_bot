@@ -468,6 +468,39 @@ def test_excursion_research_records_original_regime_rejection_only_once() -> Non
     assert first[0]["observed_decisions"] == 1
 
 
+def test_shadow_local_range_in_trend_uses_selected_contract() -> None:
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    context = indicators(regime="TREND", regime_raw="trend", regime_gate_allowed=True)
+    reason = "strategy_regime_ineligible"
+    strategy.observe_research_excursion(
+        "NFO:NIFTY26NOV25300CE",
+        dict(context, is_selected_option=False, selected_ce=OPTION),
+        blocked_reason=reason,
+    )
+    strategy.observe_research_excursion(OPTION, context, blocked_reason=reason)
+    record = strategy.get_research_snapshot()["opportunities"][0]
+    assert record["symbol"] == OPTION
+    assert record["local_range_candidate"] is True
+    assert record["local_range_session_vwap_setup"] is True
+    assert record["status"] == "rejected"
+    assert record["dominant_rejection"] == reason
+    assert record["option_fills_verified"] is False
+
+    for raw, allowed in (("unknown", True), ("trend", False)):
+        blocked = RangeVWAPReclaimStrategy(
+            RangeVWAPReclaimStrategyConfig(), History(bars())
+        )
+        blocked.observe_research_excursion(
+            OPTION,
+            dict(context, regime_raw=raw, regime_gate_allowed=allowed),
+            blocked_reason=reason,
+        )
+        row = blocked.get_research_snapshot()["opportunities"][0]
+        assert row["local_range_session_vwap_setup"] is False
+
+
 def test_qualified_excursion_reuses_first_futures_identity_not_option_bar() -> None:
     strategy = RangeVWAPReclaimStrategy(
         RangeVWAPReclaimStrategyConfig(), History(bars())
