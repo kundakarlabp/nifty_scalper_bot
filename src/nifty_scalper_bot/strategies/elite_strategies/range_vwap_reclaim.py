@@ -7,7 +7,8 @@ identity for bounded local recovery. Frozen ATR/sigma and session-anchored
 bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
-RangeVWAPReclaimStrategy records first-seen futures excursions and applies a
+RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
+range evidence within TREND, and applies a
 bounded failed-breakout exception to center disagreement with stronger
 same-quote option flow and first-barrier after-cost payoff requirements.
 It owns regime confirmation and live setup de-duplication; the manager,
@@ -296,8 +297,25 @@ def assess_range_vwap_reclaim(
         config.band_atr_multiple * atr,
         config.band_sigma_multiple * session_sigma,
     )
+    # Research-only local structure: use the same completed-bar efficiency
+    # and width limits, without relabeling the canonical session regime.
+    prior_rolling_center = _weighted_center(history[-25:-5])
+    local_slope_bps = (
+        abs(rolling_center - prior_rolling_center) / rolling_center * 10000 / 5
+        if prior_rolling_center is not None and rolling_center > 0
+        else None
+    )
+    local_range_candidate = bool(
+        travel > 0
+        and efficiency <= config.max_directional_efficiency
+        and 1.5 <= width <= config.max_range_width_atr
+        and local_slope_bps is not None
+        and local_slope_bps <= config.max_vwap_slope_bps_per_min
+    )
     evidence: dict[str, Any] = {
         "qualified": False,
+        "local_range_candidate": local_range_candidate,
+        "local_rolling_center_slope_bps_per_min": local_slope_bps,
         "candidate_session_anchored_band_points": round(anchored_band, 4),
         "candidate_session_anchored_vs_primary_ratio": (
             round(anchored_band / band, 4) if band > 0 else None
@@ -872,6 +890,20 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "structural_reason": str(structural.get("reason") or "unverified"),
                 "structural_qualified": structural.get("qualified") is True,
                 "regime": str(indicators.get("regime") or "UNKNOWN"),
+                "regime_raw": indicators.get("regime_raw"),
+                "regime_gate_allowed": indicators.get("regime_gate_allowed"),
+                "local_range_candidate": structural.get("local_range_candidate"),
+                "local_rolling_center_slope_bps_per_min": _value(
+                    structural.get("local_rolling_center_slope_bps_per_min")
+                ),
+                "local_range_session_vwap_setup": (
+                    structural.get("local_range_candidate") is True
+                    and structural.get("qualified") is True
+                    and str(indicators.get("regime") or "").upper() == "TREND"
+                    and str(indicators.get("regime_raw") or "").upper() == "TREND"
+                    and indicators.get("regime_gate_allowed") is True
+                    and indicators.get("regime_transition_pending") is not True
+                ),
                 "regime_transition": (
                     indicators.get("regime_transition_pending") is True
                 ),
@@ -961,7 +993,18 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         blocked_reason: str,
     ) -> None:
         """Observe manager-vetoed futures excursions without admitting a trade."""
+        from nifty_scalper_bot.utils.symbols import normalize_symbol
+
         if canonical_nifty_option_symbol(symbol) is None:
+            return
+        side = symbol[-2:].upper()
+        selected_symbol = indicators.get(
+            "selected_ce" if side == "CE" else "selected_pe"
+        )
+        if (
+            indicators.get("is_selected_option") is not True
+            and normalize_symbol(str(selected_symbol or "")) != normalize_symbol(symbol)
+        ):
             return
         future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
         decision = _time(indicators.get("decision_at"))
