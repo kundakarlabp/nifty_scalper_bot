@@ -1,5 +1,6 @@
 """Linked child order attempts remain durable across ambiguous broker results."""
 
+import datetime
 import json
 
 import pytest
@@ -36,7 +37,9 @@ def create(tmp_path):
             "instrument_token": token,
             "lot_size": 65,
             "quantity": 65,
-            "expiry": "2026-11-26",
+            "expiry": (
+                datetime.date.today() + datetime.timedelta(days=30)
+            ).isoformat(),
         }
         for role, (symbol, side, strike, token) in SYMBOLS.items()
     ]
