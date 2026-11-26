@@ -1001,10 +1001,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         selected_symbol = indicators.get(
             "selected_ce" if side == "CE" else "selected_pe"
         )
-        if (
-            indicators.get("is_selected_option") is not True
-            and normalize_symbol(str(selected_symbol or "")) != normalize_symbol(symbol)
-        ):
+        if indicators.get("is_selected_option") is not True and normalize_symbol(
+            str(selected_symbol or "")
+        ) != normalize_symbol(symbol):
             return
         future = canonical_nifty_future_symbol(indicators.get("active_futures_symbol"))
         decision = _time(indicators.get("decision_at"))

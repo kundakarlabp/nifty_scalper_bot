@@ -473,7 +473,7 @@ def test_shadow_local_range_in_trend_uses_selected_contract() -> None:
         RangeVWAPReclaimStrategyConfig(), History(bars())
     )
     context = indicators(regime="TREND", regime_raw="trend", regime_gate_allowed=True)
-    reason = "strategy_regime_or_direction_ineligible"
+    reason = "strategy_regime_ineligible"
     strategy.observe_research_excursion(
         "NFO:NIFTY26NOV25300CE",
         dict(context, is_selected_option=False, selected_ce=OPTION),

@@ -543,13 +543,10 @@ def test_local_range_shadow_report_never_invents_risk(tmp_path) -> None:
     prefix_decision, payload_decision = decision.split(" ", 1)
     event = json.loads(payload_decision)
     event.update(
-        reason="strategy_regime_or_direction_ineligible",
+        reason="strategy_regime_ineligible",
         decision_at=row["decision_at"],
     )
-    journal = (
-        f"{prefix} {json.dumps(row)}\n"
-        f"{prefix_decision} {json.dumps(event)}"
-    )
+    journal = f"{prefix} {json.dumps(row)}\n" f"{prefix_decision} {json.dumps(event)}"
     report = build_session_research_report(
         session_date=date(2026, 11, 3),
         journal=journal,

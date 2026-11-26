@@ -641,7 +641,7 @@ def _range_excursion_markouts(
                     ),
                     "shadow_local_range_in_trend_candidate": (
                         row.get("local_range_session_vwap_setup") is True
-                        and first_rejection == "strategy_regime_or_direction_ineligible"
+                        and first_rejection == "strategy_regime_ineligible"
                     ),
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
