@@ -1440,6 +1440,28 @@ class VWAPProStrategy(EliteStrategy):
                     "volume_confirmation",
                 ]
             )
+            structural_stop = None
+            structural_target = None
+            if live_neutral_slope_candidate and neutral_slope_admitted:
+                # Weak underlying slope requires the completed premium breakout
+                # to remain executable, not merely an earlier LTP above VWAP.
+                bid = _optional_float(indicators.get("bid"))
+                ask = _optional_float(indicators.get("ask"))
+                if (
+                    bid is None
+                    or ask is None
+                    or bid < confirmed_high
+                    or ask <= bid
+                ):
+                    self._no_vote("neutral_slope_breakout_bid_unconfirmed")
+                    return None
+                structural_stop = max(0.05, confirmed_low - 0.05)
+                # Preserve the original ATR-derived reward rather than create
+                # an increasingly distant target to justify chasing the ask.
+                structural_target = current_price + 2.0 * atr_safe
+                if not structural_stop < ask < structural_target:
+                    self._no_vote("neutral_slope_structural_geometry_invalid")
+                    return None
             metadata = {
                 "strategy": "VWAPPro",
                 "strategy_name": "VWAPPro",
@@ -1497,6 +1519,24 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap_reference_source": (
                     "rolling_vwap" if vwap_source == "vwap"
                     else vwap_source or "unavailable"
+                ),
+                "vwap_reference_evidence": {
+                    "selected_source": vwap_source,
+                    "selected_value": vwap,
+                    "exchange_vwap": _optional_float(indicators.get("exchange_vwap")),
+                    "session_vwap": _optional_float(indicators.get("session_vwap")),
+                    "rolling_vwap": _optional_float(indicators.get("vwap")),
+                },
+                "vwap_signal_bar_evidence": (
+                    {
+                        "timestamp": str(confirmed_bar.get("timestamp")),
+                        "high": confirmed_high,
+                        "low": confirmed_low,
+                        "close": close,
+                        "range_atr": (confirmed_high - confirmed_low) / atr_safe,
+                    }
+                    if confirmed_bar is not None
+                    else None
                 ),
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
@@ -1579,9 +1619,22 @@ class VWAPProStrategy(EliteStrategy):
                 "thesis_scope_symbol": symbol_scope,
                 "thesis_scope_session": session_scope,
                 "thesis_recovered_from_history": thesis_recovered_from_history,
-                "setup_invalidation_premium": current_price - atr_safe,
+                "setup_invalidation_premium": (
+                    structural_stop
+                    if structural_stop is not None
+                    else current_price - atr_safe
+                ),
+                "setup_target_premium": structural_target,
+                "vwap_structural_invalidation": structural_stop is not None,
+                "bracket_anchor_mode": (
+                    "absolute_level" if structural_stop is not None else "distance"
+                ),
                 "invalidation_level_domain": "option_premium",
-                "premium_stop_distance": atr_safe,
+                "premium_stop_distance": (
+                    current_price - structural_stop
+                    if structural_stop is not None
+                    else atr_safe
+                ),
                 "premium_target_rr": 2.0,
                 "direction_conflict_mode": "hard" if hard_conflict else "none",
             }
@@ -1595,8 +1648,8 @@ class VWAPProStrategy(EliteStrategy):
                 signal="BUY",
                 confidence=1.0,
                 entry_price=current_price,
-                stop_loss=None,
-                target=None,
+                stop_loss=structural_stop,
+                target=structural_target,
                 quantity=self._cfg.quantity or 1,
                 strategy_name="VWAPPro",
                 metadata=metadata,

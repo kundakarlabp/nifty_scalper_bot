@@ -5498,6 +5498,13 @@ class StrategyRunner:
             "confirmation_contract",
             "confirming_trigger_strategies",
             "context_confirmation_strategies",
+            "context_confirmation_evidence",
+            "vwap_reference_source",
+            "vwap_reference_evidence",
+            "vwap_signal_bar_evidence",
+            "setup_invalidation_premium",
+            "setup_target_premium",
+            "vwap_structural_invalidation",
             "underlying_direction_bias",
             "underlying_direction_confidence",
             "context_age_seconds",
@@ -5554,6 +5561,7 @@ class StrategyRunner:
                             "required",
                             "executable_capacity",
                             "plan_cost_inclusive_risk",
+                            "plan_stop_limit_cost_inclusive_risk",
                             "cash_shortfall",
                             "plan_risk_shortfall",
                             "effective_one_lot_risk_budget",
@@ -17819,7 +17827,10 @@ class StrategyRunner:
             "absolute_level"
             if (
                 metadata.get("bracket_anchor_mode") == "absolute_level"
-                and metadata.get("range_option_flow_verified") is True
+                and (
+                    metadata.get("range_option_flow_verified") is True
+                    or metadata.get("vwap_structural_invalidation") is True
+                )
             )
             or final_md["option_trade_plan_source"] == "explicit_premium_stop"
             else "distance"
@@ -19386,6 +19397,16 @@ class StrategyRunner:
                                 item for item in ranked_candidates
                                 if normalize_symbol(item.symbol) == selected_live
                             ]
+                    if metadata.get("vwap_structural_invalidation") is True:
+                        # Absolute option-price levels belong to their own
+                        # qualified contract. Other strikes require their own
+                        # independent strategy evaluation.
+                        ranked_candidates = [
+                            item
+                            for item in ranked_candidates
+                            if normalize_symbol(item.symbol)
+                            == normalize_symbol(signal.symbol)
+                        ]
                     candidate, candidate_capacity_decisions = (
                         self._select_capital_eligible_candidate(
                             ranked_candidates=ranked_candidates,
@@ -20690,6 +20711,12 @@ class StrategyRunner:
                     ),
                     "context_confirmation_evidence": metadata.get(
                         "context_confirmation_evidence"
+                    ),
+                    "vwap_reference_evidence": metadata.get(
+                        "vwap_reference_evidence"
+                    ),
+                    "vwap_signal_bar_evidence": metadata.get(
+                        "vwap_signal_bar_evidence"
                     ),
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),

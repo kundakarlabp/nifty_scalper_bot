@@ -14829,13 +14829,15 @@ class MarketDataManager:
                 fetched_rows = len(rows or [])
                 rows = list(rows or [])
                 recent_rows = rows[-requested_bars:]
-                # A mid-session tail cannot reconstruct the 09:15-09:45 range.
-                # Retain that small anchor alongside the normal recent window.
+                # Option session VWAP cannot be reconstructed from opening
+                # candles plus a late tail: the intervening traded volume is
+                # part of the weighted price. Retain the complete latest
+                # session already present in this broker response, alongside
+                # the requested recent history for readiness/indicators.
+                # No additional fetch or alternate history owner is needed.
                 if (
                     normalized.endswith(("CE", "PE"))
                     and normalized_interval == "minute"
-                    and str(os.getenv("ORB_ENABLED", "true")).strip().lower()
-                    in {"1", "true", "yes", "on"}
                     and rows
                 ):
                     timestamped_rows = [
@@ -14851,16 +14853,16 @@ class MarketDataManager:
                         session_open = latest_local.normalize() + pd.Timedelta(
                             hours=9, minutes=15
                         )
-                        cutoff = session_open + pd.Timedelta(minutes=30)
-                        opening_rows = [
+                        session_close = session_open + pd.Timedelta(minutes=375)
+                        session_rows = [
                             (timestamp, row)
                             for timestamp, row in timestamped_rows
                             if session_open
                             <= pd.Timestamp(timestamp).tz_convert("Asia/Kolkata")
-                            <= cutoff
+                            < session_close
                         ]
                         recent_timestamped = timestamped_rows[-requested_bars:]
-                        retained = dict([*opening_rows, *recent_timestamped])
+                        retained = dict([*session_rows, *recent_timestamped])
                         rows = [retained[key] for key in sorted(retained)]
                     else:
                         rows = recent_rows

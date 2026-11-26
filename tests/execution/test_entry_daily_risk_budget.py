@@ -177,9 +177,9 @@ def test_affordability_exposes_cost_adjusted_daily_loss_accounting() -> None:
 
 
 @pytest.mark.parametrize(
-    "day_loss, affordable", [(0.0, True), (500.0, False), (741.465, False)]
+    "day_loss, affordable", [(0.0, False), (500.0, False), (741.465, False)]
 )
-def test_live_risk_envelope_admits_observed_stop_but_preserves_daily_cap(
+def test_live_risk_envelope_reserves_stop_limit_buffer_within_daily_cap(
     day_loss, affordable
 ):
     balance = 14_829.30
@@ -200,6 +200,10 @@ def test_live_risk_envelope_admits_observed_stop_but_preserves_daily_cap(
     assert decision.per_trade_risk_budget == pytest.approx(741.465)
     assert decision.remaining_daily_risk_budget == pytest.approx(741.465 - day_loss)
     assert decision.plan_cost_inclusive_risk > 4.55 * 65
+    assert (
+        decision.plan_stop_limit_cost_inclusive_risk
+        > decision.effective_one_lot_risk_budget
+    )
     assert decision.affordable is affordable
 
 

@@ -8,6 +8,12 @@ from nifty_scalper_bot.execution.bracket_manager import BracketManager
 from nifty_scalper_bot.execution.order_manager import (
     _enrich_trade_plan_exit_provenance,
 )
+from nifty_scalper_bot.execution.order_manager_core import (
+    OrderDetails,
+    OrderManager,
+    OrderStatus,
+    OrderType,
+)
 
 
 def _manager() -> BracketManager:
@@ -106,6 +112,38 @@ def test_absolute_level_bracket_does_not_move_levels_on_fill() -> None:
     assert bracket.sl_trigger_price == 90.0
     assert bracket.initial_sl_trigger_price == 90.0
     assert bracket.tp_trigger_price == 120.0
+
+
+def test_repriced_broker_fill_uses_original_limit_for_bracket_geometry() -> None:
+    brackets = _manager()
+    owner = object.__new__(OrderManager)
+    owner._logger = Mock()
+    owner._bracket_manager = brackets
+    owner._notify_bracket_event = Mock()
+    order = OrderDetails(
+        order_id="entry-repriced",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=OrderType.LIMIT,
+        status=OrderStatus.FILLED,
+        price=101.0,
+        fill_price=101.0,
+        filled_quantity=65,
+        stop_loss=95.0,
+        take_profit=112.0,
+        intent="ENTRY",
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_order_original_limit_price": 100.5,
+        },
+    )
+    OrderManager._register_virtual_bracket_for_fill(owner, order, source="broker_fill")
+    bracket = brackets.get_bracket(order.order_id)
+    assert bracket is not None
+    assert bracket.entry_price == 101.0
+    assert bracket.sl_trigger_price == 95.5
+    assert bracket.tp_trigger_price == 112.5
 
 
 def test_runtime_provenance_carries_bracket_anchor_mode() -> None:

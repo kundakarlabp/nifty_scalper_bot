@@ -6,6 +6,7 @@ import pytest
 
 from nifty_scalper_bot.risk.cost_model import (
     estimate_order_cost,
+    estimate_protective_stop_limit_loss,
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
     minimum_net_reward_risk,
@@ -27,6 +28,22 @@ def test_one_way_execution_fees_reconcile_to_round_trip_model() -> None:
     )
 
     assert one_way == pytest.approx(round_trip.total)
+
+
+def test_protective_limit_reserves_loss_beyond_trigger(monkeypatch) -> None:
+    monkeypatch.setenv("STOP_LIMIT_BUFFER_PCT", "5.0")
+    loss = estimate_protective_stop_limit_loss(
+        entry_price=186.8,
+        stop_price=179.15,
+        quantity=65,
+    )
+    expected = (186.8 - 170.2) * 65 + estimate_round_trip_cost(
+        entry_price=186.8,
+        exit_price=170.2,
+        quantity=65,
+    ).total
+    assert loss == pytest.approx(expected)
+    assert loss > 767.67
 
 
 def test_cost_breakdown_components_positive() -> None:

@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping
 
 import nifty_scalper_bot.execution.operator_control as _operator_control
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.execution.affordability import _risk_budget_snapshot
 from nifty_scalper_bot.execution.entry_geometry import (
     release_prebroker_entry_reservation,
 )
@@ -47,6 +48,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
 )
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.risk.cost_model import (
+    estimate_protective_stop_limit_loss,
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
 )
@@ -332,6 +334,21 @@ def _maybe_reprice_open_entry(
     )
     if anchor_mode != "distance":
         return False
+    strategy = (
+        str(
+            provenance.get("strategy_name")
+            or provenance.get("strategy")
+            or getattr(order, "strategy_name", "")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
+    if strategy == "VWAPPRO":
+        # An order callback has no fresh strategy qualification. A new higher
+        # limit must not silently move the original reclaim thesis/target.
+        # Keep the original order's normal timeout/reconciliation unchanged.
+        return False
     count = _positive_int(provenance.get("entry_open_reprice_count"))
     try:
         max_modifications = max(
@@ -384,15 +401,18 @@ def _maybe_reprice_open_entry(
         or ask is None
         or ask < bid
         or age is None
+        or not math.isfinite(age)
+        or age < 0.0
         or age > max_age_ms
         or ask <= current_price
     ):
         return False
 
-    anchor_price = (
-        _positive_float(provenance.get("entry_open_reprice_anchor_price"))
-        or current_price
-    )
+    # Legacy/recovered orders without the original broker-limit identity
+    # cannot prove correct stop reanchoring after a modified-order fill.
+    anchor_price = _positive_float(provenance.get("entry_order_original_limit_price"))
+    if anchor_price is None:
+        return False
     try:
         max_deviation_pct = max(
             0.0,
@@ -452,6 +472,34 @@ def _maybe_reprice_open_entry(
                 economics.net_rr,
                 economics.minimum,
             )
+        return False
+
+    # Re-read canonical remaining risk before changing an accepted broker
+    # order. The earlier preflight cannot authorize higher stop-limit loss.
+    risk_owner = getattr(manager, "_risk_manager", None)
+    lot_size = _positive_int(getattr(order, "resolved_lot_size", 0))
+    try:
+        balance = float(getattr(risk_owner, "account_balance", 0.0) or 0.0)
+        budget = _risk_budget_snapshot(
+            manager,
+            lot_size,
+            available_balance=balance,
+            refresh_risk=True,
+        )[2]
+        risk_at_limit = estimate_protective_stop_limit_loss(
+            entry_price=new_price,
+            stop_price=stop_price + delta,
+            quantity=quantity,
+            half_spread=max(0.0, (ask - bid) / 4.0),
+        )
+        if (
+            budget is None
+            or not math.isfinite(float(budget))
+            or float(budget) <= 0.0
+            or risk_at_limit > float(budget) + 1e-9
+        ):
+            return False
+    except (TypeError, ValueError, OverflowError):
         return False
 
     modifier = getattr(manager, "modify_order", None)

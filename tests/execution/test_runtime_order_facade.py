@@ -1135,6 +1135,11 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_MAX_DEVIATION_PCT", "0.75")
     manager = _manager(None)
     manager.is_live_mode = lambda: True
+    manager._risk_manager = SimpleNamespace(
+        account_balance=100_000.0,
+        settings=SimpleNamespace(per_trade_risk_pct=5.0),
+        snapshot=lambda: SimpleNamespace(max_day_loss=5_000.0, day_loss=0.0),
+    )
     quote = {"bid": 100.8, "ask": 101.0, "age_ms": 10.0}
     manager._get_latest_quote_safe = lambda _symbol: dict(quote)
     manager._extract_quote_diagnostics = lambda payload: dict(payload)
@@ -1151,6 +1156,10 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
         take_profit=112.0,
         intent="ENTRY",
         resolved_lot_size=65,
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_order_original_limit_price": 100.5,
+        },
     )
     manager._orders = {entry.order_id: entry}
     manager._positions = SimpleNamespace(

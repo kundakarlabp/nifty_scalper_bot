@@ -148,6 +148,40 @@ def test_materialized_explicit_premium_stop_is_marked_absolute() -> None:
     assert out.metadata["bracket_anchor_mode"] == "absolute_level"
 
 
+def test_materialized_vwap_completed_bar_invalidation_stays_absolute() -> None:
+    runner = types.SimpleNamespace(
+        _logger=logging.getLogger("materialize-test"),
+        _validate_long_option_geometry=lambda **kwargs: kwargs["signal"],
+        _anchor_sl_tp_to_execution=lambda **kwargs: kwargs["signal"],
+    )
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY2662324050CE",
+        quantity=65,
+        confidence=1.0,
+        reason="vwap_reclaim",
+        stop_loss=97.95,
+        take_profit=114.1,
+        metadata={
+            "strategy": "VWAPPro",
+            "bracket_anchor_mode": "absolute_level",
+            "vwap_structural_invalidation": True,
+            "setup_invalidation_premium": 97.95,
+            "setup_target_premium": 114.1,
+        },
+    )
+    out = StrategyRunner._materialize_option_trade_plan(
+        runner,
+        signal,
+        execution_price=104.1,
+        atr=5.0,
+        entry_side="BUY",
+    )
+    assert out.stop_loss == 97.95
+    assert out.take_profit == 114.1
+    assert out.metadata["bracket_anchor_mode"] == "absolute_level"
+
+
 async def test_submit_reanchors_instead_of_rejecting(monkeypatch: Any) -> None:
     """End-to-end: ordinary quote drift is re-anchored, not rejected."""
     from nifty_scalper_bot.execution.order_manager import OrderPreflightResult

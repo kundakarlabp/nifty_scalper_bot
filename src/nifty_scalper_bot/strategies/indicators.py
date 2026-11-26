@@ -1069,9 +1069,10 @@ class IndicatorEngine:
                     )
                     if not bool(provisional)
                 ]
-                if filtered_pairs:
-                    prices = [pair[0] for pair in filtered_pairs]
-                    volumes = [pair[1] for pair in filtered_pairs]
+                if not filtered_pairs:
+                    return None
+                prices = [pair[0] for pair in filtered_pairs]
+                volumes = [pair[1] for pair in filtered_pairs]
 
             # Pre-check: skip calculation if all volumes are zero
             if not volumes or all(v == 0 for v in volumes):
@@ -1182,48 +1183,21 @@ class IndicatorEngine:
         return cumulative_turnover / cumulative_volume
 
     def get_session_vwap(self, symbol: str) -> float | None:
-        """Return the session-anchored VWAP for *symbol*. NEVER raises.
+        """Return a complete-session, finalized typical-price VWAP or None.
 
-        get_vwap() is a rolling `period`-bar volume-weighted mean, which is not
-        VWAP. This anchors at the session open, matching the exchange figure.
+        A short mid-session tail is not a session VWAP. Reuse the existing
+        as-of owner to require the 09:15 opening minute, contiguous finalized
+        candles and the exact timestamp. Never substitute rolling VWAP.
         """
         try:
             with self._lock:
                 history = self._histories.get(symbol)
             if history is None or len(history) == 0:
                 return None
-            timestamps = history.get_timestamps()
-            if not timestamps:
+            stamps = history.get_timestamps()
+            if not stamps:
                 return None
-            session_open, _session_close = self._session_bounds(timestamps[-1])
-            closes = history.get_closes()
-            highs = history.get_highs()
-            lows = history.get_lows()
-            volumes = history.get_volumes()
-            provisional = history.get_provisional_flags()
-            cum_pv = 0.0
-            cum_vol = 0.0
-            for index, stamp in enumerate(timestamps):
-                if stamp is None or stamp < session_open:
-                    continue
-                if provisional and index < len(provisional) and provisional[index]:
-                    continue
-                if index >= len(volumes) or index >= len(closes):
-                    continue
-                volume = float(volumes[index] or 0.0)
-                if volume <= 0:
-                    continue
-                high = (
-                    float(highs[index]) if index < len(highs) else float(closes[index])
-                )
-                low = float(lows[index]) if index < len(lows) else float(closes[index])
-                typical = (high + low + float(closes[index])) / 3.0
-                cum_pv += typical * volume
-                cum_vol += volume
-            if cum_vol <= 0:
-                return None
-            value = cum_pv / cum_vol
-            return value if value > 0 else None
+            return self.get_session_vwap_at(symbol, stamps[-1])
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 

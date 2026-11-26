@@ -6945,7 +6945,12 @@ class BracketManager:
             bracket.exit_order_id = order_id
             bracket.pending_exit_order_id = order_id
             bracket.exit_order_type = "SL"
-            bracket.exit_reason = reason
+            # Broker-confirmed stop fill, not a competing local exit intent,
+            # is the authoritative terminal exit classification.
+            if reason and reason != "exchange_protective_stop_fill":
+                bracket.trade_provenance = dict(bracket.trade_provenance or {})
+                bracket.trade_provenance["stop_fill_prior_intent"] = reason
+            bracket.exit_reason = "exchange_protective_stop_fill"
             bracket.exit_pending = True
             bracket.exit_in_progress = False
             bracket.exit_submission_inflight = False
