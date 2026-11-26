@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from nifty_scalper_bot.risk.cost_model import (
+    estimate_protective_stop_limit_loss,
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
     minimum_net_reward_risk,
@@ -36,6 +37,7 @@ class NetRRResult:
     target_cost: float
     stop_cost: float
     half_spread: float
+    stop_limit_net_risk: float | None = None
 
 
 def _positive(value: Any) -> float | None:
@@ -185,6 +187,12 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
         target_cost=economics.target_cost.total,
         stop_cost=economics.stop_cost.total,
         half_spread=half_spread,
+        stop_limit_net_risk=estimate_protective_stop_limit_loss(
+            entry_price=entry,
+            stop_price=stop,
+            quantity=quantity,
+            half_spread=cost_half_spread,
+        ),
     )
 
 

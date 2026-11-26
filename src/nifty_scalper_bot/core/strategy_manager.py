@@ -5151,6 +5151,39 @@ class StrategyManager(_BaseStrategyManager):
                 },
                 "confirming_trigger_strategies": confirming_trigger_strategies,
                 "context_confirmation_strategies": context_strategies,
+                "context_confirmation_evidence": [
+                    {
+                        "strategy": evidence.strategy,
+                        "side": evidence.side,
+                        "reasons": list(evidence.reasons),
+                        **{
+                            key: evidence.metadata[key]
+                            for key in (
+                                "vote_timestamp",
+                                "quote_update_version",
+                                "quote_update_version_source",
+                                "tick_age_ms",
+                                "context_age_seconds",
+                                "flow_confirmation_source",
+                                "context_alignment_source",
+                                "context_quality_eligible",
+                                "effective_context_alignment",
+                                "ofi_ready",
+                                "ofi_1s_normalized",
+                                "ofi_update_count_1s",
+                                "ofi_3s_normalized",
+                                "ofi_update_count_3s",
+                                "ofi_3s_span_seconds",
+                                "ofi_sustained_confirmation",
+                                "ofi_reversal_holdoff_active",
+                                "depth_imbalance",
+                                "spread_pct",
+                            )
+                            if key in evidence.metadata
+                        },
+                    }
+                    for evidence in same_side_context
+                ],
                 "excluded_unconfirmed_triggers": excluded_unconfirmed_triggers,
                 "primary_selection_policy": "first_eligible_trigger",
                 "qualified_trigger_candidates": qualified_trigger_candidates,

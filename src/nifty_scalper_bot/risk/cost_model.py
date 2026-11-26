@@ -8,6 +8,8 @@ Rates current as of June 2026 (post Budget 2026-27, effective 1 Apr 2026):
 - GST: 18% on (brokerage + exchange txn charge + SEBI charges)
 - Stamp duty: 0.003% of premium, buy side only
 
+Includes a conservative protective stop-limit execution-loss estimate.
+
 All rates are env-overridable so future Budget changes need no code edit:
 COST_BROKERAGE_PER_ORDER, COST_STT_SELL_PCT, COST_EXCH_TXN_PCT,
 COST_SEBI_PCT, COST_GST_PCT, COST_STAMP_BUY_PCT, MIN_EDGE_MULTIPLE.
@@ -20,6 +22,7 @@ import os
 from dataclasses import dataclass
 
 from nifty_scalper_bot.config.env_utils import parse_float_env
+from nifty_scalper_bot.utils.pricing import canonical_stop_limit_prices
 
 
 @dataclass(slots=True)
@@ -128,6 +131,28 @@ def estimate_round_trip_cost(
         total=total,
         cost_per_unit=total / qty,
     )
+
+
+def estimate_protective_stop_limit_loss(
+    *,
+    entry_price: float,
+    stop_price: float,
+    quantity: int,
+    half_spread: float = 0.0,
+) -> float:
+    """Reserve loss at the configured SELL stop limit, not just its trigger.
+
+    This is conditional on execution at the limit; gaps and a missed fill
+    may lose more. The estimate never changes the protective order itself.
+    """
+    _, limit = canonical_stop_limit_prices(stop_price, "SELL")
+    exit_price = min(float(stop_price), limit)
+    return (float(entry_price) - exit_price) * quantity + estimate_round_trip_cost(
+        entry_price=entry_price,
+        exit_price=exit_price,
+        quantity=quantity,
+        half_spread=half_spread,
+    ).total
 
 
 def passes_cost_edge_gate(
