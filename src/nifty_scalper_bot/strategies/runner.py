@@ -13580,60 +13580,76 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 return default
 
-        spot_snapshot = indicators_ctx.get("spot_snapshot")
-        futures_snapshot = indicators_ctx.get("futures_snapshot")
-        spot_bars = _safe_int(
-            indicators_ctx.get("spot_bars")
-            or indicators_ctx.get("context_bar_count")
-            or indicators_ctx.get("underlying_context_bar_count")
+        spot_context = indicators_ctx.get("spot_context")
+        futures_context = indicators_ctx.get("futures_context")
+        spot_context = spot_context if isinstance(spot_context, Mapping) else {}
+        futures_context = (
+            futures_context if isinstance(futures_context, Mapping) else {}
         )
-        futures_bars = _safe_int(
-            indicators_ctx.get("futures_bars")
-            or indicators_ctx.get("futures_context_bar_count")
+        spot_snapshot = indicators_ctx.get("spot_snapshot") or spot_context
+        futures_snapshot = indicators_ctx.get("futures_snapshot") or futures_context
+        spot_bars_raw = indicators_ctx.get("spot_bars")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("context_bar_count")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("underlying_context_bar_count")
+        futures_bars_raw = indicators_ctx.get("futures_bars")
+        if futures_bars_raw is None:
+            futures_bars_raw = indicators_ctx.get("futures_context_bar_count")
+        # Absent diagnostic counts are unknown, not evidence of zero bars.
+        spot_bars = _safe_int(spot_bars_raw) if spot_bars_raw is not None else None
+        futures_bars = (
+            _safe_int(futures_bars_raw) if futures_bars_raw is not None else None
         )
-        spot_fresh = not bool(
-            indicators_ctx.get("spot_stale")
-            or indicators_ctx.get("stale_context")
-            or indicators_ctx.get("context_stale")
+        spot_price = (
+            indicators_ctx.get("spot_ltp")
+            or indicators_ctx.get("spot_price")
+            or indicators_ctx.get("range_spot_ltp")
+            or spot_context.get("ltp")
         )
-        fut_fresh = not bool(
-            indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+        futures_price = (
+            indicators_ctx.get("futures_ltp")
+            or indicators_ctx.get("futures_price")
+            or futures_context.get("ltp")
         )
-        spot_vwap = indicators_ctx.get(
-            "spot_vwap",
-            indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")),
-        )
+        spot_fresh = indicators_ctx.get("spot_fresh")
+        if not isinstance(spot_fresh, bool):
+            spot_fresh = bool(spot_snapshot or spot_price) and not bool(
+                indicators_ctx.get("spot_stale")
+                or indicators_ctx.get("stale_context")
+                or indicators_ctx.get("context_stale")
+            )
+        fut_fresh = indicators_ctx.get("futures_fresh")
+        if not isinstance(fut_fresh, bool):
+            fut_fresh = bool(futures_snapshot or futures_price) and not bool(
+                indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+            )
+        # An option's own vwap/slope/volume is not NIFTY spot/futures
+        # evidence. Report only named underlying fields or their snapshots.
+        spot_vwap = indicators_ctx.get("spot_vwap")
+        if spot_vwap is None:
+            spot_vwap = spot_context.get("vwap")
         futures_vwap = indicators_ctx.get("futures_vwap")
-        futures_vwap_slope = indicators_ctx.get(
-            "futures_vwap_slope",
-            indicators_ctx.get(
-                "vwap_slope", indicators_ctx.get("underlying_vwap_slope")
-            ),
-        )
-        futures_volume_ratio = indicators_ctx.get(
-            "futures_volume_ratio",
-            indicators_ctx.get(
-                "volume_ratio", indicators_ctx.get("underlying_volume_ratio")
-            ),
-        )
+        if futures_vwap is None:
+            futures_vwap = futures_context.get("vwap")
+        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope")
+        if futures_vwap_slope is None:
+            futures_vwap_slope = futures_context.get("vwap_slope")
+        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio")
+        if futures_volume_ratio is None:
+            futures_volume_ratio = futures_context.get("futures_volume_ratio")
         regime_available = bool(
             indicators_ctx.get("regime_snapshot")
             or indicators_ctx.get("regime")
             or indicators_ctx.get("market_regime")
+            or spot_context.get("regime")
+            or futures_context.get("regime")
         )
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
-        if not bool(
-            spot_snapshot
-            or indicators_ctx.get("spot_ltp")
-            or indicators_ctx.get("spot_price")
-        ):
+        if not bool(spot_snapshot or spot_price):
             reason = "missing_spot_snapshot"
-        elif not bool(
-            futures_snapshot
-            or indicators_ctx.get("futures_ltp")
-            or indicators_ctx.get("futures_price")
-        ):
+        elif not bool(futures_snapshot or futures_price):
             reason = "missing_futures_snapshot"
         elif (
             not spot_fresh
@@ -13645,9 +13661,15 @@ class StrategyRunner:
         ):
             reason = "stale_context"
         elif bool(indicators_ctx.get("insufficient_context_bars")) or (
-            required_bars > 0 and spot_bars < required_bars
+            required_bars > 0 and spot_bars is not None and spot_bars < required_bars
         ):
             reason = "insufficient_context_bars"
+        elif indicators_ctx.get("direction_resolution_reason") not in (
+            None,
+            "",
+            "unavailable",
+        ):
+            reason = str(indicators_ctx["direction_resolution_reason"])
         elif spot_vwap is None and futures_vwap is None:
             reason = "missing_vwap"
         elif futures_vwap_slope is None:
@@ -13657,9 +13679,11 @@ class StrategyRunner:
         elif not regime_available:
             reason = "missing_regime_snapshot"
         else:
-            reason = "unknown"
+            reason = "underlying_direction_unresolved"
         return reason, {
             "reason_detail": reason,
+            "spot_direction_reasons": spot_context.get("direction_context_reasons"),
+            "futures_direction_reasons": futures_context.get("direction_context_reasons"),
             "spot_fresh": spot_fresh,
             "fut_fresh": fut_fresh,
             "spot_bars": spot_bars,
@@ -16307,13 +16331,34 @@ class StrategyRunner:
                         context_ctx = self._underlying_context_from_strategy_manager()
                         if context_ctx:
                             runtime_ctx.update(context_ctx)
+                        live_direction_mode = (
+                            str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                            == "LIVE"
+                        )
+                        if live_direction_mode and not context_ctx:
+                            # No authoritative snapshots: evict any prior
+                            # indicator direction before live arbitration.
+                            runtime_ctx.update(
+                                direction_bias=None,
+                                underlying_direction_bias=None,
+                                underlying_direction_confidence=None,
+                                context_fresh=False,
+                            )
                         existing_bias = (
                             runtime_ctx.get("direction_bias")
                             or runtime_ctx.get("underlying_direction_bias")
-                            or indicators_ctx.get("direction_bias")
-                            or indicators_ctx.get("underlying_direction_bias")
-                            or getattr(self, "_latest_direction_bias", None)
                         )
+                        # In LIVE mode only the current, timestamp-checked
+                        # spot/futures snapshots may authorize direction.
+                        # An older option indicator or prior runner bias can
+                        # otherwise resurrect a CE/PE vote after the current
+                        # authorities turn neutral or disagree.
+                        if not existing_bias and not live_direction_mode:
+                            existing_bias = (
+                                indicators_ctx.get("direction_bias")
+                                or indicators_ctx.get("underlying_direction_bias")
+                                or getattr(self, "_latest_direction_bias", None)
+                            )
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
                             runtime_ctx["underlying_direction_bias"] = str(
@@ -16599,12 +16644,7 @@ class StrategyRunner:
                         }
                         self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh, fut_fresh, context_fresh = resolve_entry_context_freshness(indicators_ctx)
-                        live_mode = (
-                            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW")
-                            .strip()
-                            .upper()
-                            == "LIVE"
-                        )
+                        live_mode = live_direction_mode
                         reversal_capability = getattr(
                             self._strategy_manager,
                             "can_evaluate_verified_reversal",
