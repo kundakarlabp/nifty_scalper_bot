@@ -323,6 +323,33 @@ def test_postmarket_changed_archive_hash_invalidates_counterfactuals(
     assert persisted["status"] == "unavailable"
 
 
+def test_markouts_reject_tape_changed_during_excursion_pass(tmp_path, monkeypatch):
+    from scripts.reporting import rejected_setup_forward_markout as markout
+
+    path, _ = _session(tmp_path)
+    original = markout.load_excursion_quote_paths
+
+    def mutate_after_read(tape):
+        result = original(tape)
+        with tape.open("ab") as handle:
+            handle.write(b"\n")
+        return result
+
+    monkeypatch.setattr(markout, "load_excursion_quote_paths", mutate_after_read)
+    report = build_session_research_report(
+        session_date=DECISION.date(),
+        journal=_journal(),
+        replay_path=path,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "changed.json",
+    )
+    assert report["status"] == "unavailable"
+    assert report["blocker"] == "replay_archive_changed_between_passes"
+    assert report["sampled_observations"] == []
+    assert report["range_excursion_horizons"] == []
+    assert report["eligible_for_entry_filter_change"] is False
+
+
 def test_session_decisions_are_scoped_by_ist_midnight_not_utc() -> None:
     midnight_ist = datetime(2026, 11, 2, 18, 30, tzinfo=timezone.utc)
     end_ist = midnight_ist + timedelta(days=1)

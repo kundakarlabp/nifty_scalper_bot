@@ -155,3 +155,38 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
         "archived": False,
         "reason": "already_finalized",
     }
+
+
+def test_transient_replay_failure_retries_once_then_finalizes() -> None:
+    calls = []
+    research_calls = []
+
+    def research(day, _journal):
+        research_calls.append(day)
+        return {
+            "date_ist": day.isoformat(),
+            "status": "unavailable",
+            "blocker": "replay_archive_changed_between_passes",
+            "replay_sha256": None,
+            "independent_setup_count": 0,
+            "sampled_observations": [],
+            "sampled_strata": [],
+            "structural_strata": [],
+            "volume_parity": {},
+        }
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        log_reader=lambda _start, _end: "journal",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        research_runner=research,
+    )
+    first = archiver.archive_once(datetime(2026, 11, 3, 15, 35, tzinfo=IST))
+    second = archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST))
+    third = archiver.archive_once(datetime(2026, 11, 3, 15, 45, tzinfo=IST))
+    assert first["finalized"] is False
+    assert second["finalized"] is True
+    assert third == {"archived": False, "reason": "already_finalized"}
+    assert len(research_calls) == 2
+    assert len(calls) == 2

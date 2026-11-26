@@ -4,7 +4,8 @@ Responsibilities:
 - build_daily_log_archiver uses GitHub-owned Supabase monitoring defaults.
 - DailyLogArchiver.archive_once snapshots bounded IST journald sessions.
 - Include source-only startup/recovery evidence in the existing archive summary.
-- Archive bounded post-close parity and exact-contract markout summaries.
+- Archive bounded post-close parity and exact-contract markout summaries;
+  retry transient replay settlement failures once before finalizing.
 - archive_interval_seconds enforces a minimum reporting interval.
 
 Boundaries: Observability only; the local journal/engine remain authoritative.
@@ -86,6 +87,7 @@ class DailyLogArchiver:
             research_runner = run_postmarket_research
         self._research_runner = research_runner
         self._finalized_session_date: date | None = None
+        self._research_retry_date: date | None = None
 
     def archive_once(self, now: datetime | None = None) -> dict[str, Any]:
         current = (now or datetime.now(timezone.utc)).astimezone(_IST)
@@ -125,6 +127,7 @@ class DailyLogArchiver:
         # Keep replay and integrity sidecars out of the remote payload.
         # Run only after the final options session and writer settle window;
         # append bounded results to the already-authorized journal transport.
+        retry_research = False
         if settled and self._research_runner is not None:
             try:
                 from nifty_scalper_bot.infra.market_research_report import (
@@ -132,6 +135,15 @@ class DailyLogArchiver:
                 )
 
                 research = self._research_runner(session_date, text)
+                retry_research = (
+                    self._research_retry_date != session_date
+                    and research.get("status") == "unavailable"
+                    and research.get("blocker")
+                    in {
+                        "replay_capture_writer_not_settled",
+                        "replay_archive_changed_between_passes",
+                    }
+                )
                 lines_for_archive = research_report_log_lines(research)
             except Exception as exc:  # noqa: BLE001 - archive must survive
                 LOGGER.warning(
@@ -162,11 +174,13 @@ class DailyLogArchiver:
             "startup_audit": audit_session_startups(text),
             "first_log_at": start.astimezone(timezone.utc).isoformat(),
             "last_log_at": end.astimezone(timezone.utc).isoformat(),
-            "finalized": settled,
+            "finalized": settled and not retry_research,
         }
         response = self._transport(self._endpoint_url, payload, self._timeout_seconds)
         if response.get("ok") is not True:
             raise RuntimeError(f"daily log archive rejected: {response}")
+        if retry_research:
+            self._research_retry_date = session_date
         if payload["finalized"]:
             self._finalized_session_date = session_date
         return {
