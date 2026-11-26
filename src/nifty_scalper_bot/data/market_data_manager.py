@@ -12,8 +12,9 @@ Runtime role:
 - Rejects wrong-token and retired-generation queued ticks before candle mutation;
   preserves original ingress receipt time through normalized quote delivery.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
-  drains ordered ticks on a dedicated serial worker rather than the shared
-  asyncio executor, and exports bounded tick latency percentiles.
+  drains bounded ordered batches on a dedicated serial worker rather than the
+  shared asyncio executor, and exports bounded latency percentiles (worker
+  dispatch/await samples are per batch; individual tick samples remain per tick).
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -7973,61 +7974,28 @@ class MarketDataManager:
         awaited_worker_s = 0.0
         processed_in_invocation = 0
 
-        def _run_tick_on_worker(
-            tick_payload: dict[str, Any], scheduled_at: float
-        ) -> None:
-            # Worker-await wall time includes dispatch and processing time.
-            # This measurement starts on the actual worker thread, before the
-            # indivisible tick is processed; order and ownership are unchanged.
+        def _run_batch_on_worker(
+            batch: list[dict[str, Any]], scheduled_at: float, remaining: int
+        ) -> int:
+            # One bounded serial dispatch, not one executor round trip per tick.
             dispatch_wait_ms = (time.perf_counter() - scheduled_at) * 1000.0
             self._record_tick_latency("worker_dispatch_wait", dispatch_wait_ms)
             if dispatch_wait_ms >= 50.0:
                 self._log_slow_tick_stage(
                     stage="worker_dispatch_wait",
-                    symbol=str(tick_payload.get("symbol") or "") or None,
+                    symbol=str(batch[0].get("symbol") or "") or None,
                     duration_ms=dispatch_wait_ms,
-                    source=str(tick_payload.get("source") or "ws"),
+                    source=str(batch[0].get("source") or "ws"),
                 )
-            self._process_queued_tick(tick_payload)
-        with self._pending_tick_lock:
-            self._tick_active_drains += 1
-            self._tick_max_active_drains = max(
-                self._tick_max_active_drains, self._tick_active_drains
-            )
-        try:
-            while True:
-                start = time.monotonic()
-                batch = self._pop_pending_tick_batch()
-                if not batch:
-                    return
-                for index, raw in enumerate(batch):
+            processed = 0
+            consumed = 0
+            try:
+                for raw in batch[:remaining]:
+                    consumed += 1
                     try:
-                        # A tick can synchronously finalize a candle and fan
-                        # out through DataHub/Runner. Keep strict serial order,
-                        # but move that indivisible work off the asyncio owner.
-                        worker_started = time.monotonic()
-                        worker_scheduled_at = time.perf_counter()
-                        try:
-                            await asyncio.get_running_loop().run_in_executor(
-                                self._tick_executor,
-                                copy_context().run,
-                                _run_tick_on_worker,
-                                raw,
-                                worker_scheduled_at,
-                            )
-                        finally:
-                            # This is time suspended awaiting a worker, NOT
-                            # proof that the owner event loop was blocked.
-                            worker_ms = (time.monotonic() - worker_started) * 1000.0
-                            awaited_worker_s += worker_ms / 1000.0
-                            self._record_tick_latency("worker_await", worker_ms)
+                        self._process_queued_tick(raw)
                         self._tick_processed_total += 1
-                        processed_in_invocation += 1
-                    except asyncio.CancelledError:
-                        # A running worker cannot be cancelled. Requeueing raw
-                        # here could therefore apply the same tick twice.
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
-                        raise
+                        processed += 1
                     except Exception as exc:
                         self._record_tick_drop(
                             str(raw.get("_mdm_priority_bucket") or "unknown"),
@@ -8036,12 +8004,57 @@ class MarketDataManager:
                         self._logger.error(
                             "MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True
                         )
-                    if processed_in_invocation >= self._tick_drain_invocation_max_ticks:
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
-                        return
-                    if time.monotonic() - start >= self._tick_drain_budget_s:
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
+                    if (
+                        self._tick_drain_stopping
+                        or time.perf_counter() - scheduled_at
+                        >= self._tick_drain_budget_s
+                    ):
                         break
+            finally:
+                # The worker owns the popped prefix even if its waiter cancels.
+                self._requeue_unprocessed_ticks(batch[consumed:])
+            return processed
+
+        with self._pending_tick_lock:
+            self._tick_active_drains += 1
+            self._tick_max_active_drains = max(
+                self._tick_max_active_drains, self._tick_active_drains
+            )
+        try:
+            while True:
+                batch = self._pop_pending_tick_batch()
+                if not batch:
+                    return
+                remaining = (
+                    self._tick_drain_invocation_max_ticks - processed_in_invocation
+                )
+                worker_started = time.monotonic()
+                worker_scheduled_at = time.perf_counter()
+                try:
+                    worker = asyncio.get_running_loop().run_in_executor(
+                        self._tick_executor,
+                        copy_context().run,
+                        _run_batch_on_worker,
+                        batch,
+                        worker_scheduled_at,
+                        remaining,
+                    )
+                except Exception:
+                    self._requeue_unprocessed_ticks(batch)
+                    raise
+                try:
+                    processed_in_invocation += await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Do not reschedule or release the single-owner drain while
+                    # an uncancellable worker still owns these reserved ticks.
+                    await worker
+                    raise
+                finally:
+                    worker_ms = (time.monotonic() - worker_started) * 1000.0
+                    awaited_worker_s += worker_ms / 1000.0
+                    self._record_tick_latency("worker_await", worker_ms)
+                if processed_in_invocation >= self._tick_drain_invocation_max_ticks:
+                    return
                 if (
                     time.monotonic() - drain_started
                     >= self._tick_drain_invocation_budget_s

@@ -314,3 +314,84 @@ def test_datahub_generic_tick_still_uses_full_canonicalization(monkeypatch) -> N
     )
 
     assert stamp_calls >= 1
+
+
+def test_full_five_level_book_reaches_runner_preflight_and_adaptive_exit() -> None:
+    from nifty_scalper_bot.execution.market_aware_profit_extension import (
+        _adaptive_executable_bid,
+    )
+    from nifty_scalper_bot.execution.order_manager import OrderManager, TradePlan
+    from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
+
+    mdm, selected, _far = _wire_mdm()
+    hub = DataHub(mdm)
+    now = datetime.now(timezone.utc)
+    book = {
+        "buy": [
+            {"price": round(123.40 - i * 0.05, 2), "quantity": 65 * (i + 1)}
+            for i in range(5)
+        ],
+        "sell": [
+            {"price": round(123.50 + i * 0.05, 2), "quantity": 65 * (i + 1)}
+            for i in range(5)
+        ],
+    }
+    delivered: list[dict] = []
+    hub.subscribe_ticks(selected, delivered.append, token=1)
+    assert hub.flush_pending_live_subscriptions() == 1
+    assert mdm.has_subscription(selected, hub.ingest_tick_sync)
+    raw = {
+        "instrument_token": 1,
+        "last_price": 123.45,
+        "exchange_timestamp": now,
+        "depth": book,
+        "source": "ws",
+    }
+    normalized = mdm._normalize_ws_tick(raw)
+    assert normalized is not None
+    live = mdm.normalize_live_tick(normalized, source="ws")
+    assert live is not None
+    mdm._emit_tick(selected, live, source="ws")
+    assert delivered[-1]["depth"] == book
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._data_hub = hub
+    quote = runner._get_cached_quote_for_live_entry(selected)
+    assert quote["depth"] == book
+    verdict = evaluate_execution_quote(
+        selected,
+        quote,
+        live_mode=True,
+        max_tick_age_ms=2000,
+        max_spread_pct=1.0,
+        require_depth=True,
+    )
+    assert verdict.allowed
+
+    order = object.__new__(OrderManager)
+    diagnostics = order._extract_quote_diagnostics(quote)
+    assert diagnostics["bid_qty"] == 65
+    assert diagnostics["ask_qty"] == 65
+    plan = TradePlan(
+        symbol=selected,
+        side="BUY",
+        quantity=65,
+        entry_price=123.50,
+        stop_loss=115.0,
+        take_profit=140.0,
+    )
+    assert order._validate_live_entry_quote(plan, diagnostics) is None
+
+    protection = types.SimpleNamespace(
+        _market_data=hub,
+        _is_live_execution=lambda: True,
+        _exit_quotes={selected: (123.40, 123.50, now.timestamp())},
+    )
+    bracket = types.SimpleNamespace(symbol=selected, remaining_quantity=65)
+    result = _adaptive_executable_bid(protection, bracket)
+    assert result is not None
+    assert result[0] == 123.40
+    assert result[2]["depth"] == book
+    bracket.remaining_quantity = 130
+    assert _adaptive_executable_bid(protection, bracket) is None
+    hub.close()
