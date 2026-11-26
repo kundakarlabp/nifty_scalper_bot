@@ -1195,9 +1195,23 @@ class IndicatorEngine:
             if history is None or len(history) == 0:
                 return None
             stamps = history.get_timestamps()
-            if not stamps:
+            complete = history.get_completeness()
+            provisional = history.get_provisional_flags()
+            if not stamps or len(complete) != len(stamps) or len(provisional) != len(stamps):
                 return None
-            return self.get_session_vwap_at(symbol, stamps[-1])
+            session_open, session_close = self._session_bounds(stamps[-1])
+            for index in range(len(stamps) - 1, -1, -1):
+                stamp = stamps[index]
+                if not session_open <= stamp < session_close:
+                    break
+                if complete[index] and not provisional[index]:
+                    # The current live minute is frequently unfinished. Use
+                    # its immediately preceding closed bar, never an older
+                    # stale bar or a prior day's VWAP.
+                    if stamps[-1] - stamp > timedelta(minutes=1):
+                        return None
+                    return self.get_session_vwap_at(symbol, stamp)
+            return None
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 

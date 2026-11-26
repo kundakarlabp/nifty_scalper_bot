@@ -13580,8 +13580,14 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 return default
 
-        spot_snapshot = indicators_ctx.get("spot_snapshot")
-        futures_snapshot = indicators_ctx.get("futures_snapshot")
+        spot_context = indicators_ctx.get("spot_context")
+        futures_context = indicators_ctx.get("futures_context")
+        spot_context = spot_context if isinstance(spot_context, Mapping) else {}
+        futures_context = (
+            futures_context if isinstance(futures_context, Mapping) else {}
+        )
+        spot_snapshot = indicators_ctx.get("spot_snapshot") or spot_context
+        futures_snapshot = indicators_ctx.get("futures_snapshot") or futures_context
         spot_bars = _safe_int(
             indicators_ctx.get("spot_bars")
             or indicators_ctx.get("context_bar_count")
@@ -13591,31 +13597,43 @@ class StrategyRunner:
             indicators_ctx.get("futures_bars")
             or indicators_ctx.get("futures_context_bar_count")
         )
-        spot_fresh = not bool(
-            indicators_ctx.get("spot_stale")
-            or indicators_ctx.get("stale_context")
-            or indicators_ctx.get("context_stale")
+        spot_price = (
+            indicators_ctx.get("spot_ltp")
+            or indicators_ctx.get("spot_price")
+            or indicators_ctx.get("range_spot_ltp")
+            or spot_context.get("ltp")
         )
-        fut_fresh = not bool(
-            indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+        futures_price = (
+            indicators_ctx.get("futures_ltp")
+            or indicators_ctx.get("futures_price")
+            or futures_context.get("ltp")
         )
-        spot_vwap = indicators_ctx.get(
-            "spot_vwap",
-            indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")),
-        )
+        spot_fresh = indicators_ctx.get("spot_fresh")
+        if not isinstance(spot_fresh, bool):
+            spot_fresh = bool(spot_snapshot or spot_price) and not bool(
+                indicators_ctx.get("spot_stale")
+                or indicators_ctx.get("stale_context")
+                or indicators_ctx.get("context_stale")
+            )
+        fut_fresh = indicators_ctx.get("futures_fresh")
+        if not isinstance(fut_fresh, bool):
+            fut_fresh = bool(futures_snapshot or futures_price) and not bool(
+                indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+            )
+        # An option's own vwap/slope/volume is not NIFTY spot/futures
+        # evidence. Report only named underlying fields or their snapshots.
+        spot_vwap = indicators_ctx.get("spot_vwap")
+        if spot_vwap is None:
+            spot_vwap = spot_context.get("vwap")
         futures_vwap = indicators_ctx.get("futures_vwap")
-        futures_vwap_slope = indicators_ctx.get(
-            "futures_vwap_slope",
-            indicators_ctx.get(
-                "vwap_slope", indicators_ctx.get("underlying_vwap_slope")
-            ),
-        )
-        futures_volume_ratio = indicators_ctx.get(
-            "futures_volume_ratio",
-            indicators_ctx.get(
-                "volume_ratio", indicators_ctx.get("underlying_volume_ratio")
-            ),
-        )
+        if futures_vwap is None:
+            futures_vwap = futures_context.get("vwap")
+        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope")
+        if futures_vwap_slope is None:
+            futures_vwap_slope = futures_context.get("vwap_slope")
+        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio")
+        if futures_volume_ratio is None:
+            futures_volume_ratio = futures_context.get("futures_volume_ratio")
         regime_available = bool(
             indicators_ctx.get("regime_snapshot")
             or indicators_ctx.get("regime")
@@ -13624,15 +13642,11 @@ class StrategyRunner:
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
         if not bool(
-            spot_snapshot
-            or indicators_ctx.get("spot_ltp")
-            or indicators_ctx.get("spot_price")
+            spot_snapshot or spot_price
         ):
             reason = "missing_spot_snapshot"
         elif not bool(
-            futures_snapshot
-            or indicators_ctx.get("futures_ltp")
-            or indicators_ctx.get("futures_price")
+            futures_snapshot or futures_price
         ):
             reason = "missing_futures_snapshot"
         elif (
@@ -13648,6 +13662,12 @@ class StrategyRunner:
             required_bars > 0 and spot_bars < required_bars
         ):
             reason = "insufficient_context_bars"
+        elif indicators_ctx.get("direction_resolution_reason") not in (
+            None,
+            "",
+            "unavailable",
+        ):
+            reason = str(indicators_ctx["direction_resolution_reason"])
         elif spot_vwap is None and futures_vwap is None:
             reason = "missing_vwap"
         elif futures_vwap_slope is None:
@@ -13657,9 +13677,11 @@ class StrategyRunner:
         elif not regime_available:
             reason = "missing_regime_snapshot"
         else:
-            reason = "unknown"
+            reason = "underlying_direction_unresolved"
         return reason, {
             "reason_detail": reason,
+            "spot_direction_reasons": spot_context.get("direction_context_reasons"),
+            "futures_direction_reasons": futures_context.get("direction_context_reasons"),
             "spot_fresh": spot_fresh,
             "fut_fresh": fut_fresh,
             "spot_bars": spot_bars,
