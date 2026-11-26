@@ -998,9 +998,11 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             "blocker": (
                 "replay_archive_changed_between_passes"
                 if archive_changed
-                else str(exc)[:110]
-                if isinstance(exc, ValueError)
-                else type(exc).__name__
+                else (
+                    str(exc)[:110]
+                    if isinstance(exc, ValueError)
+                    else type(exc).__name__
+                )
             ),
             "archive_integrity_verified": False,
             "full_session_selected_coverage_proven": False,
