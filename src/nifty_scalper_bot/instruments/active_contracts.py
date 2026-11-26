@@ -1,6 +1,7 @@
 """Runtime role:
 - Parsing/canonicalization utilities for active contract diagnostics.
 - Runtime active contract selection belongs to InstrumentManager.
+- The bounded live universe can prefer OTM strikes at equal ATM distance.
 - Must not derive live futures from selected options."""
 
 from __future__ import annotations
@@ -227,10 +228,13 @@ def cap_option_universe(
     selected_pe: str,
     atm_strike: float,
     max_options: int,
+    prefer_otm: bool = False,
 ) -> list[tuple[str, int, float, str]]:
     """Args: (symbol, token, strike, side) items, selected pair, atm, cap.
     Returns: capped list always containing selected CE/PE, remaining slots
-    filled by strikes nearest to ATM alternating CE/PE. Raises: none.
+    filled by strikes nearest to ATM alternating CE/PE. When prefer_otm is
+    enabled, ties favor OTM on each side, without increasing the cap.
+    Raises: none.
 
     Single global cap for the active option universe. Applying it where the
     basket is built means DataHub, MDM, WS subscriptions, runner registration,
@@ -249,11 +253,11 @@ def cap_option_universe(
     remaining = [item for item in option_items if item[0] not in seen]
     ce_ranked = sorted(
         (i for i in remaining if i[3] == "CE"),
-        key=lambda i: abs(i[2] - atm_strike),
+        key=lambda i: (abs(i[2] - atm_strike), prefer_otm and i[2] < atm_strike),
     )
     pe_ranked = sorted(
         (i for i in remaining if i[3] == "PE"),
-        key=lambda i: abs(i[2] - atm_strike),
+        key=lambda i: (abs(i[2] - atm_strike), prefer_otm and i[2] > atm_strike),
     )
     take_ce = True
     while len(capped) < max_options and (ce_ranked or pe_ranked):

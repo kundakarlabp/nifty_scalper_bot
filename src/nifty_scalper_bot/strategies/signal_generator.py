@@ -29,6 +29,9 @@ from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_futur
 from nifty_scalper_bot.strategies.futures_volume_quality import (
     analyze_completed_futures_volume,
 )
+from nifty_scalper_bot.strategies.quote_update_identity import (
+    resolve_quote_update_identity,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -1121,6 +1124,9 @@ class StrategyManager:
         self._last_futures_volume: float | None = None
         self._last_futures_volume_date: dt.date | None = None
         self._last_futures_volume_symbol: str | None = None
+        self._last_futures_volume_version: int | None = None
+        self._last_futures_volume_ratio: float | None = None
+        self._last_futures_volume_avg: float | None = None
         self._last_index_ltp: float | None = None
         self._last_index_vwap: float | None = None
         self._last_index_update_ts: float | None = None
@@ -1826,15 +1832,36 @@ class StrategyManager:
                 )
                 volume_delta: float | None = None
                 trusted = True
+                version, _ = resolve_quote_update_identity(("futures_quote", quote))
+                duplicate = bool(
+                    same_stream
+                    and volume == self._last_futures_volume
+                    and version is not None
+                    and version == self._last_futures_volume_version
+                )
 
                 if not same_stream or self._last_futures_volume is None:
                     self._futures_volume_history.clear()
                     self._last_futures_volume = volume
                     self._last_futures_volume_symbol = active_future
                     self._last_futures_volume_date = current_date
+                    self._last_futures_volume_version = version
+                    self._last_futures_volume_ratio = None
+                    self._last_futures_volume_avg = None
+                elif duplicate:
+                    # Multiple option/context evaluations read the same quote.
+                    # Reuse its measurement without appending synthetic zeroes.
+                    indicators["futures_volume_avg"] = self._last_futures_volume_avg
+                    indicators["futures_volume_ratio"] = self._last_futures_volume_ratio
                 elif volume >= self._last_futures_volume:
-                    volume_delta = volume - self._last_futures_volume
+                    # An unversioned unchanged counter does not prove a new
+                    # observation. Preserve the baseline without inventing a delta.
+                    if volume > self._last_futures_volume or version is not None:
+                        volume_delta = volume - self._last_futures_volume
                     self._last_futures_volume = volume
+                    self._last_futures_volume_version = version
+                    self._last_futures_volume_ratio = None
+                    self._last_futures_volume_avg = None
                 else:
                     trusted = False
                     self._logger.warning(
@@ -1863,9 +1890,11 @@ class StrategyManager:
                         self._futures_volume_history
                     )
                     indicators["futures_volume_avg"] = avg
+                    self._last_futures_volume_avg = avg
                     if avg > 0:
                         indicators["futures_volume_ratio"] = volume_delta / avg
-                        self._logger.info(
+                        self._last_futures_volume_ratio = volume_delta / avg
+                        self._logger.debug(
                             "Condition met: futures_volume_ratio_updated",
                             extra={
                                 "event": "futures_volume_ratio_updated",

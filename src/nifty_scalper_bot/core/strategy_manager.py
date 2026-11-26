@@ -15,6 +15,7 @@ Runtime role:
   actual reversal admission remains owned by the verified range vote contract.
 - _derive_context_direction applies an ATR-scaled floor to EMA spreads and
   percentage-normalized VWAP slopes; material conflicts still fail closed.
+- Context snapshots retain actual same-contract market time and quote VWAP.
 
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
@@ -95,7 +96,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
-from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
+from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy, quote_timestamp_quality_allows_hard_readiness
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
 
 log = get_logger(__name__)
@@ -128,6 +129,8 @@ def _context_snapshot_fresh(
     ctx: t.Mapping[str, t.Any], *, max_age_seconds: float, now_ts: float
 ) -> bool:
     """Only valid non-future underlying timestamps may prove freshness."""
+    if ctx.get("context_market_time_valid") is False:
+        return False
     raw_tick_ts_ms = ctx.get("last_tick_ts_ms")
     if raw_tick_ts_ms not in (None, "", 0, 0.0):
         try:
@@ -136,8 +139,10 @@ def _context_snapshot_fresh(
             return False
         # A future real tick cannot be rescued by cached quote-age or a
         # different fallback timestamp.
-        if not isfinite(tick_ts_ms) or tick_ts_ms > now_ts * 1000.0:
+        if not isfinite(tick_ts_ms) or tick_ts_ms <= 0 or tick_ts_ms > now_ts * 1000.0:
             return False
+        if tick_ts_ms > 10_000_000_000:
+            return now_ts - tick_ts_ms / 1000.0 <= max_age_seconds
     age_seconds = resolve_tick_age_seconds(ctx)
     if age_seconds is not None:
         return isfinite(age_seconds) and 0.0 <= age_seconds <= max_age_seconds
@@ -2346,7 +2351,36 @@ class StrategyManager(_BaseStrategyManager):
                 ema_50 = _history_ema(50)
                 if ema_50 is not None:
                     ema_50_source = "indicator_engine_history"
+        # The context-only fast path does not run option quote enrichment.
+        # Read the same underlying contract from the canonical cached facade.
+        hub = getattr(self, "_data_hub", None)
+        quote = None
+        if hub is not None:
+            try:
+                quote = _get_cached_quote_for_eval(hub, symbol)
+            except Exception:  # noqa: BLE001 - missing proof remains unavailable
+                quote = None
+        quote_ms = _safe_float_value((quote or {}).get("last_tick_ts_ms") or (quote or {}).get("timestamp_ms"))
+        market_time_valid = bool(quote_ms is not None and isfinite(quote_ms) and quote_ms > 10_000_000_000 and quote_ms <= time.time() * 1000.0 and quote_timestamp_quality_allows_hard_readiness(dict(quote or {})))
+        require_market_time = hub is not None and os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+        quote_ltp = _safe_float_value((quote or {}).get("ltp") or (quote or {}).get("last_price"))
+        quote_vwap = _safe_float_value((quote or {}).get("vwap") or (quote or {}).get("average_price"))
+        live_price = quote_ltp if market_time_valid and quote_ltp is not None and isfinite(quote_ltp) and quote_ltp > 0 else _num("ltp", "close", "price")
+        exchange_vwap = quote_vwap if role == "futures_context" and market_time_valid and quote_vwap is not None and isfinite(quote_vwap) and quote_vwap > 0 else None
+        market_now = time.time()
+        market_epoch = quote_ms / 1000.0 if market_time_valid else (None if require_market_time else market_now)
+        history_bars = None
+        history_counter = getattr(getattr(self, "_indicator_engine", None), "history_count", None)
+        if callable(history_counter):
+            try:
+                history_bars = max(0, int(history_counter(symbol)))
+            except (TypeError, ValueError, OverflowError):
+                pass
         direction_inputs = dict(indicators)
+        if live_price is not None:
+            direction_inputs.update(ltp=live_price, price=live_price)
+        if exchange_vwap is not None:
+            direction_inputs["exchange_vwap"] = exchange_vwap
         direction_inputs.update(
             futures_volume_ratio=futures_volume_ratio,
             vwap_slope=vwap_slope,
@@ -2359,6 +2393,8 @@ class StrategyManager(_BaseStrategyManager):
             direction_inputs,
             role=role,
         )
+        if require_market_time and (market_epoch is None or market_now - market_epoch > self._live_context_max_age_seconds()):
+            derived_direction, derived_confidence, derived_reasons = None, 0.0, ["underlying_market_time_unavailable_or_stale"]
         stabilised = self._stabilize_context_direction(
             symbol=symbol,
             role=role,
@@ -2372,14 +2408,17 @@ class StrategyManager(_BaseStrategyManager):
         self._context_snapshot_version = int(getattr(self, "_context_snapshot_version", 0) or 0) + 1
         snapshot_version = self._context_snapshot_version
         snapshot = {
-            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
+            "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": market_epoch,
             "context_snapshot_version": snapshot_version,
-            "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
-            "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
+            "history_bars": history_bars,
+            "ltp": live_price, "close": _num("close", "ltp", "price"),
+            "last_tick_ts_ms": quote_ms if market_time_valid else None,
+            "context_market_time_valid": market_time_valid if require_market_time or quote_ms is not None else None,
+            "vwap": exchange_vwap if exchange_vwap is not None else _num("exchange_vwap", "session_vwap", "vwap"),
             "vwap_source": (
                 "active_future_quote_vwap"
                 if role == "futures_context"
-                and _num("exchange_vwap") is not None
+                and (exchange_vwap is not None or (not require_market_time and _num("exchange_vwap") is not None))
                 else "unverified_derived"
             ),
             "ema_fast": ema_fast,
@@ -2395,7 +2434,7 @@ class StrategyManager(_BaseStrategyManager):
             "underlying_direction_confidence": derived_confidence,
             "direction_score_kind": "evidence_corroboration_not_probability",
             "direction_context_reasons": derived_reasons,
-            "context_timestamp_epoch": time.time(),
+            "context_timestamp_epoch": market_epoch,
             "regime": indicators.get("regime") or indicators.get("market_regime"),
             "futures_volume_ratio_source": futures_volume_ratio_source,
             "vwap_slope_source": vwap_slope_source,
@@ -2977,7 +3016,8 @@ class StrategyManager(_BaseStrategyManager):
                 reasons = tuple(regime_manager.get_filter_reasons())
                 regime_allowed = bool(allowed)
                 regime_reasons = tuple(reasons)
-                regime_snapshot = regime_manager.get_latest_snapshot()
+                execution_snapshot = getattr(regime_manager, "get_execution_snapshot", None)
+                regime_snapshot = execution_snapshot() if callable(execution_snapshot) else regime_manager.get_latest_snapshot()
                 self._log_regime_gate_decision(
                     symbol=symbol,
                     allowed=allowed,
@@ -3021,8 +3061,10 @@ class StrategyManager(_BaseStrategyManager):
             if isinstance(regime_snapshot, RegimeSnapshot)
             else None
         )
+        stable_regime_name = regime_name
         raw_regime_snapshot = None
         if regime_manager is not None:
+            stable_regime_name = getattr(regime_manager.get_latest_snapshot(), "regime", None)
             raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
             if callable(raw_getter):
                 raw_regime_snapshot = raw_getter()
@@ -3031,13 +3073,15 @@ class StrategyManager(_BaseStrategyManager):
         regime_decision_action = (
             "manager_allowed" if regime_allowed is True else "unavailable"
         )
+        if regime_allowed is True and raw_regime_name is not None and stable_regime_name != raw_regime_name:
+            regime_decision_action = "transition_pending"
         if regime_manager is not None:
             log_throttled(
                 log,
                 f"regime_decision_context:{symbol}",
                 "REGIME_DECISION_CONTEXT symbol=%s stable=%s raw=%s raw_reason=%s manager_allowed=%s action=%s scale=%.3f",
                 symbol,
-                regime_name,
+                stable_regime_name,
                 raw_regime_name,
                 raw_regime_reason,
                 regime_allowed,
@@ -3047,7 +3091,8 @@ class StrategyManager(_BaseStrategyManager):
                 extra={
                     "event": "REGIME_DECISION_CONTEXT",
                     "symbol": symbol,
-                    "stable_regime": regime_name,
+                    "stable_regime": stable_regime_name,
+                    "effective_regime": regime_name,
                     "raw_regime": raw_regime_name,
                     "raw_reason": raw_regime_reason,
                     "manager_allowed": regime_allowed,
@@ -3069,7 +3114,7 @@ class StrategyManager(_BaseStrategyManager):
         if regime_name is not None:
             # The transition-filtered label is contextual, not raw confirmation.
             indicators["regime"] = regime_name
-        indicators["regime_stable"] = regime_name
+        indicators["regime_stable"] = stable_regime_name
         indicators["regime_raw"] = raw_regime_name
         indicators["regime_gate_allowed"] = regime_allowed
         indicators["regime_evidence_status"] = regime_decision_action
@@ -3363,7 +3408,8 @@ class StrategyManager(_BaseStrategyManager):
             if fut_fresh:
                 indicators["futures_context"] = fut_ctx
                 indicators["futures_ltp"] = fut_ctx.get("ltp")
-                if fut_ctx.get("vwap_source") == "active_future_quote_vwap":
+                if (fut_ctx.get("vwap_source") == "active_future_quote_vwap"
+                    and indicators.get("futures_vwap_source") != "active_future_quote_vwap"):
                     indicators["futures_vwap"] = fut_ctx.get("vwap")
                     indicators["futures_vwap_source"] = (
                         "active_future_quote_vwap"
@@ -3644,8 +3690,8 @@ class StrategyManager(_BaseStrategyManager):
                     symbol,
                     bool(spot_ctx),
                     bool(fut_ctx),
-                    (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
-                    (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
+                    spot_tick_age_s,
+                    fut_tick_age_s,
                     indicators.get("selected_ce"),
                     indicators.get("selected_pe"),
                     interval_sec=30.0,
@@ -3679,10 +3725,11 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
 
-            if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
+            # Keep the freshly read quote-counter measurement; a context
+            # snapshot must not overwrite it or relabel derived VWAP as broker VWAP.
+            if (fut_fresh and indicators.get("futures_volume_ratio") is None
+                and fut_ctx.get("futures_volume_ratio") is not None):
                 indicators["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
-            if fut_fresh and fut_ctx.get("vwap") is not None:
-                indicators["futures_vwap"] = fut_ctx.get("vwap")
             if fut_fresh and fut_ctx.get("vwap_slope") is not None:
                 indicators["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
 
@@ -3757,7 +3804,14 @@ class StrategyManager(_BaseStrategyManager):
             regime_blocked = bool(
                 symbol_is_option
                 and indicators.get("regime") is not None
-                and not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                and (
+                    not strategy_regime_eligible(strategy_name, indicators.get("regime"))
+                    or (stable_regime_name is not None and not strategy_regime_eligible(strategy_name, stable_regime_name))
+                    or (
+                        raw_regime_name is not None
+                        and not strategy_regime_eligible(strategy_name, raw_regime_name)
+                    )
+                )
             )
             direction_blocked = bool(
                 symbol_is_option
@@ -3786,7 +3840,11 @@ class StrategyManager(_BaseStrategyManager):
                         "reason": "not_eligible",
                     },
                 )
-                reason = "strategy_regime_or_direction_ineligible"
+                reason = (
+                    "strategy_regime_ineligible"
+                    if regime_blocked
+                    else "strategy_direction_ineligible"
+                )
                 strategy_reasons[strategy_name] = reason
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 self._record_strategy_no_vote_observability(strategy_name, reason)
@@ -4337,7 +4395,8 @@ class StrategyManager(_BaseStrategyManager):
             # Persist the regime source distinction through the order/ledger
             # boundary; a stable TREND label is not raw detector verification.
             if isinstance(combined.metadata, dict):
-                combined.metadata.setdefault("regime_stable", regime_name)
+                combined.metadata.setdefault("regime_stable", stable_regime_name)
+                combined.metadata.setdefault("regime_effective", regime_name)
                 combined.metadata.setdefault("regime_raw", raw_regime_name)
                 combined.metadata.setdefault("regime_gate_allowed", regime_allowed)
                 combined.metadata.setdefault(
@@ -4761,8 +4820,6 @@ class StrategyManager(_BaseStrategyManager):
             # back to CONFIRMING would be ignored by the monotonic registry.
             # This is observability only: no additional vote or admission.
             for candidate_signal, evidence in smc_trigger_votes:
-                if str(evidence.strategy or "").strip().upper() != "SMC":
-                    continue
                 metadata = dict(candidate_signal.metadata or {})
                 setup_id = metadata.get("setup_id") or (
                     evidence.metadata or {}

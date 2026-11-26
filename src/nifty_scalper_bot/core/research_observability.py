@@ -51,7 +51,11 @@ _REJECTION_CONTEXT_KEYS = (
     "underlying_direction_bias",
     "underlying_direction_confidence",
     "context_age_seconds",
-    "regime",
+    "regime",  # Effective execution regime.
+    "regime_stable",
+    "regime_raw",
+    "regime_gate_allowed",
+    "regime_evidence_status",
     "futures_price",
     "futures_vwap",
     "futures_vwap_slope",
