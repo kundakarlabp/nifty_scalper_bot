@@ -138,9 +138,7 @@ def test_repriced_broker_fill_uses_original_limit_for_bracket_geometry() -> None
             "entry_order_original_limit_price": 100.5,
         },
     )
-    OrderManager._register_virtual_bracket_for_fill(
-        owner, order, source="broker_fill"
-    )
+    OrderManager._register_virtual_bracket_for_fill(owner, order, source="broker_fill")
     bracket = brackets.get_bracket(order.order_id)
     assert bracket is not None
     assert bracket.entry_price == 101.0

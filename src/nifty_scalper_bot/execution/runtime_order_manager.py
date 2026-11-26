@@ -410,9 +410,7 @@ def _maybe_reprice_open_entry(
 
     # Legacy/recovered orders without the original broker-limit identity
     # cannot prove correct stop reanchoring after a modified-order fill.
-    anchor_price = _positive_float(
-        provenance.get("entry_order_original_limit_price")
-    )
+    anchor_price = _positive_float(provenance.get("entry_order_original_limit_price"))
     if anchor_price is None:
         return False
     try:
