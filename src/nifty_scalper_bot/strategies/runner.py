@@ -10,7 +10,8 @@ Runtime role:
   callback path; reuses the already-bound canonical CandleEngine per symbol.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
-- Maintains active history counts and uses shared direction-context resolution.
+- Maintains active history counts and uses shared direction-context resolution;
+  authoritative spot/futures snapshots cannot be overridden by old option bias.
 - Exposes inspect_recent_canonical_history for a bounded, read-only OHLCV
   check of latest completed MDM, runner and indicator candles after reseeding;
   count-based readiness is not misreported as full content parity.
@@ -121,7 +122,7 @@ from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role,
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
-from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.strategy_manager import StrategyManager, _context_snapshot_fresh
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -11271,30 +11272,46 @@ class StrategyRunner:
                 )
             except (TypeError, ValueError):
                 ts = 0.0
-            age = max(0.0, now - ts) if ts > 0 else max_age + 1.0
+            raw_market_ms = _extract_float(payload, "last_tick_ts_ms")
+            if raw_market_ms is not None and raw_market_ms > 10_000_000_000:
+                ts = raw_market_ms / 1000.0
+            age = now - ts if ts > 0 else max_age + 1.0
             bias = str(
                 payload.get("underlying_direction_bias")
                 or payload.get("direction_bias")
                 or ""
             ).upper()
-            return payload, bool(ts > 0 and age <= max_age), bias, age
+            return payload, _context_snapshot_fresh(payload, max_age_seconds=max_age, now_ts=now), bias, age
 
         spot_ctx, spot_fresh, spot_bias, spot_age = _ctx_state("spot_context")
         fut_ctx, fut_fresh, fut_bias, fut_age = _ctx_state("futures_context")
+        active_future = getattr(self, "_active_futures_symbol", None)
+        if active_future and fut_ctx and normalize_symbol(str(fut_ctx.get("symbol") or "")) != normalize_symbol(str(active_future)):
+            fut_fresh = False
         output: dict[str, Any] = {}
-        if spot_ctx:
-            output["spot_context"] = spot_ctx
-            output["spot_fresh"] = spot_fresh
-        if fut_ctx:
-            output["futures_context"] = fut_ctx
-            output["futures_fresh"] = fut_fresh
-        if spot_ctx or fut_ctx:
+        if spot_ctx or fut_ctx or os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE":
+            # Overwrite both roles together; a missing or stale role must not
+            # leave previous indicator-context values available as live inputs.
+            output.update(
+                spot_context=spot_ctx if spot_fresh else {},
+                futures_context=fut_ctx if fut_fresh else {},
+                spot_fresh=spot_fresh,
+                futures_fresh=fut_fresh,
+                spot_ltp=spot_ctx.get("ltp") if spot_fresh else None,
+                spot_vwap=spot_ctx.get("vwap") if spot_fresh else None,
+                futures_ltp=fut_ctx.get("ltp") if fut_fresh else None,
+                futures_vwap=fut_ctx.get("vwap") if fut_fresh and fut_ctx.get("vwap_source") == "active_future_quote_vwap" else None,
+                futures_vwap_slope=fut_ctx.get("vwap_slope") if fut_fresh else None,
+                futures_volume_ratio=fut_ctx.get("futures_volume_ratio") if fut_fresh else None,
+            )
             # Clear any earlier option/runtime directional conclusion when the
             # current authoritative snapshots cannot resolve a direction.
             output.update(
                 direction_bias=None,
                 underlying_direction_bias=None,
                 underlying_direction_confidence=None,
+                direction_confidence=None,
+                context_age_seconds=None,
                 context_fresh=spot_fresh or fut_fresh,
             )
         if (
@@ -11319,6 +11336,7 @@ class StrategyRunner:
         output["underlying_direction_confidence"] = selected_ctx.get(
             "underlying_direction_confidence"
         )
+        output["direction_confidence"] = output["underlying_direction_confidence"]
         output["context_age_seconds"] = selected_age
         output["context_fresh"] = True
         output["direction_context_source"] = selected_ctx.get(
@@ -12489,7 +12507,8 @@ class StrategyRunner:
             "reason": reason,
             **dict(details),
         }
-        self._logger.info(
+        logger = self._logger.debug if reason == "same_bar_periodic_eval_throttled" else self._logger.info
+        logger(
             "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s bar_key=%s same_bar_elapsed_s=%s same_bar_interval_s=%s quote_update_version=%s",
             payload["symbol"],
             reason,
@@ -13590,10 +13609,14 @@ class StrategyRunner:
         futures_snapshot = indicators_ctx.get("futures_snapshot") or futures_context
         spot_bars_raw = indicators_ctx.get("spot_bars")
         if spot_bars_raw is None:
+            spot_bars_raw = spot_context.get("history_bars")
+        if spot_bars_raw is None:
             spot_bars_raw = indicators_ctx.get("context_bar_count")
         if spot_bars_raw is None:
             spot_bars_raw = indicators_ctx.get("underlying_context_bar_count")
         futures_bars_raw = indicators_ctx.get("futures_bars")
+        if futures_bars_raw is None:
+            futures_bars_raw = futures_context.get("history_bars")
         if futures_bars_raw is None:
             futures_bars_raw = indicators_ctx.get("futures_context_bar_count")
         # Absent diagnostic counts are unknown, not evidence of zero bars.
@@ -15865,23 +15888,14 @@ class StrategyRunner:
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
                     if self._is_tradable_symbol(symbol):
-                        selected_only_bias = str(
-                            (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("underlying_direction_bias")
-                            or (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("direction_bias")
-                            or ""
-                        ).upper()
+                        # This early gate concerns contract membership only.
+                        # Direction is resolved below from current underlying
+                        # snapshots, never from a previous option evaluation.
                         (
                             selected_only_ok,
                             selected_only_reason,
                             selected_only_details,
-                        ) = self._live_entry_candidate_eligibility(
-                            symbol,
-                            direction_bias=selected_only_bias,
-                        )
+                        ) = self._live_entry_candidate_eligibility(symbol)
                         if (
                             _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
                             and not selected_only_ok
@@ -15908,7 +15922,6 @@ class StrategyRunner:
                                 },
                             )
                             return
-                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     log_throttled(
                         self._logger,
                         f"strategy_evaluation_triggered:{symbol}",
@@ -16266,6 +16279,11 @@ class StrategyRunner:
                                             },
                                         )
                                     return
+                    # Only an admitted option evaluation needs both underlying
+                    # snapshots refreshed. Same-bar/quote vetoes already returned;
+                    # the completed-context generation retry remains unchanged.
+                    if _is_option_pregate:
+                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     self._mark_symbol_eval_allowed(
                         symbol,
                         bar_key=(

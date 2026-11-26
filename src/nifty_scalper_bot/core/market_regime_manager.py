@@ -6,8 +6,8 @@ regime evidence in throttled runtime diagnostics.
 
 Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
 cannot inherit trade permission from an older stable regime. Raw EVENT and
-VOLATILE thresholds are checked at the latest observation; hysteresis remains
-diagnostic.
+VOLATILE thresholds are checked at the latest observation; execution routing
+uses current safety regimes and confirmed TREND/RANGE transitions.
 A low ATR alone cannot license mean-reversion entries. Risk and broker gates
 remain owned by their execution components.
 """
@@ -560,6 +560,22 @@ class MarketRegimeManager:
             )
             return None
 
+    def get_execution_snapshot(self) -> RegimeSnapshot | None:
+        """Expose current safety regimes, retaining confirmed directional state."""
+        with self._lock:
+            raw = self._raw_current
+            stable = self._current
+            if raw is None:
+                return None
+            if normalize_regime(raw.regime) in {
+                MarketRegime.UNKNOWN,
+                MarketRegime.LOW_ACTIVITY,
+                MarketRegime.EVENT,
+                MarketRegime.VOLATILE,
+            }:
+                return raw
+            return stable
+
     def get_raw_snapshot(self) -> RegimeSnapshot | None:
         """Return the freshest detector observation, including pending transitions."""
         try:
@@ -823,7 +839,7 @@ class MarketRegimeManager:
             raw_snapshot: RegimeSnapshot | None
             bypass: bool
             with self._lock:
-                snapshot = self._current
+                snapshot = self.get_execution_snapshot()
                 raw_snapshot = self._raw_current
                 bypass = self._bypass
             if bypass:

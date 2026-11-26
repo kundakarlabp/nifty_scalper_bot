@@ -244,6 +244,11 @@ def test_rejection_retains_independent_futures_bar_volume() -> None:
         symbol=CE,
         reason="distance_outside_band",
         indicators={
+            "regime": "trend",
+            "regime_stable": "trend",
+            "regime_raw": "range",
+            "regime_gate_allowed": True,
+            "regime_evidence_status": "transition_pending",
             "futures_volume_ratio": 0.0,
             "futures_completed_bar_volume_ratio": 1.25,
             "futures_completed_bar_volume_ready": True,
@@ -256,6 +261,11 @@ def test_rejection_retains_independent_futures_bar_volume() -> None:
     )
     assert sample is not None
     context = sample["context"]
+    assert context["regime"] == "trend"
+    assert context["regime_stable"] == "trend"
+    assert context["regime_raw"] == "range"
+    assert context["regime_gate_allowed"] is True
+    assert context["regime_evidence_status"] == "transition_pending"
     assert context["futures_volume_ratio"] == 0.0
     assert context["futures_completed_bar_volume_ratio"] == 1.25
     assert context["futures_completed_bar_volume_ready"] is True

@@ -249,6 +249,7 @@ def test_raw_low_activity_blocks_while_stable_trend_is_held() -> None:
 
     assert manager.get_latest_snapshot().regime == "trend"
     assert manager.get_raw_snapshot().regime == "low_activity"
+    assert manager.get_execution_snapshot().regime == "low_activity"
     assert manager.can_trade(record_decision=False) is False
     assert "regime_low_activity" in manager.get_filter_reasons()
 

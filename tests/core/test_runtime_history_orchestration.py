@@ -486,6 +486,7 @@ def _status(
     fresh=True,
     contiguous=True,
     ready=True,
+    tradable=False,
 ):
     return SimpleNamespace(
         mdm_bars=bars,
@@ -494,6 +495,8 @@ def _status(
         latest_bar_fresh=fresh,
         recent_window_contiguous=contiguous,
         ready_for_evaluation=ready,
+        live_tick_fresh=tradable,
+        tradable_quote=tradable,
     )
 
 
@@ -674,6 +677,40 @@ async def test_active_basket_helper_uses_recovery_phase_for_stale_and_gap(
     # Even if the cached *count* is warm, stale/gapped bars need a real
     # broker-history refetch instead of MDM's target_cache_sufficient skip.
     assert all(kw["force"] is True for _, kw in mdm.calls)
+
+
+@pytest.mark.asyncio
+async def test_context_quality_repair_is_bounded_and_requires_live_quote(
+    monkeypatch,
+) -> None:
+    mdm = _ActiveMDM()
+    c = _active_ctx(mdm, _ActiveRunner())
+    first = "NFO:NIFTY2661623100CE"
+    second = "NFO:NIFTY2661622900PE"
+    unquoted = "NFO:NIFTY2661623050CE"
+    c.active_contract_basket["option_symbols"].extend([second, unquoted])
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+
+    def status(_ctx, symbol, role, required):
+        return _status(
+            bars=40,
+            fresh=role != "option_context",
+            contiguous=role != "option_context",
+            tradable=symbol in {first, second},
+        )
+
+    monkeypatch.setattr(app, "build_symbol_hydration_status", status)
+    result = await app._ensure_active_basket_history(
+        c,
+        option_required_bars=30,
+        context_required_bars=20,
+        reason="readiness",
+        phase="runtime",
+    )
+    assert [symbol for symbol, _ in mdm.calls] == [first]
+    assert mdm.calls[0][1]["force"] is True
+    assert result[second]["reason"] == "context_quality_repair_budget"
+    assert result[unquoted]["reason"] == "ready"
 
 
 @pytest.mark.asyncio

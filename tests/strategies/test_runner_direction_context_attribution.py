@@ -82,6 +82,57 @@ def test_one_valid_underlying_source_can_still_supply_direction(
     assert result["direction_context_source"] == "spot_context"
 
 
+def test_future_market_clock_rejects_recent_processing_time(monkeypatch) -> None:
+    runner = _runner_with_context(
+        monkeypatch,
+        spot=_context(timestamp=1001.0, underlying_direction_bias="CE"),
+        futures=_context(
+            context_market_time_valid=False, underlying_direction_bias="PE"
+        ),
+    )
+    result = runner._underlying_context_from_strategy_manager()
+    assert result["spot_fresh"] is False
+    assert result["futures_fresh"] is False
+    assert result["underlying_direction_bias"] is None
+
+
+def test_stale_or_rolled_future_cannot_supply_context_metrics(monkeypatch) -> None:
+    runner = _runner_with_context(
+        monkeypatch,
+        spot=_context(timestamp=900.0, ltp=25000.0, vwap=24990.0),
+        futures=_context(
+            symbol="NFO:NIFTY26NOVFUT",
+            ltp=25020.0,
+            vwap=25010.0,
+            vwap_source="active_future_quote_vwap",
+            underlying_direction_bias="CE",
+        ),
+    )
+    runner._active_futures_symbol = "NFO:NIFTY26DECFUT"
+
+    result = runner._underlying_context_from_strategy_manager()
+
+    assert result["spot_fresh"] is False
+    assert result["futures_fresh"] is False
+    assert result["spot_context"] == {}
+    assert result["futures_context"] == {}
+    assert result["spot_vwap"] is None
+    assert result["futures_vwap"] is None
+    assert result["direction_bias"] is None
+
+
+def test_direction_diagnostics_never_use_option_vwap_or_volume() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    _, details = runner._direction_context_missing_reason(
+        {"vwap": 200.0, "vwap_slope": 0.5, "volume_ratio": 2.0}
+    )
+    assert details["spot_vwap"] is None
+    assert details["futures_vwap_slope"] is None
+    assert details["futures_volume_ratio"] is None
+    assert details["spot_fresh"] is False
+    assert details["fut_fresh"] is False
+
+
 def test_direction_skip_log_carries_underlying_provenance_and_still_rejects() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
         encoding="utf-8"

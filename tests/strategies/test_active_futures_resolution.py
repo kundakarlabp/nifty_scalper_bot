@@ -133,6 +133,33 @@ def test_futures_volume_ignores_trade_quantity_and_keeps_baseline() -> None:
     assert next_cumulative["futures_volume_ratio"] == 1.0
 
 
+def test_futures_quote_rereads_do_not_add_zero_volume_samples() -> None:
+    hub = _VolumeHub(
+        [
+            {"volume_cumulative": 1000.0, "quote_update_version": 1},
+            {"volume_cumulative": 1100.0, "quote_update_version": 2},
+            {"volume_cumulative": 1100.0, "quote_update_version": 2},
+            {"volume_cumulative": 1100.0, "quote_update_version": 3},
+            {"volume_cumulative": 1150.0, "quote_update_version": 4},
+        ]
+    )
+    manager = _manager(hub=hub)
+    manager._augment_futures_metrics({})
+    first: dict[str, Any] = {}
+    duplicate: dict[str, Any] = {}
+    quiet: dict[str, Any] = {}
+    advanced: dict[str, Any] = {}
+    manager._augment_futures_metrics(first)
+    manager._augment_futures_metrics(duplicate)
+    assert first["futures_volume_ratio"] == duplicate["futures_volume_ratio"] == 1.0
+    assert list(manager._futures_volume_history) == [100.0]
+    manager._augment_futures_metrics(quiet)
+    assert quiet["futures_volume_ratio"] == 0.0
+    manager._augment_futures_metrics(advanced)
+    assert list(manager._futures_volume_history) == [100.0, 0.0, 50.0]
+    assert advanced["futures_volume_ratio"] == 1.0
+
+
 def test_futures_volume_rejects_same_session_decrease_without_false_spike() -> None:
     symbol = "NFO:NIFTY26JUNFUT"
     hub = _VolumeHub(
