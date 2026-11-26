@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from nifty_scalper_bot.infra.daily_log_archive import DailyLogArchiver
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -202,3 +204,24 @@ def test_transient_replay_failure_retries_once_then_finalizes() -> None:
         '"blocker":"replay_archive_changed_between_passes"' in call["log_text"]
         for call in calls
     )
+
+
+def test_exchange_holiday_keeps_logs_without_replay_research(monkeypatch) -> None:
+    from nifty_scalper_bot.infra import daily_log_archive
+
+    calls = []
+    monkeypatch.setattr(daily_log_archive, "is_exchange_holiday", lambda _day: True)
+
+    def fail_research(*_args):
+        pytest.fail("holiday must not require a trading-session tape")
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        log_reader=lambda _start, _end: "holiday journal",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        research_runner=fail_research,
+    )
+    result = archiver.archive_once(datetime(2026, 11, 24, 16, 0, tzinfo=IST))
+    assert result["finalized"] is True
+    assert calls[0]["log_text"] == "holiday journal"

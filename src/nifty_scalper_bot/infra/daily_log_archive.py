@@ -5,7 +5,8 @@ Responsibilities:
 - DailyLogArchiver.archive_once snapshots bounded IST journald sessions.
 - Include source-only startup/recovery evidence in the existing archive summary.
 - Archive bounded post-close parity and exact-contract markout summaries;
-  retry transient replay settlement failures once before finalizing.
+  retry transient replay settlement failures once before finalizing. Exchange
+  holidays retain operational logs without running trading-session research.
 - archive_interval_seconds enforces a minimum reporting interval.
 
 Boundaries: Observability only; the local journal/engine remain authoritative.
@@ -31,6 +32,7 @@ from nifty_scalper_bot.config.env_utils import (
 )
 from nifty_scalper_bot.infra.session_startup_audit import audit_session_startups
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.market_hours import is_exchange_holiday
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
@@ -128,7 +130,11 @@ class DailyLogArchiver:
         # Run only after the final options session and writer settle window;
         # append bounded results to the already-authorized journal transport.
         retry_research = False
-        if settled and self._research_runner is not None:
+        if (
+            settled
+            and self._research_runner is not None
+            and not is_exchange_holiday(session_date)
+        ):
             try:
                 from nifty_scalper_bot.infra.market_research_report import (
                     research_report_log_lines,
