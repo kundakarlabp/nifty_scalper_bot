@@ -168,6 +168,21 @@ def test_replication_retains_approved_entry_evidence_after_trade_closes(
                     "setup_id": "vwap:session:contract",
                     "regime": "TREND",
                     "approval_path": "single_trigger_context_confirmed",
+                    "context_confirmation_evidence": [
+                        {
+                            "strategy": "OrderFlow",
+                            "flow_confirmation_source": "temporal_ofi",
+                            "ofi_3s_complete": True,
+                            "ofi_3s_normalized": 0.24,
+                            "quote_readiness_allowed": True,
+                        }
+                    ],
+                    "vwap_reference_evidence": {
+                        "selected_source": "exchange_vwap",
+                        "exchange_vwap": 99.5,
+                        "session_vwap": 99.4,
+                        "rolling_vwap": 99.2,
+                    },
                     "confirmation_contract": {
                         "passed": True,
                         "context_strategies": ["OrderFlow"],
@@ -202,6 +217,16 @@ def test_replication_retains_approved_entry_evidence_after_trade_closes(
     assert snapshot["setup_id"] == "vwap:session:contract"
     assert snapshot["approval_path"] == "single_trigger_context_confirmed"
     assert snapshot["confirmation_contract"]["context_strategies"] == ["OrderFlow"]
+    assert snapshot["context_confirmation_evidence"] == [
+        {
+            "strategy": "OrderFlow",
+            "flow_confirmation_source": "temporal_ofi",
+            "ofi_3s_complete": True,
+            "ofi_3s_normalized": 0.24,
+            "quote_readiness_allowed": True,
+        }
+    ]
+    assert snapshot["vwap_reference_evidence"]["selected_source"] == "exchange_vwap"
     assert snapshot["build_sha"] == "approved-build-sha"
     assert snapshot["decision_at_epoch"] == 1_789_999_999.0
 

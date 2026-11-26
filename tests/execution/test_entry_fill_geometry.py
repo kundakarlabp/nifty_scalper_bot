@@ -5,14 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.order_manager import (
+    _enrich_trade_plan_exit_provenance,
+)
 from nifty_scalper_bot.execution.order_manager_core import (
     OrderDetails,
     OrderManager,
     OrderStatus,
     OrderType,
-)
-from nifty_scalper_bot.execution.order_manager import (
-    _enrich_trade_plan_exit_provenance,
 )
 
 
