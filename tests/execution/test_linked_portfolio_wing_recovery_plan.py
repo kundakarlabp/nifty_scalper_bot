@@ -1,8 +1,11 @@
 """Broker-backed recovery advice never places a multi-leg order."""
 
+import datetime
+
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
 PARENT = "condor-parent-001"
+VALID_EXPIRY = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
 ROLES = (
     ("long_put", 23700, "PE", "BUY", 1),
     ("long_call", 24300, "CE", "BUY", 2),
@@ -46,7 +49,7 @@ def new_parent(tmp_path):
             "lot_size": 65,
             "instrument_token": 9000 + token,
             "strike": strike,
-            "expiry": "2026-11-26",
+            "expiry": VALID_EXPIRY,
         }
         for role, strike, option, side, token in ROLES
     ]
