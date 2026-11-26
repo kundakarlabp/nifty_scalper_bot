@@ -613,6 +613,58 @@ def test_runner_offmarket_nifty_stale_threshold_gte_3600():
     assert threshold_open == 120.0
 
 
+def test_direction_diagnostics_do_not_mislabel_fresh_underlying_snapshots():
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._context_required_bars = 20
+    reason, diagnostics = runner._direction_context_missing_reason(
+        {
+            "spot_context": {
+                "symbol": "NSE:NIFTY",
+                "ltp": 25900.0,
+                "vwap": 25890.0,
+                "direction_context_reasons": ["direction_family_conflict"],
+            },
+            "futures_context": {
+                "symbol": "NFO:NIFTY26DECFUT",
+                "ltp": 25920.0,
+                "vwap": 25910.0,
+            },
+            "spot_fresh": True,
+            "futures_fresh": True,
+            "vwap": 180.0,
+            "vwap_slope": 1.3,
+            "direction_resolution_reason": "independent_direction_unresolved",
+        }
+    )
+    assert reason == "independent_direction_unresolved"
+    assert diagnostics["spot_vwap"] == 25890.0
+    assert diagnostics["futures_vwap"] == 25910.0
+    assert diagnostics["futures_vwap_slope"] is None
+    assert diagnostics["spot_bars"] is None
+    assert diagnostics["futures_bars"] is None
+    assert diagnostics["spot_direction_reasons"] == ["direction_family_conflict"]
+    assert diagnostics["spot_fresh"] is True
+    assert diagnostics["fut_fresh"] is True
+
+
+def test_direction_diagnostics_do_not_use_option_vwap_as_spot():
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._context_required_bars = 0
+    reason, diagnostics = runner._direction_context_missing_reason(
+        {"vwap": 180.0, "vwap_slope": 1.3, "volume_ratio": 2.0}
+    )
+    assert reason == "missing_spot_snapshot"
+    assert diagnostics["spot_vwap"] is None
+    assert diagnostics["futures_vwap_slope"] is None
+    assert diagnostics["futures_volume_ratio"] is None
+    assert diagnostics["spot_fresh"] is False
+    assert diagnostics["fut_fresh"] is False
+
+
 def test_direction_context_zero_slope_is_not_missing():
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 

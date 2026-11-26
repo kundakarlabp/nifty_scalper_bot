@@ -50,6 +50,73 @@ def test_session_vwap_differs_from_rolling_vwap() -> None:
     assert session < rolling
 
 
+def test_live_unfinished_minute_uses_only_previous_completed_vwap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(0, 100.0, 100), _session_bar(1, 200.0, 100)]
+    )
+    current = _session_bar(2, 900.0, 100)
+    engine.update_price(
+        symbol,
+        {"open": 900.0, "high": 900.0, "low": 900.0, "close": 900.0},
+        volume=100,
+        timestamp=current[0],
+        is_complete=False,
+        is_provisional=True,
+    )
+    assert engine.get_session_vwap(symbol) == pytest.approx(150.0)
+    assert engine.get_session_vwap_at(symbol, current[0]) is None
+
+
+def test_session_vwap_does_not_reuse_stale_prior_bar_after_gap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(0, 100.0, 100), _session_bar(1, 200.0, 100)]
+    )
+    current = _session_bar(4, 900.0, 100)
+    engine.update_price(
+        symbol,
+        {"open": 900.0, "high": 900.0, "low": 900.0, "close": 900.0},
+        volume=100,
+        timestamp=current[0],
+        is_complete=False,
+        is_provisional=True,
+    )
+    assert engine.get_session_vwap(symbol) is None
+
+
+def test_session_vwap_does_not_reuse_prior_day_when_new_day_is_unfinished() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars([_session_bar(0, 100.0, 100)])
+    new_open = _session_bar(0, 200.0, 100)[0] + timedelta(days=1)
+    engine.update_price(
+        symbol,
+        {"open": 200.0, "high": 200.0, "low": 200.0, "close": 200.0},
+        volume=100,
+        timestamp=new_open,
+        is_complete=False,
+        is_provisional=True,
+    )
+    assert engine.get_session_vwap(symbol) is None
+
+
+def test_mid_session_history_without_open_does_not_invent_session_vwap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(minute, 100.0 + minute, 100) for minute in (75, 76, 77)]
+    )
+    assert engine.get_vwap(symbol) is not None
+    assert engine.get_session_vwap(symbol) is None
+
+
+def test_missing_middle_minute_does_not_invent_session_vwap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(minute, 100.0 + minute, 100) for minute in (0, 1, 3)]
+    )
+    assert engine.get_session_vwap(symbol) is None
+
+
 def test_zero_volume_series_yields_no_vwap() -> None:
     engine = _engine_with_bars([_session_bar(i, 100.0 + i, 0) for i in range(5)])
 
@@ -191,3 +258,19 @@ def test_historical_session_vwap_preserves_complete_zero_volume_minutes():
     engine = _engine_with_bars(bars)
 
     assert engine.get_session_vwap_at(symbol, bars[-1][0]) == pytest.approx(150.0)
+
+
+def test_rolling_vwap_does_not_use_only_provisional_bars():
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = IndicatorEngine()
+    for minute in range(3):
+        stamp, price, volume = _session_bar(minute, 100.0 + minute, 100)
+        engine.update_price(
+            symbol,
+            {"open": price, "high": price, "low": price, "close": price},
+            volume=volume,
+            timestamp=stamp,
+            is_complete=False,
+            is_provisional=True,
+        )
+    assert engine.get_vwap(symbol) is None

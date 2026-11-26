@@ -95,6 +95,37 @@ def test_trade_decision_snapshot_is_persisted_to_existing_journal() -> None:
     assert captured[0][1] == "trace-1"
 
 
+def test_decision_snapshot_records_stop_limit_risk_separately() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                snapshot
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTYCE",
+        direction="CE",
+        final_reason="no_affordable_execution_candidate",
+        candidate_capacity_decisions={
+            "NFO:NIFTYCE": {
+                "reason": "minimum_lot_risk_unaffordable",
+                "plan_cost_inclusive_risk": 740.0,
+                "plan_stop_limit_cost_inclusive_risk": 1050.0,
+                "effective_one_lot_risk_budget": 773.0,
+            }
+        },
+    )
+    observed = captured[0]["candidate_capacity_decisions"]["NFO:NIFTYCE"]
+    assert observed["plan_cost_inclusive_risk"] == 740.0
+    assert observed["plan_stop_limit_cost_inclusive_risk"] == 1050.0
+
+
 def test_approved_decision_uses_executed_signal_identity() -> None:
     captured: list[dict[str, object]] = []
     runner = SimpleNamespace(

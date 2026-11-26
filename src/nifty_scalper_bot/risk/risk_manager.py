@@ -828,6 +828,7 @@ class RiskManager:
         prospective_risk = stop_risk
         cost_reserve = 0.0
         effective_budget = remaining
+        stop_limit_risk = None
         if broker_live:
             with suppress(Exception):
                 economics = evaluate_final_net_rr(signal)
@@ -838,6 +839,9 @@ class RiskManager:
                     cost_reserve = max(
                         prospective_risk - float(stop_risk or 0.0), 0.0
                     )
+                    stop_limit_risk = economics.stop_limit_net_risk
+                    if stop_limit_risk is not None:
+                        prospective_risk = max(prospective_risk, stop_limit_risk)
             with suppress(TypeError, ValueError, AttributeError):
                 balance = max(float(self.account_balance or 0.0), 0.0)
                 risk_pct = max(float(self.settings.per_trade_risk_pct or 0.0), 0.0)
@@ -863,8 +867,9 @@ class RiskManager:
                 signal,
                 reason,
                 "DAILY_RISK_BUDGET",
-                risk_basis="stop_plus_round_trip_costs",
+                risk_basis="stop_limit_plus_round_trip_costs",
                 prospective_stop_risk=stop_risk,
+                prospective_stop_limit_risk=stop_limit_risk,
                 transaction_cost_reserve=cost_reserve,
                 prospective_loss_risk=prospective_risk,
                 effective_risk_budget=effective_budget,

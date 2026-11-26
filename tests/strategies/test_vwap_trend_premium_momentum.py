@@ -534,6 +534,9 @@ def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch,
         enabled=False,
         execution_mode="LIVE",
         futures_vwap_slope=near_neutral,
+        current_price=104.1,
+        bid=104.0,
+        ask=104.2,
     )
     assert signal is not None
     assert signal.metadata["live_neutral_slope_enabled"] is True
@@ -544,6 +547,23 @@ def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch,
     assert signal.metadata["trend_momentum_completed_option_rvol"] >= 1.5
     assert signal.metadata["futures_slope_alignment"] is False
     assert "live_neutral_futures_slope" in signal.metadata["setup_reasons"]
+    assert signal.metadata["vwap_structural_invalidation"] is True
+    assert signal.stop_loss == pytest.approx(97.95)
+    assert signal.metadata["bracket_anchor_mode"] == "absolute_level"
+
+
+def test_live_neutral_slope_rejects_unconfirmed_breakout_bid(monkeypatch):
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=0.0001,
+        current_price=104.1,
+        bid=103.9,
+        ask=104.2,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "neutral_slope_breakout_bid_unconfirmed"
 
 
 @pytest.mark.parametrize("side", ["CE", "PE"])

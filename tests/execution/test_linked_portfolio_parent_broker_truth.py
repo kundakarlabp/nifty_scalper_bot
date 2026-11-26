@@ -1,5 +1,6 @@
 """Canonical linked-parent durability and broker net-position reconciliation."""
 
+import datetime
 import json
 
 import pytest
@@ -9,6 +10,8 @@ from nifty_scalper_bot.execution.position_manager import PositionManager
 PARENT = "p45-evidence-20261031"
 CALL = "NFO:NIFTY26NOV24000CE"
 PUT = "NFO:NIFTY26NOV24000PE"
+VALID_EXPIRY = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+EXPIRED = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
 
 
 class ReadOnlyBroker:
@@ -33,7 +36,7 @@ def legs():
             "lot_size": 65,
             "instrument_token": token,
             "strike": 24000,
-            "expiry": "2026-11-26",
+            "expiry": VALID_EXPIRY,
         }
         for role, symbol, token in (
             ("long_call", CALL, 123456),
@@ -122,7 +125,7 @@ def test_reused_parent_with_changed_leg_rejected(tmp_path):
         lambda x: x[1].update(instrument_token=0),
         lambda x: x[0].update(quantity=60),
         lambda x: x[1].update(symbol=x[0]["symbol"]),
-        lambda x: x[0].update(expiry="2026-10-01"),
+        lambda x: x[0].update(expiry=EXPIRED),
         lambda x: x[1].update(strike=24050),
     ],
 )
@@ -230,7 +233,7 @@ def test_condor_reservation_requires_protective_wing_geometry(tmp_path):
             "lot_size": 65,
             "instrument_token": token,
             "strike": strike,
-            "expiry": "2026-11-26",
+            "expiry": VALID_EXPIRY,
         }
         for role, strike, option, token in (
             ("long_put", 23700, "PE", 111),

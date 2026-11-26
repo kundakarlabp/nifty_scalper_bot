@@ -516,7 +516,12 @@ class RuntimeBracketManager(LedgerBracketManager):
             bracket.entry_status = bracket.exit_state
             bracket.exit_submitted_at = bracket.exit_submitted_at or now
             bracket.last_exit_attempt_at = bracket.last_exit_attempt_at or now
-            if bracket.exit_reason is None:
+            if order_id == str(bracket.exchange_stop_order_id or "").strip():
+                # A matched resting stop is the reducing order that actually
+                # filled, regardless of any competing local exit intent.
+                bracket.exit_order_type = "SL"
+                bracket.exit_reason = "exchange_protective_stop_fill"
+            elif bracket.exit_reason is None:
                 bracket.exit_reason = (
                     "BROKER_EXTERNAL" if source == "broker_external" else "BROKER_EXIT"
                 )
