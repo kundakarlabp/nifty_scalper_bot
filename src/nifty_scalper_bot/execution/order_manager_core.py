@@ -26,8 +26,9 @@ Safe-edit notes:
   do not confuse the two.
 - Reference midpoints and live entry depth require finite, uncrossed bid/ask
   evidence; malformed depth quantities cannot bypass entry preflight.
-- Quote age prefers exchange event time over receipt time. Explicit invalid,
-  receipt-only, or future market timestamps cannot prove LIVE entry freshness.
+- Quote age uses the shared NSE timestamp contract, preferring attested event
+  time. Explicit invalid, receipt-only, or future timestamps cannot prove LIVE
+  entry freshness.
 - Fast fill confirmation accepts only matching broker order identity (when
   present), positive filled quantity and finite positive execution price.
 - Out-of-order broker statuses cannot reopen terminal orders. Genuine
@@ -96,6 +97,10 @@ from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
 )
+from nifty_scalper_bot.data.time_contract import (
+    coerce_market_timestamp,
+    normalize_market_tick_timestamp,
+)
 from nifty_scalper_bot.execution import exceptions as execution_exceptions
 from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
@@ -121,6 +126,9 @@ from nifty_scalper_bot.execution.position_manager import (
     normalize_broker_order_status,
 )
 
+from nifty_scalper_bot.execution.readiness import (
+    quote_timestamp_quality_allows_hard_readiness,
+)
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -4770,94 +4778,47 @@ class OrderManager:
         ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
         spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
         age_ms = None
-        ts_raw = None
         ts_key = None
-        for key in (
-            "exchange_timestamp",
-            "timestamp",
-            "last_trade_time",
-            "timestamp_ms",
-            "ts",
-            "received_at",
-            "wallclock",
-        ):
-            val = quote.get(key)
-            if val not in (None, ""):
-                ts_raw = val
-                ts_key = key
-                break
-
-        try:
-            parsed_ts = None
-            if isinstance(ts_raw, datetime):
-                if ts_raw.tzinfo is None:
-                    ts_utc = ts_raw.replace(tzinfo=timezone.utc).timestamp()
-                    ts_ist = ts_raw.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
-                    now = time.time()
-                    if ts_key in ("received_at", "wallclock"):
-                        if (
-                            abs(now - ts_ist) < abs(now - ts_utc)
-                            and abs(now - ts_ist) < 60.0
-                        ):
-                            parsed_ts = ts_ist
-                        else:
-                            parsed_ts = ts_utc
-                    else:
-                        if (
-                            abs(now - ts_utc) < abs(now - ts_ist)
-                            and abs(now - ts_utc) < 60.0
-                        ):
-                            parsed_ts = ts_utc
-                        else:
-                            parsed_ts = ts_ist
+        if quote_timestamp_quality_allows_hard_readiness(quote):
+            # Use MDM's attested canonical time instead of guessing whether a
+            # raw naive broker datetime is UTC or IST from its apparent age.
+            source = str(quote.get("timestamp_source") or "").strip().lower()
+            try:
+                if quote.get("source_timestamp_valid") is True and source:
+                    stamp = coerce_market_timestamp(quote.get("timestamp"))
+                    ts_key = source
                 else:
-                    parsed_ts = ts_raw.timestamp()
-            elif isinstance(ts_raw, (int, float)):
-                raw_val = float(ts_raw)
-                parsed_ts = raw_val / 1000.0 if raw_val > 1_000_000_000_000 else raw_val
-            elif isinstance(ts_raw, str) and ts_raw.strip():
-                iso = ts_raw.strip().replace("Z", "+00:00")
-                parsed_dt = datetime.fromisoformat(iso)
-                if parsed_dt.tzinfo is None:
-                    ts_utc = parsed_dt.replace(tzinfo=timezone.utc).timestamp()
-                    ts_ist = parsed_dt.replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata")
-                    ).timestamp()
-                    now = time.time()
-                    if ts_key in ("received_at", "wallclock"):
-                        if (
-                            abs(now - ts_ist) < abs(now - ts_utc)
-                            and abs(now - ts_ist) < 60.0
-                        ):
-                            parsed_ts = ts_ist
-                        else:
-                            parsed_ts = ts_utc
-                    else:
-                        if (
-                            abs(now - ts_utc) < abs(now - ts_ist)
-                            and abs(now - ts_utc) < 60.0
-                        ):
-                            parsed_ts = ts_utc
-                        else:
-                            parsed_ts = ts_ist
-                else:
-                    parsed_ts = parsed_dt.timestamp()
-            if parsed_ts is not None:
-                event_age_ms = (time.time() - float(parsed_ts)) * 1000.0
-                if math.isfinite(event_age_ms) and event_age_ms >= -1000.0:
-                    age_ms = max(0.0, event_age_ms)
-        except Exception:
-            age_ms = None
-        # Arrival time is not exchange-time proof when the upstream payload
-        # explicitly labels its market timestamp as unusable/receipt-only.
-        timestamp_source = str(quote.get("timestamp_source") or "").strip().lower()
-        timestamp_quality = str(quote.get("timestamp_quality") or "").strip().lower()
-        if (
-            quote.get("source_timestamp_valid") is False
-            or timestamp_source.startswith("received_")
-            or timestamp_quality in {"synthetic", "invalid", "unknown", "received_at"}
-        ):
-            age_ms = None
+                    payload = dict(quote)
+                    if payload.get("timestamp") is None:
+                        payload["timestamp"] = payload.get("timestamp_ms")
+                    normalized = normalize_market_tick_timestamp(payload)
+                    stamp = normalized.timestamp
+                    ts_key = normalized.source
+                    # A malformed supplied event clock must not be rescued by
+                    # recent transport receipt. Preserve legacy receipt-only
+                    # diagnostics when there was no event clock at all.
+                    if ts_key.startswith("received_") and any(
+                        payload.get(key) not in (None, "")
+                        for key in (
+                            "exchange_timestamp",
+                            "last_trade_time",
+                            "last_traded_time",
+                            "last_trade_timestamp",
+                            "exchange_update_time",
+                            "last_price_time",
+                            "timestamp",
+                            "timestamp_ms",
+                            "ts",
+                            "date",
+                            "datetime",
+                        )
+                    ):
+                        raise ValueError("unusable market event timestamp")
+                event_age_ms = (time.time() - stamp.timestamp()) * 1000.0
+                if math.isfinite(event_age_ms) and event_age_ms >= 0.0:
+                    age_ms = event_age_ms
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
         return {
             "bid": bid,
             "ask": ask,
