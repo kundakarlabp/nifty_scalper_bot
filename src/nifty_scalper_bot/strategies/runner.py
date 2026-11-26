@@ -17826,7 +17826,10 @@ class StrategyRunner:
             "absolute_level"
             if (
                 metadata.get("bracket_anchor_mode") == "absolute_level"
-                and metadata.get("range_option_flow_verified") is True
+                and (
+                    metadata.get("range_option_flow_verified") is True
+                    or metadata.get("vwap_structural_invalidation") is True
+                )
             )
             or final_md["option_trade_plan_source"] == "explicit_premium_stop"
             else "distance"

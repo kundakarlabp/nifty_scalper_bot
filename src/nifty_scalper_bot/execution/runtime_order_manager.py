@@ -332,12 +332,16 @@ def _maybe_reprice_open_entry(
     )
     if anchor_mode != "distance":
         return False
-    strategy = str(
-        provenance.get("strategy_name")
-        or provenance.get("strategy")
-        or getattr(order, "strategy_name", "")
-        or ""
-    ).strip().upper()
+    strategy = (
+        str(
+            provenance.get("strategy_name")
+            or provenance.get("strategy")
+            or getattr(order, "strategy_name", "")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
     if strategy == "VWAPPRO":
         # An order callback has no fresh strategy qualification. A new higher
         # limit must not silently move the original reclaim thesis/target.
