@@ -979,9 +979,7 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             # An audit may fail before returning its fingerprint. Distinguish
             # a semantic fidelity limitation from a changed or missing tape.
             try:
-                archive_changed = (
-                    archive_fingerprint(path) != report["replay_sha256"]
-                )
+                archive_changed = archive_fingerprint(path) != report["replay_sha256"]
             except OSError:
                 archive_changed = True
         if archive_changed:
@@ -998,7 +996,11 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
         fidelity = {
             "status": "unavailable",
             "blocker": (
-                str(exc)[:110] if isinstance(exc, ValueError) else type(exc).__name__
+                "replay_archive_changed_between_passes"
+                if archive_changed
+                else str(exc)[:110]
+                if isinstance(exc, ValueError)
+                else type(exc).__name__
             ),
             "archive_integrity_verified": False,
             "full_session_selected_coverage_proven": False,
