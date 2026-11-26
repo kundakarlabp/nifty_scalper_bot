@@ -13588,14 +13588,18 @@ class StrategyRunner:
         )
         spot_snapshot = indicators_ctx.get("spot_snapshot") or spot_context
         futures_snapshot = indicators_ctx.get("futures_snapshot") or futures_context
-        spot_bars = _safe_int(
-            indicators_ctx.get("spot_bars")
-            or indicators_ctx.get("context_bar_count")
-            or indicators_ctx.get("underlying_context_bar_count")
-        )
-        futures_bars = _safe_int(
-            indicators_ctx.get("futures_bars")
-            or indicators_ctx.get("futures_context_bar_count")
+        spot_bars_raw = indicators_ctx.get("spot_bars")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("context_bar_count")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("underlying_context_bar_count")
+        futures_bars_raw = indicators_ctx.get("futures_bars")
+        if futures_bars_raw is None:
+            futures_bars_raw = indicators_ctx.get("futures_context_bar_count")
+        # Absent diagnostic counts are unknown, not evidence of zero bars.
+        spot_bars = _safe_int(spot_bars_raw) if spot_bars_raw is not None else None
+        futures_bars = (
+            _safe_int(futures_bars_raw) if futures_bars_raw is not None else None
         )
         spot_price = (
             indicators_ctx.get("spot_ltp")
@@ -13638,6 +13642,8 @@ class StrategyRunner:
             indicators_ctx.get("regime_snapshot")
             or indicators_ctx.get("regime")
             or indicators_ctx.get("market_regime")
+            or spot_context.get("regime")
+            or futures_context.get("regime")
         )
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
@@ -13655,7 +13661,7 @@ class StrategyRunner:
         ):
             reason = "stale_context"
         elif bool(indicators_ctx.get("insufficient_context_bars")) or (
-            required_bars > 0 and spot_bars < required_bars
+            required_bars > 0 and spot_bars is not None and spot_bars < required_bars
         ):
             reason = "insufficient_context_bars"
         elif indicators_ctx.get("direction_resolution_reason") not in (

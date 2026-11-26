@@ -617,7 +617,7 @@ def test_direction_diagnostics_do_not_mislabel_fresh_underlying_snapshots():
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
     runner = StrategyRunner.__new__(StrategyRunner)
-    runner._context_required_bars = 0
+    runner._context_required_bars = 20
     reason, diagnostics = runner._direction_context_missing_reason(
         {
             "spot_context": {
@@ -642,6 +642,8 @@ def test_direction_diagnostics_do_not_mislabel_fresh_underlying_snapshots():
     assert diagnostics["spot_vwap"] == 25890.0
     assert diagnostics["futures_vwap"] == 25910.0
     assert diagnostics["futures_vwap_slope"] is None
+    assert diagnostics["spot_bars"] is None
+    assert diagnostics["futures_bars"] is None
     assert diagnostics["spot_direction_reasons"] == ["direction_family_conflict"]
     assert diagnostics["spot_fresh"] is True
     assert diagnostics["fut_fresh"] is True
