@@ -68,6 +68,23 @@ def test_live_unfinished_minute_uses_only_previous_completed_vwap() -> None:
     assert engine.get_session_vwap_at(symbol, current[0]) is None
 
 
+def test_session_vwap_does_not_reuse_stale_prior_bar_after_gap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(0, 100.0, 100), _session_bar(1, 200.0, 100)]
+    )
+    current = _session_bar(4, 900.0, 100)
+    engine.update_price(
+        symbol,
+        {"open": 900.0, "high": 900.0, "low": 900.0, "close": 900.0},
+        volume=100,
+        timestamp=current[0],
+        is_complete=False,
+        is_provisional=True,
+    )
+    assert engine.get_session_vwap(symbol) is None
+
+
 def test_session_vwap_does_not_reuse_prior_day_when_new_day_is_unfinished() -> None:
     symbol = "NFO:NIFTY2680424400CE"
     engine = _engine_with_bars([_session_bar(0, 100.0, 100)])

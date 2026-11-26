@@ -16325,6 +16325,19 @@ class StrategyRunner:
                         context_ctx = self._underlying_context_from_strategy_manager()
                         if context_ctx:
                             runtime_ctx.update(context_ctx)
+                        live_direction_mode = (
+                            str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                            == "LIVE"
+                        )
+                        if live_direction_mode and not context_ctx:
+                            # No authoritative snapshots: evict any prior
+                            # indicator direction before live arbitration.
+                            runtime_ctx.update(
+                                direction_bias=None,
+                                underlying_direction_bias=None,
+                                underlying_direction_confidence=None,
+                                context_fresh=False,
+                            )
                         existing_bias = (
                             runtime_ctx.get("direction_bias")
                             or runtime_ctx.get("underlying_direction_bias")
@@ -16334,11 +16347,7 @@ class StrategyRunner:
                         # An older option indicator or prior runner bias can
                         # otherwise resurrect a CE/PE vote after the current
                         # authorities turn neutral or disagree.
-                        if (
-                            not existing_bias
-                            and str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-                            != "LIVE"
-                        ):
+                        if not existing_bias and not live_direction_mode:
                             existing_bias = (
                                 indicators_ctx.get("direction_bias")
                                 or indicators_ctx.get("underlying_direction_bias")
@@ -16629,12 +16638,7 @@ class StrategyRunner:
                         }
                         self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh, fut_fresh, context_fresh = resolve_entry_context_freshness(indicators_ctx)
-                        live_mode = (
-                            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW")
-                            .strip()
-                            .upper()
-                            == "LIVE"
-                        )
+                        live_mode = live_direction_mode
                         reversal_capability = getattr(
                             self._strategy_manager,
                             "can_evaluate_verified_reversal",
