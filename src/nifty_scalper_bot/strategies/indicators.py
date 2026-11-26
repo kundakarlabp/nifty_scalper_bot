@@ -1197,7 +1197,11 @@ class IndicatorEngine:
             stamps = history.get_timestamps()
             complete = history.get_completeness()
             provisional = history.get_provisional_flags()
-            if not stamps or len(complete) != len(stamps) or len(provisional) != len(stamps):
+            if (
+                not stamps
+                or len(complete) != len(stamps)
+                or len(provisional) != len(stamps)
+            ):
                 return None
             session_open, session_close = self._session_bounds(stamps[-1])
             for index in range(len(stamps) - 1, -1, -1):

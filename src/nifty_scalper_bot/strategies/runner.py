@@ -13641,13 +13641,9 @@ class StrategyRunner:
         )
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
-        if not bool(
-            spot_snapshot or spot_price
-        ):
+        if not bool(spot_snapshot or spot_price):
             reason = "missing_spot_snapshot"
-        elif not bool(
-            futures_snapshot or futures_price
-        ):
+        elif not bool(futures_snapshot or futures_price):
             reason = "missing_futures_snapshot"
         elif (
             not spot_fresh
