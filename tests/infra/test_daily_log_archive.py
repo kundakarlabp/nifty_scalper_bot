@@ -126,6 +126,9 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
             "replay_sha256": "a" * 64,
             "tradable_ws_quote_ticks": 4,
             "independent_setup_count": 0,
+            "range_excursion_opportunities": [],
+            "range_excursion_duplicate_observations": 0,
+            "range_excursion_horizons": [],
             "sampled_observations": [],
             "sampled_strata": [],
             "structural_strata": [],
@@ -149,6 +152,8 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
     assert len(research_calls) == 1
     assert "RESEARCH_SESSION_EVIDENCE " not in calls[0]["log_text"]
     assert "RESEARCH_SESSION_EVIDENCE " in calls[1]["log_text"]
+    assert '"status":"analysed"' in calls[1]["log_text"]
+    assert "postmarket_runner_failed" not in calls[1]["log_text"]
     assert calls[1]["build_sha"] is not None
     assert calls[1]["line_count"] == 2
     assert archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST)) == {
@@ -169,6 +174,9 @@ def test_transient_replay_failure_retries_once_then_finalizes() -> None:
             "blocker": "replay_archive_changed_between_passes",
             "replay_sha256": None,
             "independent_setup_count": 0,
+            "range_excursion_opportunities": [],
+            "range_excursion_duplicate_observations": 0,
+            "range_excursion_horizons": [],
             "sampled_observations": [],
             "sampled_strata": [],
             "structural_strata": [],
@@ -190,3 +198,7 @@ def test_transient_replay_failure_retries_once_then_finalizes() -> None:
     assert third == {"archived": False, "reason": "already_finalized"}
     assert len(research_calls) == 2
     assert len(calls) == 2
+    assert all(
+        '"blocker":"replay_archive_changed_between_passes"' in call["log_text"]
+        for call in calls
+    )
