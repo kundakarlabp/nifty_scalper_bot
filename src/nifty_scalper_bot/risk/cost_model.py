@@ -149,12 +149,15 @@ def estimate_protective_stop_limit_loss(
     """
     _, limit = canonical_stop_limit_prices(stop_price, "SELL")
     exit_price = min(float(stop_price), limit)
-    return (float(entry_price) - exit_price) * quantity + estimate_round_trip_cost(
-        entry_price=entry_price,
-        exit_price=exit_price,
-        quantity=quantity,
-        half_spread=half_spread,
-    ).total
+    return float(
+        (float(entry_price) - exit_price) * quantity
+        + estimate_round_trip_cost(
+            entry_price=entry_price,
+            exit_price=exit_price,
+            quantity=quantity,
+            half_spread=half_spread,
+        ).total
+    )
 
 
 def passes_cost_edge_gate(

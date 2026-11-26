@@ -50,6 +50,23 @@ def test_session_vwap_differs_from_rolling_vwap() -> None:
     assert session < rolling
 
 
+def test_mid_session_history_without_open_does_not_invent_session_vwap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(minute, 100.0 + minute, 100) for minute in (75, 76, 77)]
+    )
+    assert engine.get_vwap(symbol) is not None
+    assert engine.get_session_vwap(symbol) is None
+
+
+def test_missing_middle_minute_does_not_invent_session_vwap() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars(
+        [_session_bar(minute, 100.0 + minute, 100) for minute in (0, 1, 3)]
+    )
+    assert engine.get_session_vwap(symbol) is None
+
+
 def test_zero_volume_series_yields_no_vwap() -> None:
     engine = _engine_with_bars([_session_bar(i, 100.0 + i, 0) for i in range(5)])
 
