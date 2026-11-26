@@ -3408,7 +3408,8 @@ class StrategyManager(_BaseStrategyManager):
             if fut_fresh:
                 indicators["futures_context"] = fut_ctx
                 indicators["futures_ltp"] = fut_ctx.get("ltp")
-                if fut_ctx.get("vwap_source") == "active_future_quote_vwap":
+                if (fut_ctx.get("vwap_source") == "active_future_quote_vwap"
+                    and indicators.get("futures_vwap_source") != "active_future_quote_vwap"):
                     indicators["futures_vwap"] = fut_ctx.get("vwap")
                     indicators["futures_vwap_source"] = (
                         "active_future_quote_vwap"
@@ -3689,8 +3690,8 @@ class StrategyManager(_BaseStrategyManager):
                     symbol,
                     bool(spot_ctx),
                     bool(fut_ctx),
-                    (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
-                    (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
+                    spot_tick_age_s,
+                    fut_tick_age_s,
                     indicators.get("selected_ce"),
                     indicators.get("selected_pe"),
                     interval_sec=30.0,
@@ -3724,10 +3725,11 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
 
-            if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
+            # Keep the freshly read quote-counter measurement; a context
+            # snapshot must not overwrite it or relabel derived VWAP as broker VWAP.
+            if (fut_fresh and indicators.get("futures_volume_ratio") is None
+                and fut_ctx.get("futures_volume_ratio") is not None):
                 indicators["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
-            if fut_fresh and fut_ctx.get("vwap") is not None:
-                indicators["futures_vwap"] = fut_ctx.get("vwap")
             if fut_fresh and fut_ctx.get("vwap_slope") is not None:
                 indicators["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
 
