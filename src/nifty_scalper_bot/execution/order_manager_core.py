@@ -4204,7 +4204,17 @@ class OrderManager:
                         contract_expiry=contract_expiry,
                         requested_lots=requested_lots,
                         resolved_lot_size=resolved_lot_size,
-                        trade_provenance=dict(trade_provenance or {}),
+                        trade_provenance={
+                            **dict(trade_provenance or {}),
+                            **(
+                                {"entry_order_original_limit_price": float(price)}
+                                if normalized_intent == "ENTRY"
+                                and side == "BUY"
+                                and normalized_symbol.endswith(("CE", "PE"))
+                                and price is not None
+                                else {}
+                            ),
+                        },
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -6792,6 +6802,20 @@ class OrderManager:
             sl_price = float(order.stop_loss or 0.0)
             tp_price = float(order.take_profit or 0.0)
             side = str(order.side).upper()
+            provenance = order.trade_provenance or {}
+            anchor_mode = str(
+                provenance.get("bracket_anchor_mode") or "distance"
+            ).lower()
+            original_limit = _positive_exit_provenance_value(
+                provenance.get("entry_order_original_limit_price")
+            )
+            # BracketManager owns the only fill reanchoring. Register at the
+            # broker order's original limit and confirm at its actual fill.
+            bracket_reference_price = (
+                original_limit
+                if anchor_mode == "distance" and original_limit is not None
+                else entry_price
+            )
             if sl_price <= 0:
                 sl_price = round(entry_price * (0.90 if side == "BUY" else 1.10), 1)
             if tp_price <= 0:
@@ -6827,7 +6851,7 @@ class OrderManager:
                     symbol=order.symbol,
                     side=side,
                     qty=qty,
-                    price=entry_price,
+                    price=bracket_reference_price,
                     sl=sl_price,
                     tp=tp_price,
                     tag=order.tag or source,
