@@ -410,7 +410,9 @@ def _research_orb_structural_context(
         "underlying_direction_confidence": (
             observation.confidence if observation else 0.0
         ),
-        "context_fresh": bool(spot_observation or futures_observation),
+        # Both completed underlying histories must exist; a neutral or
+        # conflicting direction estimate does not make an observed bar stale.
+        "context_fresh": bool(spot_payload) and bool(futures_payload),
         # Closed minute bars establish bar-order causality, NOT live tick age.
         "context_age_seconds": 0.0,
         "research_context_age_proxy": "completed_bar_same_step",
