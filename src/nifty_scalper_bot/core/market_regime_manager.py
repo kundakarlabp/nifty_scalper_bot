@@ -1,7 +1,8 @@
 """Central market regime coordinator with gating and diagnostics.
 
 Responsibilities: refresh timestamped underlying indicators and completed
-in-memory price history, stabilise regime transitions, and explain the accepted
+in-memory price history, stabilise directional transitions on distinct adjacent
+completed observations, and explain the accepted
 regime evidence in throttled runtime diagnostics.
 
 Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
@@ -71,6 +72,7 @@ class MarketRegimeManager:
     _raw_current: RegimeSnapshot | None = field(init=False, default=None, repr=False)
     _pending_regime: str | None = field(init=False, default=None, repr=False)
     _pending_count: int = field(init=False, default=0, repr=False)
+    _pending_evidence_at: float | None = field(init=False, default=None, repr=False)
     _last_filter_reasons: tuple[str, ...] = field(
         init=False, default_factory=tuple, repr=False
     )
@@ -490,11 +492,49 @@ class MarketRegimeManager:
                 self._pending_count = 0
                 return previous
 
-            if self._pending_regime == incoming.value:
-                self._pending_count += 1
-            else:
+            if (
+                incoming in {MarketRegime.TREND, MarketRegime.RANGE}
+                and "completed_bar_timestamp" in snapshot.adjustments
+            ):
+                evidence_at = snapshot.adjustments.get("completed_bar_timestamp")
+                if (
+                    not isinstance(evidence_at, (int, float))
+                    or isinstance(evidence_at, bool)
+                    or not math.isfinite(evidence_at)
+                    or evidence_at <= 0
+                ):
+                    self._pending_regime = incoming.value
+                    self._pending_count = 0
+                    self._pending_evidence_at = None
+                    return previous
+                prior_evidence = self._pending_evidence_at
+                same_pending = (
+                    self._pending_regime == incoming.value and self._pending_count > 0
+                )
+                if same_pending and prior_evidence is not None:
+                    if evidence_at <= prior_evidence:
+                        return previous
+                    self._pending_count = (
+                        self._pending_count + 1
+                        if evidence_at - prior_evidence == 60.0
+                        else 1
+                    )
+                else:
+                    self._pending_count = 1
                 self._pending_regime = incoming.value
-                self._pending_count = 1
+                self._pending_evidence_at = float(evidence_at)
+            else:
+                # Explicit external observations retain their existing contract.
+                # They cannot complete a partially observed candle transition.
+                if (
+                    self._pending_regime == incoming.value
+                    and self._pending_evidence_at is None
+                ):
+                    self._pending_count += 1
+                else:
+                    self._pending_regime = incoming.value
+                    self._pending_count = 1
+                self._pending_evidence_at = None
 
             if self._pending_count >= self.transition_confirmations:
                 self._current = snapshot
@@ -663,6 +703,7 @@ class MarketRegimeManager:
             # 3. Use only timestamped, completed in-memory underlying bars.
             # Price-only snapshots cannot prove flat momentum or low activity.
             price_series: list[float] = []
+            completed_bar_timestamp = 0.0
             history = getattr(self.indicators, "get_history", None)
             if callable(history):
                 try:
@@ -686,8 +727,10 @@ class MarketRegimeManager:
                             )
                         )
                         if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=now_ist.tzinfo)
+                            continue
                         ts = ts.astimezone(now_ist.tzinfo)
+                        if ts.second != 0 or ts.microsecond != 0:
+                            continue
                         age = (now_ist - ts).total_seconds()
                         close_raw = bar.get("close")
                         if close_raw is None:
@@ -695,17 +738,33 @@ class MarketRegimeManager:
                         value = float(close_raw)
                         if (
                             ts.date() == now_ist.date()
-                            and 0 <= age <= 1200
+                            and 9 * 60 + 15 <= ts.hour * 60 + ts.minute < 15 * 60 + 30
+                            and 60 <= age <= 1200
                             and math.isfinite(value)
                             and value > 0
                         ):
                             completed.append((ts, value))
-                    completed = sorted(dict(completed).items())
+                    unique = dict(completed)
+                    if any(unique[ts] != close for ts, close in completed):
+                        raise ValueError("conflicting_regime_completed_bar")
+                    completed = sorted(unique.items())
+                    # Use the contiguous tail, not a history with silent gaps.
+                    start = len(completed) - 1
+                    while (
+                        start > 0
+                        and (
+                            completed[start][0] - completed[start - 1][0]
+                        ).total_seconds()
+                        == 60.0
+                    ):
+                        start -= 1
+                    completed = completed[start:]
                     if (
                         len(completed) >= 6
                         and (now_ist - completed[-1][0]).total_seconds() <= 180
                     ):
                         price_series = [close for _, close in completed]
+                        completed_bar_timestamp = completed[-1][0].timestamp()
                 except (TypeError, ValueError, OverflowError, AttributeError):
                     price_series = []
 
@@ -716,8 +775,16 @@ class MarketRegimeManager:
                 "price": data.get("close"),
                 **{k: v for k, v in data.items() if v is not None},
             }
-            if price_series and not enrichment.get("price_series"):
+            for key in (
+                "price_series",
+                "close_series",
+                "price_history",
+                "close_history",
+            ):
+                enrichment.pop(key, None)
+            if price_series:
                 enrichment["price_series"] = price_series
+            enrichment["completed_bar_timestamp"] = completed_bar_timestamp
 
             # 5. Evaluate regime
             snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)

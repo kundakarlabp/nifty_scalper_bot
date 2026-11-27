@@ -468,6 +468,78 @@ def test_excursion_research_records_original_regime_rejection_only_once() -> Non
     assert first[0]["observed_decisions"] == 1
 
 
+def test_shadow_local_range_in_trend_uses_selected_contract() -> None:
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    context = indicators(regime="TREND", regime_raw="trend", regime_gate_allowed=True)
+    reason = "strategy_regime_ineligible"
+    strategy.observe_research_excursion(
+        "NFO:NIFTY26NOV25300CE",
+        dict(context, is_selected_option=False, selected_ce=OPTION),
+        blocked_reason=reason,
+    )
+    strategy.observe_research_excursion(OPTION, context, blocked_reason=reason)
+    record = strategy.get_research_snapshot()["opportunities"][0]
+    assert record["symbol"] == OPTION
+    assert record["local_range_candidate"] is True
+    assert record["local_range_session_vwap_setup"] is True
+    assert record["status"] == "rejected"
+    assert record["dominant_rejection"] == reason
+    assert record["option_fills_verified"] is False
+
+    for raw, allowed in (("unknown", True), ("trend", False)):
+        blocked = RangeVWAPReclaimStrategy(
+            RangeVWAPReclaimStrategyConfig(), History(bars())
+        )
+        blocked.observe_research_excursion(
+            OPTION,
+            dict(context, regime_raw=raw, regime_gate_allowed=allowed),
+            blocked_reason=reason,
+        )
+        row = blocked.get_research_snapshot()["opportunities"][0]
+        assert row["local_range_session_vwap_setup"] is False
+
+
+def test_local_range_is_independent_of_session_center_gate() -> None:
+    cfg = RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.001)
+    result = assess_range_vwap_reclaim(bars(), decision_at=decision_at(), config=cfg)
+    assert result["qualified"] is False
+    assert result["local_range_candidate"] is True
+    assert result["local_range_persistent"] is True
+    assert result["local_range_state"] == "RANGE"
+    assert result["local_lower_boundary_rejections"] > 0
+    assert result["local_upper_boundary_rejections"] > 0
+    assert result["broader_60bar_directional_efficiency"] is None
+
+    breakout = bars()
+    breakout[-1].update(open=25275.0, high=25285.0, low=25270.0, close=25280.0)
+    changed = assess_range_vwap_reclaim(breakout, decision_at=decision_at(), config=cfg)
+    assert changed["local_range_state"] == "BREAKOUT"
+    assert changed["local_range_confirmed"] is False
+    assert changed["local_range_evidence_fraction"] == 0.0
+    assert (
+        changed["rolling_20m_secondary_center"]
+        == result["rolling_20m_secondary_center"]
+    )
+
+
+def test_local_regime_is_logged_without_session_excursion(caplog) -> None:
+    data = bars()
+    data[-2] = dict(data[-3], timestamp=data[-2]["timestamp"])
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), History(data))
+    context = indicators(regime="TREND", regime_raw="trend", regime_gate_allowed=True)
+    with caplog.at_level("INFO"):
+        strategy.observe_research_excursion(
+            OPTION, context, blocked_reason="strategy_regime_ineligible"
+        )
+        strategy.observe_research_excursion(
+            OPTION, context, blocked_reason="strategy_regime_ineligible"
+        )
+    records = [r for r in caplog.records if "RANGE_VWAP_LOCAL_REGIME " in r.message]
+    assert len(records) == 1
+
+
 def test_qualified_excursion_reuses_first_futures_identity_not_option_bar() -> None:
     strategy = RangeVWAPReclaimStrategy(
         RangeVWAPReclaimStrategyConfig(), History(bars())
@@ -994,6 +1066,72 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     assert signal.metadata["range_option_flow_verified"] is True
     assert signal.stop_loss == 94.0
     assert signal.target == 112.0
+
+
+def test_broader_direction_can_coexist_with_local_range() -> None:
+    data = bars()
+    start = datetime.fromisoformat(data[0]["timestamp"])
+    prefix = []
+    for i in range(30):
+        close = 25250.0 + (30 - i) * 10
+        prefix.append(
+            {
+                "timestamp": (start + timedelta(minutes=i)).isoformat(),
+                "open": close + 2.0,
+                "high": close + 2.5,
+                "low": close - 2.0,
+                "close": close,
+                "volume": 1000.0,
+                "is_complete": True,
+            }
+        )
+    for row in data:
+        row["timestamp"] = (
+            datetime.fromisoformat(row["timestamp"]) + timedelta(minutes=30)
+        ).isoformat()
+    result = assess_range_vwap_reclaim(
+        prefix + data,
+        decision_at=decision_at() + timedelta(minutes=30),
+        config=RangeVWAPReclaimStrategyConfig(),
+    )
+    assert result["broader_60bar_trend_side"] == "PE"
+    assert result["local_range_confirmed"] is True
+
+
+def test_local_breakout_and_opposing_broad_trend_veto_reversal(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    original = range_module.assess_range_vwap_reclaim
+    overrides = {"local_range_breakout": True}
+
+    def assessment(*args, **kwargs):
+        return {**original(*args, **kwargs), **overrides}
+
+    monkeypatch.setattr(range_module, "assess_range_vwap_reclaim", assessment)
+    for expected, updates in (
+        ("range_local_breakout_invalidated", {}),
+        (
+            "range_counter_broad_trend_local_reclaim_unconfirmed",
+            {
+                "local_range_breakout": False,
+                "broader_60bar_trend_side": "PE",
+                "local_range_confirmed": False,
+            },
+        ),
+        (
+            "range_counter_broad_trend_option_flow_insufficient",
+            {"local_range_confirmed": True, "local_reclaim_side": "CE"},
+        ),
+    ):
+        overrides.update(updates)
+        strategy = RangeVWAPReclaimStrategy(
+            RangeVWAPReclaimStrategyConfig(), History(bars())
+        )
+        strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+        assert (
+            strategy._evaluate_signal(OPTION, indicators(ofi_3s_normalized=0.15), 100.0)
+            is None
+        )
+        assert strategy.last_no_vote_reason == expected
 
 
 def test_live_range_pilot_rejects_unpriced_or_overbudget_signal(monkeypatch) -> None:

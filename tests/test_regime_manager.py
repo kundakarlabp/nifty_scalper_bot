@@ -319,3 +319,53 @@ def test_nonfinite_raw_regime_confidence_fails_closed() -> None:
 
     assert manager.can_trade(record_decision=False) is False
     assert "confidence_invalid" in manager.get_filter_reasons()
+
+
+def test_directional_transition_counts_only_adjacent_completed_bars() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=2)
+    now = time.time()
+    first = float(int(now // 60) * 60 - 180)
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "trend", 0.8, "baseline", now))
+    for i, bar_at in enumerate((first, first, first - 60, first + 120)):
+        manager.ingest_snapshot(
+            RegimeSnapshot(
+                "NIFTY",
+                "range",
+                0.8,
+                "candidate",
+                now + i * 0.01,
+                {"completed_bar_timestamp": bar_at},
+            )
+        )
+        assert manager.get_current_regime() == "trend"
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            "NIFTY",
+            "range",
+            0.8,
+            "confirmed",
+            now + 0.1,
+            {"completed_bar_timestamp": first + 180},
+        )
+    )
+    assert manager.get_current_regime() == "range"
+
+
+def test_missing_candle_identity_cannot_confirm_directional_transition() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector(), transition_confirmations=2)
+    now = time.time()
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "trend", 0.8, "baseline", now))
+    for offset in (0.01, 0.02, 0.03):
+        manager.ingest_snapshot(
+            RegimeSnapshot(
+                "NIFTY",
+                "range",
+                0.8,
+                "no completed evidence",
+                now + offset,
+                {"completed_bar_timestamp": 0.0},
+            )
+        )
+    assert manager.get_current_regime() == "trend"
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "event", 0.99, "shock", now + 0.04))
+    assert manager.get_current_regime() == "event"

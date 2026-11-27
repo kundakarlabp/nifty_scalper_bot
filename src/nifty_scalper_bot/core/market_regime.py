@@ -1,7 +1,8 @@
 """Market regime detection and fan-out utilities for trading components.
 
 Responsibilities: classify trend, range, high-volatility, event and low-activity
-conditions from corroborated market inputs; publish timestamped snapshots.
+conditions from corroborated market inputs; publish timestamped snapshots
+with completed-bar evidence identity when supplied by the canonical manager.
 The lightweight runner classifier is diagnostic only, not a live entry authority.
 
 Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
@@ -440,6 +441,11 @@ class MarketRegimeDetector:
                 realized_vol=realized_vol,
             )
             adjustments = self._build_adjustments(regime)
+            # Evaluation time is not the identity of the underlying evidence.
+            if "completed_bar_timestamp" in indicators:
+                adjustments["completed_bar_timestamp"] = self._extract_float(
+                    indicators, ("completed_bar_timestamp",)
+                )
             display_regime = adjustments.get("display_regime")
             snapshot_obj = RegimeSnapshot(
                 symbol=symbol,

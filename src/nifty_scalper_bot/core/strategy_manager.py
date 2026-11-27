@@ -3073,7 +3073,13 @@ class StrategyManager(_BaseStrategyManager):
         regime_decision_action = (
             "manager_allowed" if regime_allowed is True else "unavailable"
         )
-        if regime_allowed is True and raw_regime_name is not None and stable_regime_name != raw_regime_name:
+        regime_transition_pending = bool(
+            raw_regime_name is not None
+            and stable_regime_name is not None
+            and normalize_regime(stable_regime_name)
+            is not normalize_regime(raw_regime_name)
+        )
+        if regime_allowed is True and regime_transition_pending:
             regime_decision_action = "transition_pending"
         if regime_manager is not None:
             log_throttled(
@@ -3116,6 +3122,7 @@ class StrategyManager(_BaseStrategyManager):
             indicators["regime"] = regime_name
         indicators["regime_stable"] = stable_regime_name
         indicators["regime_raw"] = raw_regime_name
+        indicators["regime_transition_pending"] = regime_transition_pending
         indicators["regime_gate_allowed"] = regime_allowed
         indicators["regime_evidence_status"] = regime_decision_action
         indicators.setdefault("ltp", current_price)
