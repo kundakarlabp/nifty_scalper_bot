@@ -821,10 +821,13 @@ class IndicatorEngine:
                 )
         # An index has no directly traded volume. Only a traded futures
         # contract can supply the corroborating volume ratio.
-        if symbol.upper().endswith("FUT") and len(volumes) >= 21:
+        if (
+            symbol.upper().endswith("FUT")
+            and len(volumes) >= 21
+            and all(value > 0 for value in volumes[-21:])
+        ):
             baseline = sum(volumes[-21:-1]) / 20
-            if baseline > 0:
-                features["volume_spike_ratio"] = volumes[-1] / baseline
+            features["volume_spike_ratio"] = volumes[-1] / baseline
         return features
 
     def get_indicators(
