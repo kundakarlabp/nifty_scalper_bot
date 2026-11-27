@@ -8,7 +8,7 @@ bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
-range evidence within TREND independently of session-VWAP admission. In the
+range evidence including canonical UNKNOWN independently of live admission. In the
 existing eligible RANGE route, verified local breakouts veto reversal entries;
 strong opposing 60-bar context requires local confirmation and the existing
 stronger same-quote option flow and first-barrier after-cost payoff requirements.
@@ -54,7 +54,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RangeVWAPReclaimStrategyConfig,
 )
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
@@ -1008,6 +1008,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                             "bar_timestamp": bar_stamp,
                             "regime": str(indicators.get("regime") or "UNKNOWN"),
                             "regime_raw": indicators.get("regime_raw"),
+                            "shadow_transition_candidate": indicators.get(
+                                "regime_shadow_transition"
+                            ),
                             "regime_gate_allowed": indicators.get(
                                 "regime_gate_allowed"
                             ),
@@ -1076,6 +1079,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "regime": str(indicators.get("regime") or "UNKNOWN"),
                 "regime_raw": indicators.get("regime_raw"),
                 "regime_gate_allowed": indicators.get("regime_gate_allowed"),
+                "shadow_transition_candidate": indicators.get(
+                    "regime_shadow_transition"
+                ),
                 "local_range_candidate": structural.get("local_range_candidate"),
                 "local_range_state": structural.get("local_range_state"),
                 "local_range_evidence_fraction": structural.get(
@@ -1207,12 +1213,16 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return
         minute = decision.replace(second=0, microsecond=0).isoformat()
         key = (future, symbol[-2:])
+        attempt_key = (future, f"{side}:ATTEMPT")
+        attempt = str(int(decision.timestamp() // 5))
         with self._guard_lock:
             if self._research_observed_minute.get(key) == minute:
                 return
-            self._research_observed_minute[key] = minute
+            if self._research_observed_minute.get(attempt_key) == attempt:
+                return
             if len(self._research_observed_minute) > 32:
                 self._research_observed_minute.clear()
+            self._research_observed_minute[attempt_key] = attempt
         getter = getattr(self._indicator_engine, "get_history", None)
         if not callable(getter):
             return
@@ -1223,6 +1233,20 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             )
         except (TypeError, ValueError, KeyError, AttributeError):
             return
+        if evidence.get("bar_timestamp") is None:
+            log_throttled(
+                LOGGER,
+                f"range_research_history_unavailable:{future}",
+                "RANGE_VWAP_LOCAL_REGIME_UNAVAILABLE future=%s reason=%s",
+                future,
+                evidence.get("reason"),
+                interval_sec=60.0,
+            )
+            return
+        with self._guard_lock:
+            if self._research_observed_minute.get(key) == minute:
+                return
+            self._research_observed_minute[key] = minute
         # This is an observation only; NEVER call live lifecycle or reserve.
         self._active_opportunity = None
         self._observe_excursion(

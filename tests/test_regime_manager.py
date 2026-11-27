@@ -478,3 +478,60 @@ def test_completed_regime_inputs_exclude_provisional_and_unverified_volume(
     rows.append(missing)
     rows.append(dict(rows[-1], close=rows[-1]["close"] + 0.5))
     assert engine.get_completed_regime_inputs("NSE:NIFTY", now=now) == {}
+
+
+def test_fresh_intrabar_shock_latches_until_completed_observation(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.core import market_regime_manager as regime_module
+
+    clock = [float(int(time.time() // 60) * 60 + 15)]
+    monkeypatch.setattr(regime_module.time, "time", lambda: clock[0])
+    quote = {"symbol": "NSE:NIFTY", "ltp": 25000.0}
+
+    def get_quote(_symbol, *, allow_pull):
+        assert allow_pull is False
+        return quote
+
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(),
+        datahub=SimpleNamespace(get_quote=get_quote),
+        regime_settings={"symbol": "NSE:NIFTY", "require_completed_evidence": True},
+    )
+
+    def ingest(stamp):
+        manager.ingest_snapshot(
+            RegimeSnapshot(
+                "NSE:NIFTY",
+                "trend",
+                0.8,
+                "completed",
+                clock[0],
+                {
+                    "completed_bar_timestamp": stamp,
+                    "completed_reference_price": 25000.0,
+                    "intrabar_event_move_points": 35.0,
+                },
+            )
+        )
+
+    first = clock[0] - 75
+    ingest(first)
+    clock[0] += 60
+    ingest(first + 60)
+    quote["timestamp_ms"] = clock[0] * 1000
+    assert manager.can_trade()
+    quote.update(ltp=25040.0, timestamp_ms=(clock[0] - 5) * 1000)
+    assert manager.can_trade()
+    quote.update(symbol="NFO:OTHER", timestamp_ms=clock[0] * 1000)
+    assert manager.can_trade()
+    quote.update(symbol="NSE:NIFTY")
+    assert not manager.can_trade()
+    assert "regime_block_intrabar_spot_shock" in manager.get_filter_reasons()
+    assert manager.get_current_regime() == "trend"
+    quote.update(ltp=25000.0)
+    assert not manager.can_trade()
+    clock[0] += 60
+    ingest(first + 120)
+    quote["timestamp_ms"] = clock[0] * 1000
+    assert manager.can_trade()

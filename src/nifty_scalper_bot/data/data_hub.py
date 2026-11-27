@@ -14,6 +14,7 @@ Position in the pipeline:
 Owns / does NOT own:
 - Owns: convenience read/derive helpers (e.g. quote bid/ask/spread, greeks) and
   a thin store for non-history state.
+- get_option_contract_metadata reads the broker-dump option row without pulls.
 - get_option_model_snapshot: return same-quote NIFTY option expiry, lot and
   spot-referenced model Greeks using the broker instrument resolver and the
   existing options_math Black-Scholes/IV functions; fail closed on absent data.
@@ -1323,15 +1324,8 @@ class DataHub:
         self._iv_cache[symbol] = float(iv)
         self._greeks_cache[symbol] = dict(greeks)
 
-    def _parse_option_symbol(
-        self, symbol: str
-    ) -> tuple[str, datetime, float, bool] | None:
-        """Resolve option identity from broker instrument metadata.
-
-        Expiry is deliberately not reconstructed from the trading symbol. Weekly
-        and monthly contracts both use the resolver's broker-dump row, keeping
-        contract dates aligned with the InstrumentManager/contract SSOT.
-        """
+    def get_option_contract_metadata(self, symbol: str) -> Mapping[str, Any] | None:
+        """Read the resolver's option row; never fetch or infer a contract."""
         metadata_owner = self._resolver
         lookup = getattr(metadata_owner, "lookup", None)
         if not callable(lookup):
@@ -1344,6 +1338,21 @@ class DataHub:
         except Exception:  # noqa: BLE001 - optional analytics must stay non-gating
             return None
         if not isinstance(row, Mapping):
+            return None
+        side = str(row.get("instrument_type") or "").strip().upper()
+        return row if side in {"CE", "PE"} else None
+
+    def _parse_option_symbol(
+        self, symbol: str
+    ) -> tuple[str, datetime, float, bool] | None:
+        """Resolve option identity from broker instrument metadata.
+
+        Expiry is deliberately not reconstructed from the trading symbol. Weekly
+        and monthly contracts both use the resolver's broker-dump row, keeping
+        contract dates aligned with the InstrumentManager/contract SSOT.
+        """
+        row = self.get_option_contract_metadata(symbol)
+        if row is None:
             return None
 
         raw_expiry = row.get("expiry")
@@ -2490,18 +2499,11 @@ class DataHub:
         base, expiry, strike, is_call = parsed
         if base != "NIFTY":
             return {}
-        owner = self._resolver
-        lookup = getattr(owner, "lookup", None)
-        if not callable(lookup):
-            owner = getattr(owner, "_instrument_manager", None)
-            lookup = getattr(owner, "lookup", None)
-        if not callable(lookup):
-            return {}
         if spot_price is None or bid is None or ask is None:
             return {}
         try:
-            row = lookup(symbol)
-            if not isinstance(row, Mapping):
+            row = self.get_option_contract_metadata(symbol)
+            if row is None:
                 return {}
             lot_size = int(row["lot_size"])
             spot, best_bid, best_ask = float(spot_price), float(bid), float(ask)

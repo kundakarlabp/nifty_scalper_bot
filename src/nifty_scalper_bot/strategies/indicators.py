@@ -3,7 +3,8 @@
 Responsibility: store canonical symbol-scoped OHLCV history in PriceHistory and
 calculate indicator snapshots through IndicatorEngine. The named EMA9/EMA21
 contract is owned here rather than duplicated in strategy or regime callers.
-The completed-regime snapshot uses one contiguous, verified session history.
+The completed-regime snapshot uses one contiguous, verified session history
+and publishes causal 30-bar structural features for transition research.
 
 Safety: missing or insufficient underlying bar history must never be turned
 into fabricated indicator evidence; live broker execution and risk guards live
@@ -805,6 +806,20 @@ class IndicatorEngine:
             atr = self._calculate_atr(highs, lows, closes, 14)
             features["atr"] = atr
             features["atr_bps"] = atr / closes[-1] * 10000.0
+            if len(closes) >= 30 and atr > 0:
+                local = closes[-30:]
+                move = local[-1] - local[0]
+                travel = sum(abs(b - a) for a, b in zip(local, local[1:]))
+                # The midpoint of the observed window is descriptive, not
+                # a historic entry level or a retrospectively executable signal.
+                center = sum(local) / len(local)
+                signs = [1 if x > center else -1 for x in local if x != center]
+                features["local_30bar_center_crossings"] = float(
+                    sum(a != b for a, b in zip(signs, signs[1:]))
+                )
+                features["local_30bar_displacement_atr"] = move / atr
+                if travel > 0:
+                    features["local_30bar_directional_efficiency"] = abs(move) / travel
         if len(closes) >= 21:
             features["ema_fast"] = self._calculate_ema(closes, 9)
             features["ema_slow"] = self._calculate_ema(closes, 21)

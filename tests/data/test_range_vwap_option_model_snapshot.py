@@ -90,3 +90,15 @@ def test_existing_lazy_datahub_greeks_use_canonical_pricing_signature() -> None:
     hub._capture_option_metrics(SYMBOL, {"ltp": 100.0})
     assert hub._iv_cache[SYMBOL] > 0
     assert 0 < hub._greeks_cache[SYMBOL]["delta"] < 1
+
+
+def test_research_contract_metadata_needs_no_quote_or_model() -> None:
+    hub = _hub()
+    row = hub.get_option_contract_metadata(SYMBOL)
+    assert row is not None
+    assert row["lot_size"] == 65
+    assert hub.get_option_contract_metadata("NFO:UNKNOWN") is None
+    hub._resolver = SimpleNamespace(
+        lookup=lambda _symbol: {"instrument_type": "FUT", "lot_size": 65}
+    )
+    assert hub.get_option_contract_metadata(SYMBOL) is None
