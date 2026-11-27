@@ -460,6 +460,7 @@ class MarketRegimeDetector:
             for key in (
                 "completed_bar_timestamp",
                 "verified_completed_bars",
+                "volume_ratio",
                 "atr_bps",
                 "broader_60bar_displacement_bps",
                 "broader_60bar_directional_efficiency",
@@ -764,6 +765,8 @@ class MarketRegimeDetector:
                 if value is None:
                     indicators[key] = None
                     continue
+                if isinstance(value, bool) and key != "event_flag":
+                    continue
                 coerced = self._coerce_indicator_value(value)
                 if coerced is not None:
                     indicators[key] = coerced
@@ -799,24 +802,20 @@ class MarketRegimeDetector:
         if isinstance(value, bool):
             return 1.0 if value else 0.0
         if isinstance(value, (int, float)):
-            return float(value)
+            return float(value) if math.isfinite(value) else None
         if isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
         ):
             normalised: list[float] = []
             for item in value:
-                if isinstance(item, (int, float, bool)):
-                    normalised.append(float(item))
-                    continue
-                try:
-                    normalised.append(float(item))  # type: ignore[arg-type]
-                except (TypeError, ValueError):
+                if isinstance(item, bool):
                     return None
+                number = MarketRegimeDetector._coerce_float(item)
+                if number is None:
+                    return None
+                normalised.append(number)
             return tuple(normalised)
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
+        return MarketRegimeDetector._coerce_float(value)
 
     @staticmethod
     def _tick_symbol(tick: Mapping[str, object]) -> str:
