@@ -290,8 +290,7 @@ def _local_regime_minutes(
             shadow_transition_counts[str(candidate)] += 1
         denied_observations += int(row.get("regime_gate_allowed") is False)
         unknown_local_range += int(
-            state == "RANGE"
-            and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+            state == "RANGE" and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
         )
         confirmed_in_trend += int(
             state == "RANGE"
