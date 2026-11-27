@@ -57,6 +57,7 @@ from nifty_scalper_bot.config.strategy_taxonomy import (
     range_vwap_live_enabled,
     strategy_regime_eligible,
 )
+from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
     WalkForwardOptimizer,
@@ -2788,14 +2789,15 @@ class StrategyManager(_BaseStrategyManager):
         if classify_symbol_role(symbol) != "tradable_option" or self._data_hub is None:
             return
         try:
-            ce, pe = self._data_hub.get_selected_option_symbols()
+            selection = active_contract_selection_from_basket(
+                self._data_hub.get_active_contract_basket()
+            )
+            ce, pe = selection.selected_ce, selection.selected_pe
             if normalize_symbol(symbol) not in {
                 normalize_symbol(str(ce or "")), normalize_symbol(str(pe or ""))
             }:
                 return
-            future = canonical_nifty_future_symbol(
-                self._resolve_active_futures_symbol_for_metrics()
-            )
+            future = canonical_nifty_future_symbol(selection.futures_symbol)
             if future is None:
                 return
             stable = regime_manager.get_latest_snapshot()
@@ -2817,7 +2819,15 @@ class StrategyManager(_BaseStrategyManager):
                     if isinstance(raw, RegimeSnapshot) else None
                 ),
             }
-            # No inferred executable bid/ask or cost proof on this denied path.
+            # Retain only broker-owned lot metadata so the archived full-lot
+            # bid/ask tape can label this observation later. No quote or risk
+            # model is inferred, and no option pricing is performed here.
+            metadata_getter = getattr(self._data_hub, "get_option_contract_metadata", None)
+            row = metadata_getter(symbol) if callable(metadata_getter) else None
+            if isinstance(row, t.Mapping) and str(row.get("name") or "").upper() == "NIFTY" and str(row.get("instrument_type") or "").upper() == symbol[-2:]:
+                lot_size = _safe_float_value(row.get("lot_size"))
+                if lot_size is not None and isfinite(lot_size) and 0 < lot_size < 10000 and lot_size.is_integer() and not isinstance(row.get("lot_size"), bool):
+                    context["lot_size"] = int(lot_size)
             for strategy in self._strategies:
                 if getattr(strategy, "name", "") != "RangeVWAPReclaim":
                     continue
@@ -3179,7 +3189,7 @@ class StrategyManager(_BaseStrategyManager):
             raw_regime_snapshot.adjustments.get("shadow_transition_candidate")
             if isinstance(raw_regime_snapshot, RegimeSnapshot) else None
         )
-        indicators.setdefault("decision_at", datetime.now(timezone.utc))
+        indicators.setdefault("decision_at", datetime.now(timezone.utc).isoformat())
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
         indicators.setdefault("close", current_price)
@@ -3796,23 +3806,6 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
 
         if symbol_role == "tradable_option":
-            if self._data_hub is not None:
-                selected_getter = getattr(self._data_hub, "get_selected_option_symbols", None)
-                if callable(selected_getter):
-                    try:
-                        selected_ce, selected_pe = selected_getter()
-                    except Exception as exc:
-                        log_throttled(log, f"range_selected_basket_unavailable:{symbol}",
-                            "RANGE_SELECTED_BASKET_UNAVAILABLE symbol=%s error=%s",
-                            symbol, str(exc), interval_sec=60.0, level=logging.WARNING)
-                    else:
-                        if selected_ce is not None or selected_pe is not None:
-                            indicators["selected_ce"] = selected_ce
-                            indicators["selected_pe"] = selected_pe
-                            indicators["is_selected_option"] = symbol in {
-                                normalize_symbol(str(selected_ce or "")),
-                                normalize_symbol(str(selected_pe or "")),
-                            }
             indicators = _enrich_option_candidate_metadata(symbol, indicators)
             recent_bars: list[dict[str, float]] = []
             for owner, method_name in (
