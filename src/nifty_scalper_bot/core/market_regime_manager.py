@@ -1234,9 +1234,7 @@ class MarketRegimeManager:
                     with self._lock:
                         # A price snapback or stale quote cannot clear a shock.
                         # Wait for a completed observation covering the event.
-                        shock_pending = (
-                            self._last_intrabar_shock_at >= evidence_at + 60
-                        )
+                        shock_pending = self._last_intrabar_shock_at >= evidence_at + 60
                     if shock_pending:
                         allowed = False
                         reasons.append("regime_block_intrabar_spot_shock")
