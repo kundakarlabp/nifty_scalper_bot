@@ -829,6 +829,14 @@ def _range_excursion_markouts(
                         row.get("local_range_confirmed_in_trend") is True
                         and first_rejection == "strategy_regime_ineligible"
                     ),
+                    "shadow_unknown_local_range_candidate": (
+                        str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+                        and row.get("regime_gate_allowed") is False
+                        and row.get("shadow_transition_candidate") == "RANGE"
+                        and row.get("local_range_state") == "RANGE"
+                        and row.get("local_reclaim_side") == row.get("side")
+                        and first_rejection == "canonical_regime_gate_block"
+                    ),
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
                     ),
@@ -859,6 +867,7 @@ def _range_excursion_markouts(
             "shadow_confirmed_local_range_in_trend",
             "shadow_confirmed_local_range_in_trend_candidate",
         ),
+        ("shadow_unknown_local_range", "shadow_unknown_local_range_candidate"),
     ):
         for horizon in (300, 600, 900):
             group = [
