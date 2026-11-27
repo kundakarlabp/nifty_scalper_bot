@@ -8,9 +8,10 @@ bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
-range evidence within TREND independently of session-VWAP admission, and applies a
-bounded failed-breakout exception to center disagreement with stronger
-same-quote option flow and first-barrier after-cost payoff requirements.
+range evidence within TREND independently of session-VWAP admission. In the
+existing eligible RANGE route, verified local breakouts veto reversal entries;
+strong opposing 60-bar context requires local confirmation and the existing
+stronger same-quote option flow and first-barrier after-cost payoff requirements.
 It owns regime confirmation and live setup de-duplication; the manager,
 runner and broker still own execution and protective orders.
 Entry lifecycle: notify_entry_accepted and notify_entry_rejected use existing
@@ -393,6 +394,14 @@ def assess_range_vwap_reclaim(
         if broader_move is not None and broader_travel > 0
         else None
     )
+    broader_trend_side = None
+    if (
+        broader_efficiency is not None
+        and broader_move is not None
+        and broader_efficiency > config.max_directional_efficiency
+        and abs(broader_move) >= 1.5 * atr
+    ):
+        broader_trend_side = "CE" if broader_move > 0 else "PE"
     local_reentry = max(config.min_band_reentry_atr * atr, 0.05 * band)
     local_reclaim_side = None
     if (
@@ -426,6 +435,7 @@ def assess_range_vwap_reclaim(
         "local_upper_boundary_rejections": upper_rejections,
         "local_reclaim_side": local_reclaim_side,
         "local_range_breakout": local_breakout,
+        "broader_60bar_trend_side": broader_trend_side,
         "broader_60bar_directional_efficiency": broader_efficiency,
         "broader_60bar_displacement_atr": (
             broader_move / atr if broader_move is not None else None
@@ -1011,6 +1021,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                                     "local_upper_boundary_rejections",
                                     "local_reclaim_side",
                                     "local_range_breakout",
+                                    "broader_60bar_trend_side",
                                     "broader_60bar_directional_efficiency",
                                     "broader_60bar_displacement_atr",
                                     "futures_atr_bps",
@@ -1435,11 +1446,25 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         if not timestamp or not self._regime_bar_confirmed(future, timestamp):
             self._no_vote("range_two_completed_regime_bars_required")
             return None
+        if structural.get("local_range_breakout") is True:
+            self._regime_bars.pop(future, None)
+            self._no_vote("range_local_breakout_invalidated")
+            return None
         if not structural.get("qualified"):
             self._no_vote(str(structural["reason"]))
             return None
         if structural.get("side") != side:
             self._no_vote("range_reversal_side_conflict")
+            return None
+        broader_trend_side = structural.get("broader_60bar_trend_side")
+        counter_broad_trend = (
+            broader_trend_side in {"CE", "PE"} and broader_trend_side != side
+        )
+        if counter_broad_trend and not (
+            structural.get("local_range_confirmed") is True
+            and structural.get("local_reclaim_side") == side
+        ):
+            self._no_vote("range_counter_broad_trend_local_reclaim_unconfirmed")
             return None
         opportunity_key = self._active_opportunity
         if opportunity_key is not None and opportunity_key in self._opportunities:
@@ -1576,10 +1601,14 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return None
 
         conditional_center = structural.get("conditional_center_exception_used") is True
-        if conditional_center and (
+        if (conditional_center or counter_broad_trend) and (
             ofi is None or ofi < self._cfg.min_conditional_option_ofi_3s
         ):
-            self._no_vote("range_conditional_option_flow_insufficient")
+            self._no_vote(
+                "range_counter_broad_trend_option_flow_insufficient"
+                if counter_broad_trend
+                else "range_conditional_option_flow_insufficient"
+            )
             return None
 
         stamp = decision_at.date().isoformat()
@@ -1656,8 +1685,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         local_center_ahead = (side == "CE" and fut_tick < local_center) or (
             side == "PE" and fut_tick > local_center
         )
-        if conditional_center and not local_center_ahead:
-            self._no_vote("range_conditional_local_center_already_reached")
+        if (conditional_center or counter_broad_trend) and not local_center_ahead:
+            self._no_vote(
+                "range_counter_broad_trend_local_center_already_reached"
+                if counter_broad_trend
+                else "range_conditional_local_center_already_reached"
+            )
             return None
         if local_center_ahead:
             local_barrier_points = abs(local_center - fut_tick)
@@ -1701,11 +1734,15 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._cfg.min_conditional_net_reward_risk,
             1.75,
         )
-        if conditional_center and (
+        if (conditional_center or counter_broad_trend) and (
             _value(budget.get("net_reward_risk")) is None
             or budget["net_reward_risk"] < conditional_min_rr
         ):
-            self._no_vote("range_conditional_payoff_buffer_insufficient")
+            self._no_vote(
+                "range_counter_broad_trend_payoff_buffer_insufficient"
+                if counter_broad_trend
+                else "range_conditional_payoff_buffer_insufficient"
+            )
             return None
         live_pilot = range_vwap_live_enabled()
         if live_pilot and (
@@ -1827,6 +1864,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     "failed_breakout_quality"
                 ),
                 "range_conditional_center_exception": conditional_center,
+                "range_counter_broad_trend": counter_broad_trend,
+                "range_broader_trend_side": broader_trend_side,
+                "range_local_regime_state": structural.get("local_range_state"),
                 "range_economic_surplus_rupees": budget.get(
                     "net_cash_surplus_above_1_5r"
                 ),
