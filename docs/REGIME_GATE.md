@@ -83,7 +83,7 @@ minutes, first-seen session excursions, and observed frozen local/session VWAP
 futures target touches. Prior dated reports supply a clock-matched ATR-bps
 median only when at least five prior sessions have that exact IST minute.
 This is research evidence, not a live override or an option fill simulation.
-The existing live session-VWAP admission rules, risk ceiling, protective
+The existing canonical regime eligibility, risk ceiling, protective
 stops and broker reconciliation are unchanged.
 
 The live RANGE route consumes the verified local-breakout veto and, when a
