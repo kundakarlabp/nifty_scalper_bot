@@ -712,8 +712,8 @@ def test_unknown_local_reclaim_requires_separate_session_confirmation(tmp_path) 
     for qualified in (False, True):
         row["structural_qualified"] = qualified
         journal = (
-        f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
-    )
+            f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
+        )
         report = build_session_research_report(
             session_date=date(2026, 11, 3),
             journal=journal,
@@ -734,3 +734,53 @@ def test_unknown_local_reclaim_requires_separate_session_confirmation(tmp_path) 
         assert strict["verified_risk_and_observed_horizon"] == 0
         assert strict["modeled_net_rupees_mean"] is None
         assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_rolling_vwap_reclaim_is_separate_and_never_inherits_session_risk(
+    tmp_path,
+) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, _ = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        excursion_basis="rolling_vwap",
+        excursion_id=(
+            f"{row['futures_symbol']}:{row['side']}:LOCAL:{row['excursion_first_bar']}"
+        ),
+        local_range_state="RANGE",
+        local_reclaim_side="CE",
+        structural_reason="rolling_vwap_reclaim_shadow_only",
+        structural_qualified=False,
+    )
+    forged_risk = {
+        "v": 1,
+        "decision_at": row["decision_at"],
+        "excursion_id": row["excursion_id"],
+        "symbol": CONTRACT,
+        "reason": "signal_emitted",
+        "modeled_stop_risk": 500,
+        "modeled_net_rr": 2.0,
+    }
+    journal += (
+        f"\n{prefix} {json.dumps(row)}\n"
+        f"RANGE_VWAP_EXCURSION_DECISION {json.dumps(forged_risk)}"
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "rolling_only.json",
+    )
+    assert len(report["range_excursion_opportunities"]) == 2
+    local = [
+        item
+        for item in report["range_excursion_horizons"]
+        if item["excursion_basis"] == "rolling_vwap"
+    ]
+    assert len(local) == 3
+    assert all(item["observed_book_and_futures_complete"] for item in local)
+    assert all(not item["same_decision_risk_773_and_net_rr_verified"] for item in local)
+    assert all(not item["baseline_signal_emitted_at_first_decision"] for item in local)
+    assert report["eligible_for_entry_filter_change"] is False
