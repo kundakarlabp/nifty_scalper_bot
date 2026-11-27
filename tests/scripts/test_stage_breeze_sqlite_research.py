@@ -277,8 +277,13 @@ def test_no_hindsight_fallback_to_archived_non_atm_strike(tmp_path: Path) -> Non
         )
     _refresh_digest(breeze, summary)
     report = run(
-        breeze, eod, tmp_path / "stage", summary_path=summary,
-        expected_windows=1, day="2025-02-04", permit_partial=True,
+        breeze,
+        eod,
+        tmp_path / "stage",
+        summary_path=summary,
+        expected_windows=1,
+        day="2025-02-04",
+        permit_partial=True,
     )
     assert report["staged_days"] == 0
     assert report["rejections"] == {"opening_atm_contract_minutes_not_available": 1}
@@ -302,8 +307,13 @@ def test_opening_completed_spot_selects_proven_asof_atm(tmp_path: Path) -> None:
         db.execute("UPDATE series SET strike=23600 WHERE product_type='options'")
     _refresh_digest(breeze, summary)
     report = run(
-        breeze, eod, tmp_path / "stage", summary_path=summary,
-        expected_windows=1, day="2025-02-04", permit_partial=True,
+        breeze,
+        eod,
+        tmp_path / "stage",
+        summary_path=summary,
+        expected_windows=1,
+        day="2025-02-04",
+        permit_partial=True,
     )
     assert report["staged_days"] == 1
     manifest = json.loads((tmp_path / "stage/2025-02-04/manifest.json").read_text())
@@ -320,8 +330,13 @@ def test_no_opening_spot_bar_no_causal_option_selection(tmp_path: Path) -> None:
         )
     _refresh_digest(breeze, summary)
     report = run(
-        breeze, eod, tmp_path / "stage", summary_path=summary,
-        expected_windows=1, day="2025-02-04", permit_partial=True,
+        breeze,
+        eod,
+        tmp_path / "stage",
+        summary_path=summary,
+        expected_windows=1,
+        day="2025-02-04",
+        permit_partial=True,
     )
     assert report["staged_days"] == 0
     assert report["rejections"] == {"opening_spot_minute_not_observed": 1}
@@ -330,13 +345,23 @@ def test_no_opening_spot_bar_no_causal_option_selection(tmp_path: Path) -> None:
 def test_day_limit_covers_all_original_breeze_source_dates(tmp_path: Path) -> None:
     breeze, eod, summary = _sources(tmp_path)
     accepted = run(
-        breeze, eod, tmp_path / "stage", summary_path=summary,
-        expected_windows=1, permit_partial=True, limit=600,
+        breeze,
+        eod,
+        tmp_path / "stage",
+        summary_path=summary,
+        expected_windows=1,
+        permit_partial=True,
+        limit=600,
     )
     assert accepted["input_days"] == 1
     assert accepted["staged_days"] == 1
     with pytest.raises(ValueError, match="research_output_exists_or_limit_invalid"):
         run(
-            breeze, eod, tmp_path / "too_many", summary_path=summary,
-            expected_windows=1, permit_partial=True, limit=1001,
+            breeze,
+            eod,
+            tmp_path / "too_many",
+            summary_path=summary,
+            expected_windows=1,
+            permit_partial=True,
+            limit=1001,
         )
