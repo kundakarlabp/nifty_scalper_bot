@@ -8,7 +8,7 @@ bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
-range evidence within TREND, and applies a
+range evidence within TREND independently of session-VWAP admission, and applies a
 bounded failed-breakout exception to center disagreement with stronger
 same-quote option flow and first-barrier after-cost payoff requirements.
 It owns regime confirmation and live setup de-duplication; the manager,
@@ -312,9 +312,125 @@ def assess_range_vwap_reclaim(
         and local_slope_bps is not None
         and local_slope_bps <= config.max_vwap_slope_bps_per_min
     )
+    # Confirm local structure across two adjacent completed windows. The
+    # overlapping windows establish persistence, not independent samples.
+    previous_closes = [float(row["close"]) for row in history[-26:-1]]
+    previous_travel = sum(
+        abs(b - a) for a, b in zip(previous_closes, previous_closes[1:])
+    )
+    previous_atr = statistics.mean(true_ranges[-15:-1])
+    previous_center = _weighted_center(history[-21:-1])
+    previous_center_5m_ago = _weighted_center(history[-26:-6])
+    previous_range = history[-31:-1]
+    previous_width = (
+        max(float(row["high"]) for row in previous_range)
+        - min(float(row["low"]) for row in previous_range)
+    )
+    local_persistent = bool(
+        local_range_candidate
+        and len(previous_range) == 30
+        and previous_atr > 0
+        and previous_travel > 0
+        and abs(previous_closes[-1] - previous_closes[0]) / previous_travel
+        <= config.max_directional_efficiency
+        and 1.5 <= previous_width / previous_atr <= config.max_range_width_atr
+        and previous_center is not None
+        and previous_center_5m_ago is not None
+        and previous_center > 0
+        and abs(previous_center - previous_center_5m_ago) / previous_center * 2000
+        <= config.max_vwap_slope_bps_per_min
+    )
+    local_lower, local_upper = rolling_center - band, rolling_center + band
+    # Prior completed candles only: descriptive two-sided acceptance at the
+    # frozen local band; these are not retrospectively executable entries.
+    lower_rejections = sum(
+        float(row["low"]) < local_lower <= float(row["close"]) < local_upper
+        for row in history[-30:-1]
+    )
+    upper_rejections = sum(
+        local_lower < float(row["close"]) <= local_upper < float(row["high"])
+        for row in history[-30:-1]
+    )
+    current_close = float(latest["close"])
+    prior_close = float(previous["close"])
+    local_breakout = bool(
+        current_close > max(float(row["high"]) for row in history[-30:])
+        or current_close < min(float(row["low"]) for row in history[-30:])
+        or (current_close > local_upper and current_close > prior_close > local_upper)
+        or (current_close < local_lower and current_close < prior_close < local_lower)
+    )
+    two_sided = lower_rejections > 0 and upper_rejections > 0
+    local_confirmed = bool(
+        local_persistent
+        and two_sided
+        and recent_tr_ratio <= config.max_failed_breakout_recent_tr_ratio
+        and not local_breakout
+    )
+    local_state = (
+        "BREAKOUT"
+        if local_breakout
+        else "RANGE"
+        if local_confirmed
+        else "EMERGING_RANGE"
+        if local_range_candidate
+        else "UNPROVEN"
+    )
+    # A transparent evidence fraction is NOT a calibrated regime probability.
+    local_score = sum(
+        (local_range_candidate, local_persistent, two_sided, recent_tr_ratio <= 1.0)
+    ) / 4.0
+    if local_breakout:
+        local_score = 0.0
+    broader_closes = [float(row["close"]) for row in history[-60:]]
+    broader_travel = sum(
+        abs(b - a) for a, b in zip(broader_closes, broader_closes[1:])
+    )
+    broader_move = (
+        broader_closes[-1] - broader_closes[0] if len(broader_closes) == 60 else None
+    )
+    broader_efficiency = (
+        abs(broader_move) / broader_travel
+        if broader_move is not None and broader_travel > 0
+        else None
+    )
+    local_reentry = max(config.min_band_reentry_atr * atr, 0.05 * band)
+    local_reclaim_side = None
+    if (
+        local_confirmed
+        and rvol >= config.min_reclaim_volume_ratio
+        and 0 < bar_range <= 2.0 * atr
+        and body_fraction >= config.min_reclaim_body_fraction
+    ):
+        if (
+            prior_close < local_lower
+            and local_lower + local_reentry <= current_close < rolling_center
+            and current_close > float(latest["open"])
+            and float(latest["low"]) >= float(previous["low"])
+        ):
+            local_reclaim_side = "CE"
+        elif (
+            prior_close > local_upper
+            and rolling_center < current_close <= local_upper - local_reentry
+            and current_close < float(latest["open"])
+            and float(latest["high"]) <= float(previous["high"])
+        ):
+            local_reclaim_side = "PE"
     evidence: dict[str, Any] = {
         "qualified": False,
         "local_range_candidate": local_range_candidate,
+        "local_range_state": local_state,
+        "local_range_confirmed": local_confirmed,
+        "local_range_persistent": local_persistent,
+        "local_range_evidence_fraction": local_score,
+        "local_lower_boundary_rejections": lower_rejections,
+        "local_upper_boundary_rejections": upper_rejections,
+        "local_reclaim_side": local_reclaim_side,
+        "local_range_breakout": local_breakout,
+        "broader_60bar_directional_efficiency": broader_efficiency,
+        "broader_60bar_displacement_atr": (
+            broader_move / atr if broader_move is not None else None
+        ),
+        "futures_atr_bps": atr / float(previous["close"]) * 10000,
         "local_rolling_center_slope_bps_per_min": local_slope_bps,
         "candidate_session_anchored_band_points": round(anchored_band, 4),
         "candidate_session_anchored_vs_primary_ratio": (
@@ -853,12 +969,60 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         selected = indicators.get("is_selected_option") is True or normalize_symbol(
             str(selected_symbol or "")
         ) == normalize_symbol(symbol)
-        if (
-            future is None
-            or structural.get("excursion_side") != side
-            or not first
-            or not selected
-        ):
+        if future is None or not selected:
+            return
+        # Observe local structure independently of session-VWAP excursions.
+        # The existing research dedup map also owns one record per future/bar.
+        bar_stamp = str(structural.get("bar_timestamp") or "")
+        local_key = (future, "LOCAL")
+        if bar_stamp and structural.get("local_range_state") is not None:
+            with self._guard_lock:
+                new_local_bar = self._research_observed_minute.get(local_key) != bar_stamp
+                if new_local_bar:
+                    self._research_observed_minute[local_key] = bar_stamp
+            if new_local_bar:
+                LOGGER.info(
+                    "RANGE_VWAP_LOCAL_REGIME %s",
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "decision_at": decision_at.isoformat(),
+                            "futures_symbol": future,
+                            "bar_timestamp": bar_stamp,
+                            "regime": str(indicators.get("regime") or "UNKNOWN"),
+                            "regime_raw": indicators.get("regime_raw"),
+                            "regime_gate_allowed": indicators.get("regime_gate_allowed"),
+                            "regime_transition_pending": indicators.get(
+                                "regime_transition_pending"
+                            ),
+                            "session_vwap_setup_qualified": structural.get("qualified"),
+                            **{
+                                key: structural.get(key)
+                                for key in (
+                                    "source",
+                                    "local_range_state",
+                                    "local_range_evidence_fraction",
+                                    "local_range_persistent",
+                                    "local_lower_boundary_rejections",
+                                    "local_upper_boundary_rejections",
+                                    "local_reclaim_side",
+                                    "local_range_breakout",
+                                    "broader_60bar_directional_efficiency",
+                                    "broader_60bar_displacement_atr",
+                                    "futures_atr_bps",
+                                    "range_width_atr",
+                                    "prior_5m_to_14m_true_range_ratio",
+                                    "local_rolling_center_slope_bps_per_min",
+                                    "session_vwap_before_confirmation",
+                                    "rolling_20m_secondary_center",
+                                )
+                            },
+                        },
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                )
+        if structural.get("excursion_side") != side or not first:
             return
         identity = f"{future}:{side}:{first}"
         with self._guard_lock:
@@ -893,6 +1057,18 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "regime_raw": indicators.get("regime_raw"),
                 "regime_gate_allowed": indicators.get("regime_gate_allowed"),
                 "local_range_candidate": structural.get("local_range_candidate"),
+                "local_range_state": structural.get("local_range_state"),
+                "local_range_evidence_fraction": structural.get(
+                    "local_range_evidence_fraction"
+                ),
+                "local_reclaim_side": structural.get("local_reclaim_side"),
+                "local_range_confirmed_in_trend": (
+                    structural.get("local_range_confirmed") is True
+                    and str(indicators.get("regime") or "").upper() == "TREND"
+                    and str(indicators.get("regime_raw") or "").upper() == "TREND"
+                    and indicators.get("regime_gate_allowed") is True
+                    and indicators.get("regime_transition_pending") is not True
+                ),
                 "local_rolling_center_slope_bps_per_min": _value(
                     structural.get("local_rolling_center_slope_bps_per_min")
                 ),
