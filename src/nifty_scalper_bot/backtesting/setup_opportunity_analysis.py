@@ -258,7 +258,7 @@ def canonicalize_range_excursions(
             or not future.endswith("FUT")
             or side not in {"CE", "PE"}
             or not first_bar_identity
-            or basis not in {"session_vwap", "rolling_vwap"}
+            or basis not in ("session_vwap", "rolling_vwap")
             or identity != expected_identity
             or (
                 basis == "rolling_vwap"
