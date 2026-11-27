@@ -5861,9 +5861,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ):
         os.environ.setdefault(env_key, env_default)
 
-    regime_symbol = "NIFTY"
-    if poll_symbols:
-        regime_symbol = poll_symbols[0]
+    # Use the canonical NIFTY spot context, never whichever option or
+    # instrument happens to appear first in a polling configuration.
+    regime_symbol = "NSE:NIFTY"
 
     market_regime_detector = MarketRegimeDetector()
     market_regime_manager = MarketRegimeManager(
@@ -5872,6 +5872,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         indicators=indicator_engine,
         regime_settings={
             "symbol": regime_symbol,
+            "require_completed_evidence": True,
             "update_interval_sec": 60,
             "atr_trend_threshold": 1.5,
             "vol_threshold": 25.0,
@@ -5879,32 +5880,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         },
     )
 
-    # Wire Regime Detector to Stream
-    try:
-        if hasattr(data_hub, "subscribe_ticks") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
-            callback = cast(
-                Callable[[dict[str, Any]], None],
-                market_regime_detector.ingest_tick,
-            )
-            data_hub.subscribe_ticks(regime_symbol, callback)
-            LOGGER.debug(f"Regime detector subscribed via DataHub to {regime_symbol}")
-
-        elif hasattr(streamer, "register_handler") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
-            streamer.register_handler(market_regime_detector.ingest_tick)
-            LOGGER.debug(f"Regime detector subscribed via Streamer to {regime_symbol}")
-
-    except Exception as exc:
-        LOGGER.error(
-            "Regime detector tick subscription failed",
-            extra={"event": "regime_subscription_failed", "symbol": regime_symbol},
-            exc_info=exc,
-        )
-    data_dir = os.getenv("DATA_DIR", "data")
-    persistent_state = PersistentStateManager(base_path=Path(data_dir))
+    # RegimeManager refreshes the completed-candle snapshot. Raw quote ticks
+    # must not publish a competing directional regime or refresh its timestamp.
 
     heartbeat_interval = max(
         1.0,
