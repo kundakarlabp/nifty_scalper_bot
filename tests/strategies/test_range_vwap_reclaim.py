@@ -514,15 +514,14 @@ def test_local_range_is_independent_of_session_center_gate() -> None:
 
     breakout = bars()
     breakout[-1].update(open=25275.0, high=25285.0, low=25270.0, close=25280.0)
-    changed = assess_range_vwap_reclaim(
-        breakout, decision_at=decision_at(), config=cfg
-    )
+    changed = assess_range_vwap_reclaim(breakout, decision_at=decision_at(), config=cfg)
     assert changed["local_range_state"] == "BREAKOUT"
     assert changed["local_range_confirmed"] is False
     assert changed["local_range_evidence_fraction"] == 0.0
-    assert changed["rolling_20m_secondary_center"] == result[
-        "rolling_20m_secondary_center"
-    ]
+    assert (
+        changed["rolling_20m_secondary_center"]
+        == result["rolling_20m_secondary_center"]
+    )
 
 
 def test_local_regime_is_logged_without_session_excursion(caplog) -> None:
