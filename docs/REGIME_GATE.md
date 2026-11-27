@@ -132,3 +132,26 @@ score wins classification. The ATR point thresholds are additionally scaled
 against an explicit 25,000-index reference (equivalent to 4.8/8.8/14 bps),
 without reducing the original point-based protection. This is a conservative
 normalisation convention, not empirically optimised time-of-day thresholds.
+
+## Intermediate ADX, denied observations and intrabar safety
+
+The selected-contract observation hook records completed futures evidence even
+when the canonical gate denies entry, with an explicit decision timestamp and
+no synthetic execution quote. Missing completed history is retried rather than
+consuming the current minute's research slot. The live gate continues to deny
+UNKNOWN. In the ADX interval between the existing chop and trend thresholds,
+30 completed spot bars provide descriptive efficiency, ATR-normalised move
+and center crossings. Strong two-sided or directional evidence is recorded as
+an experimental RANGE/TREND candidate, not as a calibrated permission.
+
+The canonical gate also checks the cached, timestamp-verified NIFTY spot quote
+against the completed reference price using the existing event-move threshold
+(normalized without weakening it). A confirmed shock vetoes new entries and
+remains latched until a completed candle covers the shock. The quote path
+cannot publish directional snapshots or affect protective exits. No REST
+pull, alternate classifier, or broker call is added.
+
+The post-session report counts UNKNOWN/local RANGE overlap and denied minutes,
+shadow transition candidates and clock-matched reference coverage. Fewer than
+five prior observed sessions at the same minute is insufficient; no adaptive
+threshold is promoted without chronological after-cost evidence.
