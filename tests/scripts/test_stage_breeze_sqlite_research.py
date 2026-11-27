@@ -365,3 +365,71 @@ def test_day_limit_covers_all_original_breeze_source_dates(tmp_path: Path) -> No
             permit_partial=True,
             limit=1001,
         )
+
+
+def test_option_lot_transition_does_not_block_context_future_lot(
+    tmp_path: Path,
+) -> None:
+    """Front-future lot 25 is valid context for weekly CE/PE lot 75."""
+    breeze, eod, summary = _sources(tmp_path)
+    with sqlite3.connect(eod) as db:
+        db.execute("UPDATE contract_eod SET lot_size=25 WHERE kind='FUT'")
+    report = run(
+        breeze,
+        eod,
+        tmp_path / "staged",
+        summary_path=summary,
+        expected_windows=1,
+        day="2025-02-04",
+        permit_partial=True,
+    )
+    assert report["staged_days"] == 1
+    staged = json.loads((tmp_path / "staged/2025-02-04/manifest.json").read_text())
+    assert staged["selected"]["FUT"]["lot_size"] == 25
+    assert staged["selected"]["CE"]["lot_size"] == 75
+    assert staged["selected"]["PE"]["lot_size"] == 75
+    assert staged["historical_option_lots_equal"] is True
+    assert staged["futures_context_lot_differs_from_options"] is True
+    assert len(staged["source_dataset_sha256"]) == 64
+    assert len(staged["source_eod_sha256"]) == 64
+
+
+def test_mismatched_traded_option_lots_still_fail_closed(tmp_path: Path) -> None:
+    """Never silence a CE/PE mismatch merely because futures are context."""
+    breeze, eod, summary = _sources(tmp_path)
+    with sqlite3.connect(eod) as db:
+        db.execute("UPDATE contract_eod SET lot_size=25 WHERE kind='PE'")
+    report = run(
+        breeze,
+        eod,
+        tmp_path / "staged",
+        summary_path=summary,
+        expected_windows=1,
+        day="2025-02-04",
+        permit_partial=True,
+    )
+    assert report["staged_days"] == 0
+    assert report["rejections"] == {"historical_option_lot_size_mismatch": 1}
+
+
+def test_independent_eod_source_digest_blocks_tampered_contract_master(
+    tmp_path: Path,
+) -> None:
+    """Source-anchored EOD digest must be checked before writing research days."""
+    breeze, eod, summary = _sources(tmp_path)
+    provenance = json.loads(summary.read_text())
+    provenance["eod_reference_sha256"] = hashlib.sha256(eod.read_bytes()).hexdigest()
+    summary.write_text(json.dumps(provenance))
+    with sqlite3.connect(eod) as db:
+        db.execute("UPDATE contract_eod SET lot_size=25 WHERE kind='PE'")
+    with pytest.raises(ValueError, match="breeze_eod_reference_checksum_mismatch"):
+        run(
+            breeze,
+            eod,
+            tmp_path / "staged",
+            summary_path=summary,
+            expected_windows=1,
+            day="2025-02-04",
+            permit_partial=True,
+        )
+    assert not (tmp_path / "staged").exists()
