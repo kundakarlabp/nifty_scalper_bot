@@ -1354,7 +1354,6 @@ def test_range_guard_does_not_authorize_memory_only_write(
     assert not strategy._persist_guard()
 
 
-
 def test_nested_range_requires_aligned_canonical_spot_and_futures(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -1363,7 +1362,9 @@ def test_nested_range_requires_aligned_canonical_spot_and_futures(monkeypatch) -
     monkeypatch.setenv("PAPER__ENABLED", "false")
     monkeypatch.setenv("PAPER_MODE", "false")
     monkeypatch.setenv("SHADOW_MODE", "false")
-    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), History(bars()))
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
     context = indicators(
         regime="TREND",
         regime_raw="TREND",
@@ -1378,6 +1379,5 @@ def test_nested_range_requires_aligned_canonical_spot_and_futures(monkeypatch) -
     assert strategy.last_no_vote_reason == "range_local_trend_structure_unconfirmed"
     context["regime_raw"] = "RANGE"
     strategy._evaluate_signal(OPTION, context, 100.0)
-    assert (
-        strategy.last_no_vote_reason == "range_local_trend_canonical_evidence_unconfirmed"
-    )
+    reason = "range_local_trend_canonical_evidence_unconfirmed"
+    assert strategy.last_no_vote_reason == reason
