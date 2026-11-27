@@ -20827,20 +20827,29 @@ class StrategyRunner:
             regime_manager = getattr(
                 getattr(self, "_strategy_manager", None), "_regime_manager", None
             )
-            if is_live_mode and execution_mode == "LIVE":
+            if is_live_mode and (
+                execution_mode == "LIVE" or regime_manager is not None
+            ):
+                gate_reasons = ()
                 try:
                     regime_allowed = regime_manager is not None and regime_manager.can_trade(
                         context={"component": "runner_before_submit", "symbol": order_symbol},
                         record_decision=False,
-                        expected_regime=metadata.get("regime_effective")
-                        or metadata.get("runtime_regime"),
+                        expected_regime=metadata.get("regime_effective") or "UNKNOWN",
                     )
-                except Exception:
+                    if regime_manager is not None:
+                        gate_reasons = tuple(regime_manager.get_filter_reasons())
+                except Exception as exc:
+                    self._logger.error("Final regime revalidation failed: %s", exc)
                     regime_allowed = False
                 if not regime_allowed:
                     return _reject_after_dedup(
                         reason="regime_changed_or_unavailable_before_submit",
-                        details={"stage": "before_submit", "broker_attempted": False},
+                        details={
+                            "stage": "before_submit",
+                            "broker_attempted": False,
+                            "gate_reasons": gate_reasons,
+                        },
                     )
             submit_result_fn = getattr(
                 self._order_manager, "submit_trade_plan_result", None
