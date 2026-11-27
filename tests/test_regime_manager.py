@@ -439,7 +439,7 @@ def test_completed_regime_inputs_exclude_provisional_and_unverified_volume(
     start = datetime(2026, 11, 27, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
     rows = []
     for i in range(65):
-        close = 25000.0 + 2 * i
+        close = 25000.0 + 1.25 * i
         rows.append(
             {
                 "timestamp": start + timedelta(minutes=i),
@@ -457,6 +457,8 @@ def test_completed_regime_inputs_exclude_provisional_and_unverified_volume(
     baseline = engine.get_completed_regime_inputs("NSE:NIFTY", now=now)
     assert baseline["verified_completed_bars"] == 65
     assert baseline["broader_60bar_directional_efficiency"] == 1
+    assert baseline["adx"] == 100.0
+    assert MarketRegimeDetector().evaluate("NSE:NIFTY", baseline).regime == "trend"
     assert "volume_spike_ratio" not in baseline
     assert (
         engine.get_completed_regime_inputs("NFO:NIFTY26NOVFUT", now=now)[
