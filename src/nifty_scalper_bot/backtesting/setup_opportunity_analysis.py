@@ -352,6 +352,7 @@ def canonicalize_range_excursions(
                     "local_range_session_vwap_setup"
                 ),
                 "structural_reason": first.get("structural_reason"),
+                "structural_qualified": first.get("structural_qualified") is True,
                 "first_rejection_reason": initial_rejection,
                 "observed_decision_reasons": reasons,
                 "same_decision_signal_emitted": any(
