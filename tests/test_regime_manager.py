@@ -502,7 +502,11 @@ def test_fresh_intrabar_shock_latches_until_completed_observation(monkeypatch) -
     def ingest(stamp):
         manager.ingest_snapshot(
             RegimeSnapshot(
-                "NSE:NIFTY", "trend", 0.8, "completed", clock[0],
+                "NSE:NIFTY",
+                "trend",
+                0.8,
+                "completed",
+                clock[0],
                 {
                     "completed_bar_timestamp": stamp,
                     "completed_reference_price": 25000.0,
