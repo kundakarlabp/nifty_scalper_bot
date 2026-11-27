@@ -213,7 +213,9 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
         if not all(existing.get(key) == request.get(key) for key in special):
             return False
         if request.get("session_date") is not None:
-            return all(existing.get(key) == request.get(key) for key in ("start", "end"))
+            return all(
+                existing.get(key) == request.get(key) for key in ("start", "end")
+            )
     # Rolling requests resolve their dates once; polling tomorrow is not a
     # new job. Explicit pinned dates and source digests remain immutable.
     return True
