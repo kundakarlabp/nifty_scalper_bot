@@ -2200,6 +2200,8 @@ class IndicatorEngine:
             adx += (value - adx) / period
         # Wilder's formula is mathematically bounded; contain floating-point
         # roundoff at the indicator owner instead of accepting invalid external ADX.
+        if not np.isfinite(adx):
+            raise ValueError("Non-finite ADX calculation")
         return min(100.0, max(0.0, float(adx)))
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
