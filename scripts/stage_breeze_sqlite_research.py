@@ -1,10 +1,15 @@
-"""Stage verified Breeze SQLite candles for offline strategy research.
+"""Stage recovered Breeze OHLCV for strictly causal, offline component research.
 
-Responsibilities: Point-in-time EOD contract referencing, gap-aware session gating,
-optional existing strategy-research replay and inspectable exclusion counts.
-Ownership: Operator-invoked offline research only; not the production research worker.
-Safety: No broker API, quote reconstruction, synthetic token, same-day EOD lookahead,
-Live promotion, or mutation of either the historical database or raw archives.
+Responsibilities: Use previous-session EOD listed contracts, the 09:15 spot
+candle after its 09:16 availability, and the listed front future to select a
+fixed CE/PE basket. Reject absent exact bars; never pick a later available
+strike. Preserve synchronized-minute gaps, metadata and rejected-day reasons.
+Entry points: run(..., limit=1000) stages at most 1,000 requested dates,
+validates source SHA, and optionally reuses canonical SHADOW strategy research;
+main() provides the equivalent CLI. No historical full-chain inference.
+Ownership: Operator-invoked offline research, not production runtime.
+Safety: No broker API, synthetic tokens, same-day EOD lookahead, quote/depth
+fabrication, LIVE promotion or source mutation.
 """
 
 from __future__ import annotations
