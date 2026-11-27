@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Fetch and audit public prior-day market source
         shell: bash
         run: |
@@ -73,6 +76,8 @@ jobs:
           (out / "source_status.json").write_text(json.dumps(audit, indent=2, sort_keys=True))
           print(json.dumps({k:v["status"] for k,v in audit.items()}))
           PY
+          cp scripts/stage_breeze_sqlite_research.py "$RUNNER_TEMP/prior-eod/stage_breeze_sqlite_research.py"
+          cp scripts/run_breeze_offline_batch.py "$RUNNER_TEMP/prior-eod/run_breeze_offline_batch.py"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
