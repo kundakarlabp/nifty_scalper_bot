@@ -100,7 +100,9 @@ def run_batch(
         code_hash.update(str(source.relative_to(package_root)).encode())
         code_hash.update(source.read_bytes())
     engine_digest = code_hash.hexdigest()
-    all_days = sorted(path.name for path in staged_dir.glob("20??-??-??") if path.is_dir())
+    all_days = sorted(
+        path.name for path in staged_dir.glob("20??-??-??") if path.is_dir()
+    )
     if selected_days:
         wanted = set(selected_days)
         if len(wanted) != len(selected_days) or not wanted.issubset(all_days):
@@ -118,9 +120,12 @@ def run_batch(
     for day in days:
         path = staged_dir / day
         manifest = json.loads((path / "manifest.json").read_text())
-        if (manifest.get("trade_day") != day or manifest.get("research_only") is not True
-                or manifest.get("live_promotion_eligible") is not False
-                or manifest.get("execution_grade_ready") is not False):
+        if (
+            manifest.get("trade_day") != day
+            or manifest.get("research_only") is not True
+            or manifest.get("live_promotion_eligible") is not False
+            or manifest.get("execution_grade_ready") is not False
+        ):
             raise ValueError("staged_session_not_research_verified")
         if manifest.get("source_dataset_sha256") != database_digest:
             raise ValueError("staged_session_dataset_digest_mismatch")
@@ -177,7 +182,9 @@ def run_batch(
                 for body in scenario["strategies"].values():
                     for trade in body.get("trades") or []:
                         if datetime.fromisoformat(trade["entry_time"]) < earliest:
-                            raise ValueError("research_trade_precedes_contract_selection")
+                            raise ValueError(
+                                "research_trade_precedes_contract_selection"
+                            )
             item = {
                 "day": day,
                 "source_sha256": data_digest,
@@ -219,7 +226,9 @@ def run_batch(
         "newly_completed": completed,
         "verified_resume_count": reused,
         "results": result_rows,
-        "no_vote_reasons_10bps": {key: dict(val.most_common(12)) for key, val in reasons.items()},
+        "no_vote_reasons_10bps": {
+            key: dict(val.most_common(12)) for key, val in reasons.items()
+        },
         "entry_funnel_10bps": {key: dict(val) for key, val in funnels.items()},
         "source_timestamp_semantics_independently_verified": False,
         "historical_bid_ask_or_broker_fills_present": False,
