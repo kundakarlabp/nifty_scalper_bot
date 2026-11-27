@@ -2197,6 +2197,7 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
 
     mdm._replay_archive = _Archive()
     monkeypatch.setenv("REPLAY_CAPTURE_ENABLED", "true")
+    monkeypatch.setattr(mdm_module, "get_market_session_state", lambda _now: "open")
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick"]
 
@@ -2204,6 +2205,11 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
         raise AssertionError("identical basket must not be reserialized")
 
     monkeypatch.setattr(mdm_module, "to_json_safe", _unexpected_serialize)
+    mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
+    assert events == ["snapshot", "tick", "tick"]
+
+    # Off-session observations must not append to the just-closed tape.
+    monkeypatch.setattr(mdm_module, "get_market_session_state", lambda _now: "closed")
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick", "tick"]
 
