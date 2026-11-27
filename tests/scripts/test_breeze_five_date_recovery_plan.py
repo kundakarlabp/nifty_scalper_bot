@@ -4,7 +4,6 @@ No credentials, order clients or historical prices are required by this test.
 """
 
 from pathlib import Path
-from scripts.archive_breeze_backfill import load_targets
 
 
 PLAN = (
@@ -16,6 +15,8 @@ PLAN = (
 
 def test_historical_backfill_targets_only_exact_missing_contracts() -> None:
     """Never replay the obsolete broad 158-series plan or invent contracts."""
+    from scripts.archive_breeze_backfill import load_targets
+
     targets = load_targets(PLAN)
     identities = {
         (
