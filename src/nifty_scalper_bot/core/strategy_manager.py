@@ -3076,7 +3076,8 @@ class StrategyManager(_BaseStrategyManager):
         regime_transition_pending = bool(
             raw_regime_name is not None
             and stable_regime_name is not None
-            and normalize_regime(stable_regime_name) is not normalize_regime(raw_regime_name)
+            and normalize_regime(stable_regime_name)
+            is not normalize_regime(raw_regime_name)
         )
         if regime_allowed is True and regime_transition_pending:
             regime_decision_action = "transition_pending"
