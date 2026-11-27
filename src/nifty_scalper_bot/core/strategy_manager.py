@@ -10,6 +10,7 @@ Runtime role:
 - Raw regime safety denials block option signals even in adaptive mode;
   adaptive weighting is applied only after the canonical regime gate passes.
   Preserve completed-bar identity and broader context through final admission.
+  Read-only range observations continue on denied canonical regime decisions.
 - get_regime_hard_block_count exposes the existing cumulative option-evaluation
   safety vetoes for accurate, read-only runner interval summaries.
 - can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
@@ -2782,6 +2783,53 @@ class StrategyManager(_BaseStrategyManager):
         required.update({"symbol","ltp","price","close","open","high","low","vwap","exchange_vwap","atr","volume","avg_volume","direction_bias","underlying_direction_bias","underlying_direction_confidence","context_age_seconds","futures_volume_ratio","futures_vwap","futures_vwap_slope","ema_fast","ema_slow","ema_50","ema_slope","vwap_slope","bos_confirmed","choch_confirmed","retest_confirmed","premium_reclaim","bullish_reversal","liquidity_sweep_confirmed","liquidity_sweep_confirmed_bear","prior_swing_low","prior_swing_high","spread_pct","bid","ask","selected_ce","selected_pe","is_selected_option","strike_distance_from_atm","data_age_seconds","stale_data_used"})
         return required
 
+    def _observe_denied_range_research(self, symbol: str, regime_manager: t.Any) -> None:
+        """Record selected-contract observations without running a live strategy."""
+        if classify_symbol_role(symbol) != "tradable_option" or self._data_hub is None:
+            return
+        try:
+            ce, pe = self._data_hub.get_selected_option_symbols()
+            if normalize_symbol(symbol) not in {
+                normalize_symbol(str(ce or "")), normalize_symbol(str(pe or ""))
+            }:
+                return
+            future = canonical_nifty_future_symbol(
+                self._resolve_active_futures_symbol_for_metrics()
+            )
+            if future is None:
+                return
+            stable = regime_manager.get_latest_snapshot()
+            raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+            raw = raw_getter() if callable(raw_getter) else None
+            stable_name = getattr(stable, "regime", None)
+            raw_name = getattr(raw, "regime", None)
+            context = {
+                "decision_at": datetime.now(timezone.utc),
+                "active_futures_symbol": future,
+                "selected_ce": ce,
+                "selected_pe": pe,
+                "regime": raw_name or stable_name or "UNKNOWN",
+                "regime_raw": raw_name,
+                "regime_gate_allowed": False,
+                "regime_transition_pending": normalize_regime(raw_name) is not normalize_regime(stable_name),
+                "regime_shadow_transition": (
+                    raw.adjustments.get("shadow_transition_candidate")
+                    if isinstance(raw, RegimeSnapshot) else None
+                ),
+            }
+            # No inferred executable bid/ask or cost proof on this denied path.
+            for strategy in self._strategies:
+                if getattr(strategy, "name", "") != "RangeVWAPReclaim":
+                    continue
+                observer = getattr(strategy, "observe_research_excursion", None)
+                if callable(observer):
+                    observer(symbol, context, blocked_reason="canonical_regime_gate_block")
+                break
+        except Exception as exc:
+            log_throttled(log, f"range_denied_observation_failed:{symbol}",
+                "RANGE_DENIED_OBSERVATION_FAILED symbol=%s error=%s", symbol, str(exc),
+                interval_sec=60.0, level=logging.WARNING)
+
     def generate_signal(
         self,
         symbol: str,
@@ -3035,6 +3083,7 @@ class StrategyManager(_BaseStrategyManager):
                         "regime_gate_block",
                         {"gate_reasons": reasons, "gate": "regime_manager"},
                     )
+                    self._observe_denied_range_research(symbol, regime_manager)
                     _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
                     no_signal_reasons.append("regime_gate_block")
                     _emit_strategy_exit()
@@ -3126,6 +3175,11 @@ class StrategyManager(_BaseStrategyManager):
         indicators["regime_transition_pending"] = regime_transition_pending
         indicators["regime_gate_allowed"] = regime_allowed
         indicators["regime_evidence_status"] = regime_decision_action
+        indicators["regime_shadow_transition"] = (
+            raw_regime_snapshot.adjustments.get("shadow_transition_candidate")
+            if isinstance(raw_regime_snapshot, RegimeSnapshot) else None
+        )
+        indicators.setdefault("decision_at", datetime.now(timezone.utc))
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
         indicators.setdefault("close", current_price)
@@ -3742,6 +3796,16 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["futures_vwap_slope"] = fut_ctx.get("vwap_slope")
 
         if symbol_role == "tradable_option":
+            if self._data_hub is not None:
+                selected_getter = getattr(self._data_hub, "get_selected_option_symbols", None)
+                if callable(selected_getter):
+                    selected_ce, selected_pe = selected_getter()
+                    indicators["selected_ce"] = selected_ce
+                    indicators["selected_pe"] = selected_pe
+                    indicators["is_selected_option"] = symbol in {
+                        normalize_symbol(str(selected_ce or "")),
+                        normalize_symbol(str(selected_pe or "")),
+                    }
             indicators = _enrich_option_candidate_metadata(symbol, indicators)
             recent_bars: list[dict[str, float]] = []
             for owner, method_name in (
