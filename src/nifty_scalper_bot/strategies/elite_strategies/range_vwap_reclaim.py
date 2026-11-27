@@ -8,7 +8,7 @@ bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
-range evidence within TREND independently of session-VWAP admission. In the
+range evidence including canonical UNKNOWN independently of live admission. In the
 existing eligible RANGE route, verified local breakouts veto reversal entries;
 strong opposing 60-bar context requires local confirmation and the existing
 stronger same-quote option flow and first-barrier after-cost payoff requirements.
@@ -1008,6 +1008,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                             "bar_timestamp": bar_stamp,
                             "regime": str(indicators.get("regime") or "UNKNOWN"),
                             "regime_raw": indicators.get("regime_raw"),
+                            "shadow_transition_candidate": indicators.get(
+                                "regime_shadow_transition"
+                            ),
                             "regime_gate_allowed": indicators.get(
                                 "regime_gate_allowed"
                             ),
@@ -1210,7 +1213,6 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         with self._guard_lock:
             if self._research_observed_minute.get(key) == minute:
                 return
-            self._research_observed_minute[key] = minute
             if len(self._research_observed_minute) > 32:
                 self._research_observed_minute.clear()
         getter = getattr(self._indicator_engine, "get_history", None)
@@ -1223,6 +1225,12 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             )
         except (TypeError, ValueError, KeyError, AttributeError):
             return
+        if evidence.get("bar_timestamp") is None:
+            return
+        with self._guard_lock:
+            if self._research_observed_minute.get(key) == minute:
+                return
+            self._research_observed_minute[key] = minute
         # This is an observation only; NEVER call live lifecycle or reserve.
         self._active_opportunity = None
         self._observe_excursion(
