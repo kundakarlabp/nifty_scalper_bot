@@ -363,8 +363,7 @@ def test_orb_range_transition_remains_shadow_research_only(monkeypatch) -> None:
     assert not strategy_regime_eligible("ORBPro", "RANGE")
 
 
-
-def test_nested_range_pilot_requires_separate_opt_in_and_local_proof(monkeypatch) -> None:
+def test_nested_range_pilot_requires_opt_in_and_local_proof(monkeypatch) -> None:
     from nifty_scalper_bot.config.strategy_taxonomy import strategy_regime_eligible
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
