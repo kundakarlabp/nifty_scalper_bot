@@ -347,6 +347,9 @@ def run(
     with eod_db.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             eod_digest.update(chunk)
+    expected_eod = verified.get("eod_reference_sha256")
+    if expected_eod and eod_digest.hexdigest() != expected_eod:
+        raise ValueError("breeze_eod_reference_checksum_mismatch")
     with closing(_readonly(breeze_db)) as breeze, closing(_readonly(eod_db)) as eod:
         if day is not None:
             date.fromisoformat(day)
