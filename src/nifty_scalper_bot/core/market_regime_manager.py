@@ -8,7 +8,8 @@ path uses the indicator owner's completed spot snapshot and aligned futures volu
 Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
 cannot inherit trade permission from an older stable regime. Raw EVENT and
 VOLATILE thresholds are checked at the latest observation; execution routing
-uses current safety regimes and confirmed TREND/RANGE transitions.
+uses current safety regimes and confirmed TREND/RANGE transitions. A fresh
+cached spot move beyond the existing event threshold vetoes new entries.
 A low ATR alone cannot license mean-reversion entries. Risk and broker gates
 remain owned by their execution components.
 """
@@ -29,6 +30,10 @@ from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_reg
 from nifty_scalper_bot.core.market_regime import (
     MarketRegimeDetector,
     RegimeSnapshot,
+)
+from nifty_scalper_bot.execution.readiness import (
+    quote_timestamp_quality_allows_hard_readiness,
+    resolve_quote_age_seconds,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import (
@@ -910,7 +915,8 @@ class MarketRegimeManager:
                     "REGIME_INPUT_VERIFICATION symbol=%s regime=%s reason=%s "
                     "adx_available=%s ema_pair_available=%s atr_available=%s "
                     "completed_history_bars=%s volume_available=%s confidence=%.3f "
-                    "stable_regime=%s adx_value=%s history_momentum=%s"
+                    "stable_regime=%s adx_value=%s history_momentum=%s "
+                    "shadow_transition_candidate=%s"
                 ),
                 self._indicator_symbol,
                 snapshot.regime,
@@ -928,6 +934,7 @@ class MarketRegimeManager:
                     if history_momentum is not None
                     else "unavailable"
                 ),
+                snapshot.adjustments.get("shadow_transition_candidate"),
                 interval_sec=60.0,
                 extra={
                     "event": "REGIME_INPUT_VERIFICATION",
@@ -1178,6 +1185,37 @@ class MarketRegimeManager:
                 ):
                     allowed = False
                     reasons.append("regime_block_independent_volatile")
+            if strict and allowed and raw_snapshot is not None:
+                # Quote-only protection: never publish a directional snapshot,
+                # reset hysteresis or let a stale tick create a shock.
+                get_quote = getattr(self.datahub, "get_quote", None)
+                reference = raw_snapshot.adjustments.get("completed_reference_price")
+                limit = raw_snapshot.adjustments.get("intrabar_event_move_points")
+                if (
+                    callable(get_quote)
+                    and isinstance(reference, (int, float))
+                    and isinstance(limit, (int, float))
+                    and math.isfinite(reference)
+                    and math.isfinite(limit)
+                    and reference > 0
+                    and limit > 0
+                ):
+                    quote = get_quote(self._indicator_symbol, allow_pull=False)
+                    if isinstance(quote, Mapping):
+                        age = resolve_quote_age_seconds(quote)
+                        price = quote.get("ltp")
+                        if (
+                            quote_timestamp_quality_allows_hard_readiness(quote)
+                            and age is not None
+                            and 0 <= age <= 3.0
+                            and isinstance(price, (int, float))
+                            and not isinstance(price, bool)
+                            and math.isfinite(price)
+                            and price > 0
+                            and abs(price - reference) >= limit
+                        ):
+                            allowed = False
+                            reasons.append("regime_block_intrabar_spot_shock")
             if context:
                 reasons.extend(
                     [f"ctx_{key}" for key in context.keys() if isinstance(key, str)]
