@@ -2198,7 +2198,9 @@ class IndicatorEngine:
         adx = sum(dx_values[:period]) / period
         for value in dx_values[period:]:
             adx += (value - adx) / period
-        return float(adx)
+        # Wilder's formula is mathematically bounded; contain floating-point
+        # roundoff at the indicator owner instead of accepting invalid external ADX.
+        return min(100.0, max(0.0, float(adx)))
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
         """Internal VWAP calculation.
