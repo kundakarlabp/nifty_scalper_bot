@@ -459,8 +459,13 @@ class MarketRegimeDetector:
                 else None
             )
             effective_atr = atr
+            verified_bars = self._extract_float(indicators, ("verified_completed_bars",))
+            evidence_at = self._extract_float(indicators, ("completed_bar_timestamp",))
             if (
-                "completed_bar_timestamp" in indicators
+                verified_bars is not None
+                and verified_bars >= 6
+                and evidence_at is not None
+                and evidence_at > 0
                 and atr is not None
                 and price is not None
                 and math.isfinite(params.atr_reference_index_level)
