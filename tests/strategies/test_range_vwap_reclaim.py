@@ -1068,6 +1068,44 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     assert signal.target == 112.0
 
 
+def test_local_breakout_and_opposing_broad_trend_veto_reversal(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    original = range_module.assess_range_vwap_reclaim
+    overrides = {"local_range_breakout": True}
+
+    def assessment(*args, **kwargs):
+        return {**original(*args, **kwargs), **overrides}
+
+    monkeypatch.setattr(range_module, "assess_range_vwap_reclaim", assessment)
+    for expected, updates in (
+        ("range_local_breakout_invalidated", {}),
+        (
+            "range_counter_broad_trend_local_reclaim_unconfirmed",
+            {
+                "local_range_breakout": False,
+                "broader_60bar_trend_side": "PE",
+                "local_range_confirmed": False,
+            },
+        ),
+        (
+            "range_counter_broad_trend_option_flow_insufficient",
+            {"local_range_confirmed": True, "local_reclaim_side": "CE"},
+        ),
+    ):
+        overrides.update(updates)
+        strategy = RangeVWAPReclaimStrategy(
+            RangeVWAPReclaimStrategyConfig(), History(bars())
+        )
+        strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
+        assert (
+            strategy._evaluate_signal(
+                OPTION, indicators(ofi_3s_normalized=0.15), 100.0
+            )
+            is None
+        )
+        assert strategy.last_no_vote_reason == expected
+
+
 def test_live_range_pilot_rejects_unpriced_or_overbudget_signal(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
