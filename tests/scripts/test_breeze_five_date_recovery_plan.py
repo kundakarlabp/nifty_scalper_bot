@@ -5,7 +5,6 @@ No credentials, order clients or historical prices are required by this test.
 
 from pathlib import Path
 
-
 PLAN = (
     Path(__file__).resolve().parents[2]
     / "deploy"
