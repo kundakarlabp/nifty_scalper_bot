@@ -20828,7 +20828,7 @@ class StrategyRunner:
                 getattr(self, "_strategy_manager", None), "_regime_manager", None
             )
             if is_live_mode and (
-                execution_mode == "LIVE" or regime_manager is not None
+                str(execution_mode).upper() == "LIVE" or regime_manager is not None
             ):
                 gate_reasons = ()
                 try:
@@ -20836,6 +20836,9 @@ class StrategyRunner:
                         context={"component": "runner_before_submit", "symbol": order_symbol},
                         record_decision=False,
                         expected_regime=metadata.get("regime_effective") or "UNKNOWN",
+                        expected_completed_bar_timestamp=metadata.get(
+                            "regime_completed_bar_timestamp"
+                        ),
                     )
                     if regime_manager is not None:
                         gate_reasons = tuple(regime_manager.get_filter_reasons())
