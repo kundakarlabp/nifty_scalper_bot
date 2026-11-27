@@ -54,7 +54,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RangeVWAPReclaimStrategyConfig,
 )
-from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
@@ -1234,6 +1234,14 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         except (TypeError, ValueError, KeyError, AttributeError):
             return
         if evidence.get("bar_timestamp") is None:
+            log_throttled(
+                LOGGER,
+                f"range_research_history_unavailable:{future}",
+                "RANGE_VWAP_LOCAL_REGIME_UNAVAILABLE future=%s reason=%s",
+                future,
+                evidence.get("reason"),
+                interval_sec=60.0,
+            )
             return
         with self._guard_lock:
             if self._research_observed_minute.get(key) == minute:
