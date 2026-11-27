@@ -31,7 +31,9 @@ from nifty_scalper_bot.core.market_regime import (
     RegimeSnapshot,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
-from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.instruments.active_contracts import (
+    canonical_nifty_future_symbol,
+)
 from nifty_scalper_bot.utils.env import coalesce_bool, coalesce_float, coalesce_int
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
@@ -253,6 +255,16 @@ class MarketRegimeManager:
                     "confidence": getattr(raw_snapshot, "confidence", None),
                     "updated_at": getattr(raw_snapshot, "updated_at", None),
                     "reason": getattr(raw_snapshot, "reason", None),
+                    "completed_bar_timestamp": (
+                        raw_snapshot.adjustments.get("completed_bar_timestamp")
+                        if raw_snapshot is not None
+                        else None
+                    ),
+                    "atr_bps": (
+                        raw_snapshot.adjustments.get("atr_bps")
+                        if raw_snapshot is not None
+                        else None
+                    ),
                 },
                 "transition": {
                     "pending_regime": pending_regime,
@@ -484,7 +496,12 @@ class MarketRegimeManager:
 
             current = normalize_regime(getattr(previous, "regime", None))
 
-            if strict and directional and not valid_evidence:
+            if strict and (
+                not math.isfinite(snapshot.confidence)
+                or not 0 <= snapshot.confidence <= 1
+                or not math.isfinite(snapshot.updated_at)
+                or (directional and not valid_evidence)
+            ):
                 self._pending_regime = incoming.value
                 self._pending_count = 0
                 self._pending_evidence_at = None
@@ -501,10 +518,27 @@ class MarketRegimeManager:
                 self._pending_count = 0
                 return previous
 
-            if incoming is current:
+            stable_at = (
+                previous.adjustments.get("completed_bar_timestamp")
+                if previous is not None
+                else None
+            )
+            same_directional_sequence = bool(
+                valid_evidence
+                and isinstance(stable_at, (int, float))
+                and isinstance(evidence_at, (int, float))
+                and evidence_at - stable_at in (0, 60)
+                and prior_raw is not None
+                and normalize_regime(prior_raw.regime) is incoming
+                and prior_raw.adjustments.get("completed_bar_timestamp") == stable_at
+            )
+            if incoming is current and (
+                not strict or not directional or same_directional_sequence
+            ):
                 self._current = snapshot
                 self._pending_regime = None
                 self._pending_count = 0
+                self._pending_evidence_at = None
                 return previous
 
             safety_threshold = self._block_threshold_for(snapshot.regime)
@@ -879,7 +913,7 @@ class MarketRegimeManager:
                 data.get("adx") is not None,
                 data.get("ema_fast") is not None and data.get("ema_slow") is not None,
                 data.get("atr") is not None,
-                len(price_series),
+                data.get("verified_completed_bars", len(price_series)),
                 enrichment.get("volume_ratio") is not None,
                 snapshot.confidence,
                 getattr(stable_snapshot, "regime", None),
@@ -895,7 +929,9 @@ class MarketRegimeManager:
                     "symbol": self._indicator_symbol,
                     "regime": snapshot.regime,
                     "regime_reason": snapshot.reason,
-                    "verified_completed_history_bars": len(price_series),
+                    "verified_completed_history_bars": data.get(
+                        "verified_completed_bars", len(price_series)
+                    ),
                     "stable_regime": getattr(stable_snapshot, "regime", None),
                     "adx_value": data.get("adx"),
                     "history_momentum": history_momentum,
@@ -1067,7 +1103,7 @@ class MarketRegimeManager:
                         allowed = False
                         reasons.append("regime_stale")
                 confidence = float(raw_snapshot.confidence)
-                if not math.isfinite(confidence):
+                if not math.isfinite(confidence) or not 0 <= confidence <= 1:
                     allowed = False
                     reasons.append("confidence_invalid")
                 elif confidence < self.min_confidence:
@@ -1085,10 +1121,11 @@ class MarketRegimeManager:
                     ):
                         allowed = False
                         reasons.append("regime_completed_evidence_unavailable_or_stale")
-                    if (
-                        raw_regime in {MarketRegime.TREND, MarketRegime.RANGE}
-                        and normalize_regime(getattr(stable_snapshot, "regime", None))
-                        is not raw_regime
+                    if raw_regime in {MarketRegime.TREND, MarketRegime.RANGE} and (
+                        stable_snapshot is None
+                        or normalize_regime(stable_snapshot.regime) is not raw_regime
+                        or stable_snapshot.adjustments.get("completed_bar_timestamp")
+                        != evidence_at
                     ):
                         allowed = False
                         reasons.append("regime_transition_unconfirmed")
