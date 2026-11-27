@@ -8,10 +8,11 @@ import pytest
 
 from scripts.run_breeze_offline_batch import run_batch
 from scripts.stage_breeze_sqlite_research import run
-from tests.scripts.test_stage_breeze_sqlite_research import _sources
 
 
 def _staged(tmp_path: Path) -> tuple[dict[str, object], Path]:
+    from tests.scripts.test_stage_breeze_sqlite_research import _sources
+
     breeze, eod, summary = _sources(tmp_path)
     stage = tmp_path / "staged"
     result = run(
@@ -81,14 +82,18 @@ def test_resumed_runner_checks_code_config_and_data_digests(tmp_path, monkeypatc
     item = json.loads(path.read_text())
     item["configuration_sha256"] = "0" * 64
     path.write_text(json.dumps(item))
-    with pytest.raises(ValueError, match="research_resume_stale_or_mismatched_artifact"):
+    with pytest.raises(
+        ValueError, match="research_resume_stale_or_mismatched_artifact"
+    ):
         run_batch(**args)
 
 
 def test_changes_to_eod_or_live_environment_fail_closed(tmp_path, monkeypatch):
     args, _ = _staged(tmp_path)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    with pytest.raises(ValueError, match="breeze_offline_batch_requires_explicit_shadow"):
+    with pytest.raises(
+        ValueError, match="breeze_offline_batch_requires_explicit_shadow"
+    ):
         run_batch(**args)
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     with sqlite3.connect(args["eod_db"]) as db:
