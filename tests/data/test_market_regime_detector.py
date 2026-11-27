@@ -179,3 +179,32 @@ def test_nonfinite_and_boolean_features_cannot_manufacture_regime() -> None:
         {"price_series": [25000.0, float("nan"), 25500.0]},
     ):
         assert detector.evaluate("NIFTY", features).regime == "unknown"
+
+
+
+def test_independent_volatility_hazard_cannot_be_hidden_by_trend_score() -> None:
+    from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector)
+    snapshot = detector.evaluate(
+        "NIFTY",
+        {
+            "adx": 60.0,
+            "price_series": [25000.0, 25300.0],
+            "realized_volatility": 100.0,
+        },
+    )
+    assert snapshot.regime == "trend"
+    assert snapshot.adjustments["volatility_risk_confidence"] >= 0.95
+    assert not manager.can_trade()
+    assert "regime_block_independent_volatile" in manager.get_filter_reasons()
+
+
+def test_normalised_atr_cannot_weaken_original_volatility_protection() -> None:
+    detector = MarketRegimeDetector()
+    for price, expected in ((20000.0, 25.0), (30000.0, 20.0)):
+        snapshot = detector.evaluate(
+            "NIFTY", {"price": price, "atr": 20.0, "completed_bar_timestamp": 60.0}
+        )
+        assert snapshot.adjustments["effective_atr_reference_points"] == expected
