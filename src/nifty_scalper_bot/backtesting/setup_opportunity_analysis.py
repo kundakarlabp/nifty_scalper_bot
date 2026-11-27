@@ -247,12 +247,27 @@ def canonicalize_range_excursions(
         future = str(row.get("futures_symbol") or "")
         side = str(row.get("side") or "")
         first_bar_identity = str(row.get("excursion_first_bar") or "")
+        basis = row.get("excursion_basis", "session_vwap")
+        expected_identity = (
+            f"{future}:{side}:LOCAL:{first_bar_identity}"
+            if basis == "rolling_vwap"
+            else f"{future}:{side}:{first_bar_identity}"
+        )
         if (
             not future.startswith("NFO:")
             or not future.endswith("FUT")
             or side not in {"CE", "PE"}
             or not first_bar_identity
-            or identity != f"{future}:{side}:{first_bar_identity}"
+            or basis not in ("session_vwap", "rolling_vwap")
+            or identity != expected_identity
+            or (
+                basis == "rolling_vwap"
+                and (
+                    row.get("local_range_state") != "RANGE"
+                    or row.get("local_reclaim_side") != side
+                    or row.get("structural_qualified") is not False
+                )
+            )
         ):
             continue
         try:
@@ -288,7 +303,13 @@ def canonicalize_range_excursions(
             or normalize_symbol(str(row.get("symbol") or "")) != symbol
             for _, row in samples
         )
-        stage_events = sorted(decision_rows.get(identity, ()), key=lambda it: it[0])
+        basis = first.get("excursion_basis", "session_vwap")
+        # A rolling-only research observation cannot inherit session entry risk.
+        stage_events = (
+            sorted(decision_rows.get(identity, ()), key=lambda it: it[0])
+            if basis == "session_vwap"
+            else []
+        )
         reasons = list(
             dict.fromkeys(
                 str(row.get("reason") or "unavailable") for _, row in stage_events
@@ -328,6 +349,7 @@ def canonicalize_range_excursions(
         unique.append(
             {
                 "excursion_id": identity,
+                "excursion_basis": basis,
                 "decision_timestamp": first_ts,
                 "futures_symbol": future,
                 "side": side,
@@ -352,6 +374,7 @@ def canonicalize_range_excursions(
                     "local_range_session_vwap_setup"
                 ),
                 "structural_reason": first.get("structural_reason"),
+                "structural_qualified": first.get("structural_qualified") is True,
                 "first_rejection_reason": initial_rejection,
                 "observed_decision_reasons": reasons,
                 "same_decision_signal_emitted": any(

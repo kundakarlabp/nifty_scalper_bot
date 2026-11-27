@@ -9,6 +9,8 @@ assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
 range evidence including canonical UNKNOWN independently of live admission.
+Rolling-center-only reclaims have separate research identities and never reserve
+a live session-VWAP opportunity.
 Unique research records use their own bounded dedup, not generic log sampling. In the
 existing eligible RANGE route, verified local breakouts veto reversal entries;
 strong opposing 60-bar context requires local confirmation and the existing
@@ -440,6 +442,9 @@ def assess_range_vwap_reclaim(
         "local_lower_boundary_rejections": lower_rejections,
         "local_upper_boundary_rejections": upper_rejections,
         "local_reclaim_side": local_reclaim_side,
+        "local_reclaim_previous_bar_timestamp": (
+            previous["timestamp"] if local_reclaim_side is not None else None
+        ),
         "local_range_breakout": local_breakout,
         "broader_60bar_trend_side": broader_trend_side,
         "broader_60bar_directional_efficiency": broader_efficiency,
@@ -1047,6 +1052,67 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                     ),
                     extra={
                         "event": "range_vwap_local_regime",
+                        "bypass_filters": True,
+                    },
+                )
+        local_first = str(structural.get("local_reclaim_previous_bar_timestamp") or "")
+        if (
+            local_first
+            and structural.get("local_range_confirmed") is True
+            and structural.get("local_reclaim_side") == side
+            and not (
+                structural.get("qualified") is True and structural.get("side") == side
+            )
+        ):
+            # Independent rolling-center research only. Do not assign
+            # _active_opportunity or touch the persistent live setup guard.
+            local_key = (future, f"LOCAL_RECLAIM:{side}")
+            with self._guard_lock:
+                new_reclaim = (
+                    self._research_observed_minute.get(local_key) != local_first
+                )
+                if new_reclaim:
+                    self._research_observed_minute[local_key] = local_first
+            if new_reclaim:
+                lot = indicators.get("lot_size")
+                LOGGER.info(
+                    "RANGE_VWAP_EXCURSION_OBSERVED %s",
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "decision_at": decision_at.isoformat(),
+                            "excursion_id": f"{future}:{side}:LOCAL:{local_first}",
+                            "excursion_basis": "rolling_vwap",
+                            "excursion_first_bar": local_first,
+                            "futures_symbol": future,
+                            "side": side,
+                            "symbol": normalize_symbol(symbol),
+                            "regime": str(indicators.get("regime") or "UNKNOWN"),
+                            "regime_raw": indicators.get("regime_raw"),
+                            "regime_gate_allowed": indicators.get(
+                                "regime_gate_allowed"
+                            ),
+                            "structural_reason": "rolling_vwap_reclaim_shadow_only",
+                            "structural_qualified": False,
+                            "local_range_state": "RANGE",
+                            "local_reclaim_side": side,
+                            "session_vwap": _value(
+                                structural.get("session_vwap_before_confirmation")
+                            ),
+                            "rolling_center": _value(
+                                structural.get("rolling_20m_secondary_center")
+                            ),
+                            "quote": {
+                                "lot_size": (
+                                    lot if type(lot) is int and lot > 0 else None
+                                ),
+                            },
+                        },
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                    extra={
+                        "event": "range_vwap_excursion_observed",
                         "bypass_filters": True,
                     },
                 )
