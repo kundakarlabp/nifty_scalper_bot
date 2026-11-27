@@ -493,8 +493,6 @@ def test_denied_range_observation_uses_authoritative_basket_lot() -> None:
     ]
     manager._observe_denied_range_research(symbol, manager._regime_manager)
     assert observed[-1]["lot_size"] == 75
-    basket["metadata"]["option_lot_size_by_symbol"] = {
-        "NFO:NIFTY26D0125650PE": 65
-    }
+    basket["metadata"]["option_lot_size_by_symbol"] = {"NFO:NIFTY26D0125650PE": 65}
     manager._observe_denied_range_research(symbol, manager._regime_manager)
     assert "lot_size" not in observed[-1]
