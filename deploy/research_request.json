@@ -1,7 +1,6 @@
 {
-  "id": "research-20261111-exact-full-depth-epoch-01",
-  "days": 1,
-  "mode": "epoch_audit",
-  "session_date": "2026-11-11",
-  "expected_uncompressed_sha256": "048bb7d03bd2ac021fe204c06c34bb8542fd678d4ee5968a41376979eb1e5922"
+  "id": "research-20261127-net-expectancy-baseline-01",
+  "days": 8,
+  "mode": "runtime",
+  "profile": "captured_baseline"
 }

@@ -57,8 +57,12 @@ The target must be no more than 89 days old and cannot be today before
 sidecar validation; a finalized journal alone is insufficient. The guarded
 production updater polls the existing request manifest and launches the
 existing **isolated systemd research worker**, without broker credentials or
-restarting the engine solely to run a backtest. A blocked deployment/worker
-must remain explicitly blocked rather than reported as completed.
+restarting the engine solely to run a backtest. Production captured-baseline
+launches defer during 05:00–17:00 IST or when the remaining off-market budget
+is insufficient. A deferred request is not consumed; a later poll may launch
+it. An unpinned request retains its original resolved date window on later
+polls of the same ID. A blocked deployment/worker must remain explicitly
+blocked rather than reported as completed.
 
 The `captured_baseline` profile **does not toggle the adaptive trailing
 controller or any captured strategy settings**. Each isolated execution uses
