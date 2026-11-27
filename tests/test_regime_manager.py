@@ -458,9 +458,12 @@ def test_completed_regime_inputs_exclude_provisional_and_unverified_volume(
     assert baseline["verified_completed_bars"] == 65
     assert baseline["broader_60bar_directional_efficiency"] == 1
     assert "volume_spike_ratio" not in baseline
-    assert engine.get_completed_regime_inputs("NFO:NIFTY26NOVFUT", now=now)[
-        "volume_spike_ratio"
-    ] == 1
+    assert (
+        engine.get_completed_regime_inputs("NFO:NIFTY26NOVFUT", now=now)[
+            "volume_spike_ratio"
+        ]
+        == 1
+    )
     rows[-1]["volume"] = 0
     assert "volume_spike_ratio" not in engine.get_completed_regime_inputs(
         "NFO:NIFTY26NOVFUT", now=now
