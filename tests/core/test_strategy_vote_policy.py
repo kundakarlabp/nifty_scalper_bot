@@ -288,6 +288,22 @@ def test_range_live_final_repricing_respects_actual_broker_lot_and_cash(
     }
     assert verified_range_vwap_final_order_risk(base, **args)
     assert not verified_range_vwap_final_order_risk(
+        {**base, "range_counter_broad_trend": True}, **args
+    )
+    reduced_payoff = {
+        **base,
+        "option_cost_risk": {
+            **base["option_cost_risk"],
+            "net_reward_risk": 1.8,
+            "vwap_limited_target_price_model": 118.0,
+        },
+    }
+    reduced_args = {**args, "target_price": 118.0}
+    assert verified_range_vwap_final_order_risk(reduced_payoff, **reduced_args)
+    assert not verified_range_vwap_final_order_risk(
+        {**reduced_payoff, "range_counter_broad_trend": True}, **reduced_args
+    )
+    assert not verified_range_vwap_final_order_risk(
         base, **{**args, "broker_lot_size": 75}
     )
     assert not verified_range_vwap_final_order_risk(
@@ -345,3 +361,62 @@ def test_orb_range_transition_remains_shadow_research_only(monkeypatch) -> None:
     assert strategy_regime_eligible("ORBPro", "RANGE")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     assert not strategy_regime_eligible("ORBPro", "RANGE")
+
+
+
+def test_nested_range_pilot_requires_separate_opt_in_and_local_proof(monkeypatch) -> None:
+    from nifty_scalper_bot.config.strategy_taxonomy import strategy_regime_eligible
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LOCAL_TREND_LIVE", "false")
+    metadata = {
+        "role": "trigger",
+        "setup_pass": True,
+        "range_option_flow_verified": True,
+        "range_local_trend_pilot": True,
+        "range_spot_broad_trend_side": "PE",
+        "range_structure": {
+            "qualified": True,
+            "side": "CE",
+            "reversal_direction_source": "two_completed_futures_candles",
+            "local_range_confirmed": True,
+            "local_reclaim_side": "CE",
+            "broader_60bar_trend_side": "PE",
+        },
+        "option_cost_risk": {
+            "qualified": True,
+            "model_only": True,
+            "worst_stop_loss_including_costs": 700.0,
+            "net_reward_risk": 1.8,
+        },
+    }
+    assert not strategy_regime_eligible("RangeVWAPReclaim", "TREND")
+    assert not verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="CE"
+    )
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LOCAL_TREND_LIVE", "true")
+    assert strategy_regime_eligible("RangeVWAPReclaim", "TREND")
+    assert verified_range_vwap_reversal(
+        metadata, strategy="RangeVWAPReclaim", side="CE"
+    )
+    assert not verified_range_vwap_reversal(
+        {**metadata, "range_spot_broad_trend_side": "CE"},
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
+    assert not verified_range_vwap_reversal(
+        {
+            **metadata,
+            "range_structure": {
+                **metadata["range_structure"],
+                "local_range_confirmed": False,
+            },
+        },
+        strategy="RangeVWAPReclaim",
+        side="CE",
+    )
