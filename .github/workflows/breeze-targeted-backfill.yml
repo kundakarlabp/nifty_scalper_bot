@@ -1,4 +1,7 @@
-# Read-only ICICI historical gap repair. Broker rows remain encrypted.
+# File purpose: Read-only Breeze historical minute gap re-acquisition.
+# Key responsibilities: Retry a bounded approved contract list and encrypt every result.
+# Operational constraints: main-branch only; GitHub secrets stay private; no orders,
+# unencrypted artifacts, provider errors or account data in logs.
 name: Breeze targeted history backfill
 
 on:
