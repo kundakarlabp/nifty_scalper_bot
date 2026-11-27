@@ -160,7 +160,6 @@ def test_choppy_and_normal_labels_do_not_authorize_mean_reversion() -> None:
     assert normalize_regime("NORMAL") is MarketRegime.UNKNOWN
 
 
-
 def test_canonical_adx_units_and_volume_are_not_directional_proof() -> None:
     detector = MarketRegimeDetector()
     quiet = detector.evaluate(
@@ -179,7 +178,6 @@ def test_nonfinite_and_boolean_features_cannot_manufacture_regime() -> None:
         {"price_series": [25000.0, float("nan"), 25500.0]},
     ):
         assert detector.evaluate("NIFTY", features).regime == "unknown"
-
 
 
 def test_independent_volatility_hazard_cannot_be_hidden_by_trend_score() -> None:
