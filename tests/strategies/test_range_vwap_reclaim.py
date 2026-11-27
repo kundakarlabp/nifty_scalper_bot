@@ -1068,6 +1068,36 @@ def test_live_range_pilot_emits_executable_stop_target_only_with_proof(
     assert signal.target == 112.0
 
 
+def test_broader_direction_can_coexist_with_local_range() -> None:
+    data = bars()
+    start = datetime.fromisoformat(data[0]["timestamp"])
+    prefix = []
+    for i in range(30):
+        close = 25250.0 + (30 - i) * 10
+        prefix.append(
+            {
+                "timestamp": (start + timedelta(minutes=i)).isoformat(),
+                "open": close + 2.0,
+                "high": close + 2.5,
+                "low": close - 2.0,
+                "close": close,
+                "volume": 1000.0,
+                "is_complete": True,
+            }
+        )
+    for row in data:
+        row["timestamp"] = (
+            datetime.fromisoformat(row["timestamp"]) + timedelta(minutes=30)
+        ).isoformat()
+    result = assess_range_vwap_reclaim(
+        prefix + data,
+        decision_at=decision_at() + timedelta(minutes=30),
+        config=RangeVWAPReclaimStrategyConfig(),
+    )
+    assert result["broader_60bar_trend_side"] == "PE"
+    assert result["local_range_confirmed"] is True
+
+
 def test_local_breakout_and_opposing_broad_trend_veto_reversal(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     original = range_module.assess_range_vwap_reclaim
@@ -1098,9 +1128,7 @@ def test_local_breakout_and_opposing_broad_trend_veto_reversal(monkeypatch) -> N
         )
         strategy._regime_bar_confirmed(FUTURE, bars()[-2]["timestamp"])
         assert (
-            strategy._evaluate_signal(
-                OPTION, indicators(ofi_3s_normalized=0.15), 100.0
-            )
+            strategy._evaluate_signal(OPTION, indicators(ofi_3s_normalized=0.15), 100.0)
             is None
         )
         assert strategy.last_no_vote_reason == expected
