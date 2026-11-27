@@ -497,11 +497,11 @@ class MarketRegimeDetector:
             adjustments["intrabar_event_move_points"] = (
                 min(
                     params.atr_event_threshold,
-                    params.atr_event_threshold * price
+                    params.atr_event_threshold
+                    * price
                     / params.atr_reference_index_level,
                 )
-                if price is not None
-                and params.atr_reference_index_level > 0
+                if price is not None and params.atr_reference_index_level > 0
                 else params.atr_event_threshold
             )
             # Candidate classification does not change live admission. Use
@@ -532,11 +532,7 @@ class MarketRegimeDetector:
                 and displacement is not None
                 and crossings is not None
             ):
-                if (
-                    efficiency <= 0.25
-                    and abs(displacement) <= 1.5
-                    and crossings >= 3
-                ):
+                if efficiency <= 0.25 and abs(displacement) <= 1.5 and crossings >= 3:
                     candidate = "RANGE"
                 elif (
                     efficiency >= 0.60
