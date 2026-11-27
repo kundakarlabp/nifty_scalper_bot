@@ -9,6 +9,7 @@ regime-stratified minute-sampled rejections, cost/MAE labels and option volume
 parity evidence. Range admission cohorts distinguish observed markouts from
 risk-verified outcomes and are mirrored in bounded archive telemetry.
 Independent rolling-VWAP reclaims are separate from session-VWAP excursions.
+Range markouts consume causal catalog lots scoped to the observed contract phase.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and

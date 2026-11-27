@@ -3,6 +3,7 @@
 Responsibilities: Deduplicate setup identities; compare observed option
 ask/bid quotes and load selected, exact-token FULL-depth option books and
 futures WS price paths for the canonical session-excursion research report.
+load_excursion_quote_paths also returns causal, scope-specific contract lots.
 Optionally reuse validated chronological quote-time indexes for large sessions.
 Boundaries: No broker calls, strategy overrides, or new setup identity owner.
 Safety: Missing/rotated contracts, untradable quotes, and archive gaps are
