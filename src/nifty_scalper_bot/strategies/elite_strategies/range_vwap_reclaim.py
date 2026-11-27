@@ -1079,6 +1079,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 "regime": str(indicators.get("regime") or "UNKNOWN"),
                 "regime_raw": indicators.get("regime_raw"),
                 "regime_gate_allowed": indicators.get("regime_gate_allowed"),
+                "shadow_transition_candidate": indicators.get(
+                    "regime_shadow_transition"
+                ),
                 "local_range_candidate": structural.get("local_range_candidate"),
                 "local_range_state": structural.get("local_range_state"),
                 "local_range_evidence_fraction": structural.get(
@@ -1210,11 +1213,16 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             return
         minute = decision.replace(second=0, microsecond=0).isoformat()
         key = (future, symbol[-2:])
+        attempt_key = (future, f"{side}:ATTEMPT")
+        attempt = str(int(decision.timestamp() // 5))
         with self._guard_lock:
             if self._research_observed_minute.get(key) == minute:
                 return
+            if self._research_observed_minute.get(attempt_key) == attempt:
+                return
             if len(self._research_observed_minute) > 32:
                 self._research_observed_minute.clear()
+            self._research_observed_minute[attempt_key] = attempt
         getter = getattr(self._indicator_engine, "get_history", None)
         if not callable(getter):
             return
