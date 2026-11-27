@@ -1,0 +1,9 @@
+day,kind,expiry,strike,side,reason,priority
+2025-06-20,futures,2025-06-26,,FUT,provider_or_validation_failed,1
+2025-06-20,options,2025-06-26,24850,CE,provider_or_validation_failed,1
+2025-06-20,options,2025-06-26,24850,PE,provider_or_validation_failed,1
+2025-06-27,futures,2025-07-31,,FUT,provider_or_validation_failed,1
+2025-06-27,options,2025-07-03,25600,CE,provider_or_validation_failed,1
+2025-06-27,options,2025-07-03,25600,PE,provider_or_validation_failed,1
+2025-07-04,options,2025-07-10,25450,PE,provider_or_validation_failed,1
+2025-07-11,options,2025-07-17,25250,PE,provider_or_validation_failed,1

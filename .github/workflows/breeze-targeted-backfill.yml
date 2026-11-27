@@ -1,4 +1,7 @@
-# Read-only ICICI historical gap repair. Broker rows remain encrypted.
+# File purpose: Read-only Breeze historical minute gap re-acquisition.
+# Key responsibilities: Retry a bounded approved contract list and encrypt every result.
+# Operational constraints: main-branch only; GitHub secrets stay private; no orders,
+# unencrypted artifacts, provider errors or account data in logs.
 name: Breeze targeted history backfill
 
 on:
@@ -6,7 +9,7 @@ on:
   push:
     branches: [main]
     paths:
-      - deploy/breeze_targeted_backfill_20261109.csv
+      - deploy/breeze_five_date_recovery_20261127.csv
 
 permissions:
   contents: read
@@ -42,7 +45,7 @@ jobs:
           BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: >-
           python -m scripts.archive_breeze_backfill
-          --plan deploy/breeze_targeted_backfill_20261109.csv
+          --plan deploy/breeze_five_date_recovery_20261127.csv
           --outdir "$RUNNER_TEMP/breeze-repair"
       - name: Encrypt private repair results including partial coverage
         if: always()
