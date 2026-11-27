@@ -553,6 +553,105 @@ def test_excursion_report_uses_full_lot_exact_token_books_and_futures(tmp_path) 
     ]
 
 
+def test_local_range_shadow_report_never_invents_risk(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, decision = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        regime="TREND",
+        regime_raw="trend",
+        regime_gate_allowed=True,
+        local_range_candidate=True,
+        local_range_session_vwap_setup=True,
+        structural_qualified=True,
+        structural_reason="qualified",
+    )
+    prefix_decision, payload_decision = decision.split(" ", 1)
+    event = json.loads(payload_decision)
+    event.update(
+        reason="strategy_regime_ineligible",
+        decision_at=row["decision_at"],
+    )
+    journal = f"{prefix} {json.dumps(row)}\n" f"{prefix_decision} {json.dumps(event)}"
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "local_range.json",
+    )
+    cohort = [
+        row
+        for row in report["range_admission_comparisons"]
+        if row["policy"] == "shadow_local_range_in_trend"
+    ]
+    assert len(cohort) == 3
+    assert all(row["unique_first_seen_excursions"] == 1 for row in cohort)
+    assert all(row["verified_risk_and_observed_horizon"] == 0 for row in cohort)
+    assert all(row["modeled_net_rupees_mean"] is None for row in cohort)
+    assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_local_regime_clock_reference_is_prior_only_and_deduplicated(tmp_path) -> None:
+    from nifty_scalper_bot.infra.market_research_report import _local_regime_minutes
+
+    day = DECISION.date()
+    stamp = DECISION - timedelta(minutes=1)
+    sample = {
+        "v": 1,
+        "decision_at": DECISION.isoformat(),
+        "bar_timestamp": stamp.isoformat(),
+        "futures_symbol": "NFO:NIFTY26NOVFUT",
+        "source": "contiguous_session_futures_1m",
+        "futures_atr_bps": 4.0,
+        "local_range_state": "RANGE",
+        "local_reclaim_side": "CE",
+        "regime": "trend",
+        "regime_raw": "trend",
+        "regime_gate_allowed": True,
+        "session_vwap_setup_qualified": False,
+    }
+    for offset in (-5, -4, -3, -2, -1, 0, 1):
+        prior_date = day + timedelta(days=offset)
+        reference = dict(
+            sample,
+            bar_timestamp=(stamp + timedelta(days=offset)).isoformat(),
+            futures_atr_bps=2.0 if offset < 0 else 100.0,
+        )
+        (tmp_path / f"{prior_date}.json").write_text(
+            json.dumps(
+                {"date_ist": str(prior_date), "local_regime_minutes": [reference]}
+            )
+        )
+    rows, summary = _local_regime_minutes(
+        [sample, dict(sample, futures_atr_bps=99.0)],
+        session_date=day,
+        report_directory=tmp_path,
+    )
+    assert len(rows) == 1
+    assert rows[0]["clock_matched_prior_sessions"] == 5
+    assert rows[0]["atr_vs_clock_matched_median"] == 2.0
+    assert summary["confirmed_local_range_in_trend_minutes"] == 1
+    assert summary["local_reclaim_without_session_setup_minutes"] == 1
+    denied = dict(
+        sample,
+        regime="unknown",
+        regime_raw="unknown",
+        regime_gate_allowed=False,
+        shadow_transition_candidate="RANGE",
+    )
+    _, summary = _local_regime_minutes(
+        [denied], session_date=day, report_directory=tmp_path
+    )
+    assert summary["canonical_denied_observed_minutes"] == 1
+    assert summary["unknown_with_confirmed_local_range_minutes"] == 1
+    assert summary["shadow_transition_counts"] == {"RANGE": 1}
+    assert summary["clock_matched_calibration_status"] == (
+        "reference_available_research_only"
+    )
+
+
 def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
     tmp_path,
 ) -> None:

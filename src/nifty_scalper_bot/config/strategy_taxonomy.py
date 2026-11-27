@@ -4,6 +4,7 @@ Responsibilities: Normalize strategy identity; classify RangeVWAPReclaim as a
 trigger only under the explicit LIVE pilot and otherwise as research context.
 strategy_regime_eligible maps structural entry triggers to the canonical market
 regime without replacing strategy-owned setup checks or OrderFlow context.
+A separate explicit opt-in permits evaluating a confirmed local range in TREND.
 Safety: Canonical role mapping is authoritative across builder and manager.
 """
 
@@ -103,6 +104,13 @@ def range_vwap_live_enabled() -> bool:
     )
 
 
+def range_vwap_local_trend_enabled() -> bool:
+    """Separate opt-in for the uncalibrated nested-range pilot."""
+    return range_vwap_live_enabled() and os.getenv(
+        "ENABLE_RANGE_VWAP_LOCAL_TREND_LIVE", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def canonical_strategy_role(name: str | None, *, default: str = "trigger") -> str:
     taxon = strategy_taxon(name)
     if taxon is not None and taxon.key == "range_vwap_reclaim":
@@ -137,6 +145,8 @@ def strategy_regime_eligible(name: str | None, regime: object) -> bool:
             MarketRegime.EVENT,
         },
     }
+    if key == "range_vwap_reclaim" and state is MarketRegime.TREND:
+        return range_vwap_local_trend_enabled()
     if key == "orb_pro" and state is MarketRegime.RANGE:
         return os.getenv(
             "EXECUTION_MODE", "SHADOW"
@@ -162,6 +172,7 @@ __all__ = [
     "is_context_only_strategy",
     "normalize_strategy_name",
     "range_vwap_live_enabled",
+    "range_vwap_local_trend_enabled",
     "strategy_taxon",
     "strategy_regime_eligible",
 ]

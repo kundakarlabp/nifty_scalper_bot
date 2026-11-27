@@ -3,7 +3,8 @@
 Responsibilities: validate archived quote provenance, report canonical
 first-observed RangeVWAP futures excursions with 5/10/15-minute futures and
 full-lot option bid outcomes stressed at the same default slippage as live,
-while preserving the existing structural decisions,
+with frozen local/session target touch and prior-session clock-matched ATR
+research, while preserving the existing structural decisions,
 minute-sampled rejections, cost/MAE labels and option volume parity evidence.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
@@ -191,6 +192,141 @@ def _parse_records(
         except (ValueError, TypeError, KeyError):
             continue
     return records
+
+
+def _local_regime_minutes(
+    records: list[dict[str, Any]], *, session_date: date, report_directory: Path
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """First observation per completed future/minute, with prior-day ATR reference."""
+    from nifty_scalper_bot.instruments.active_contracts import (
+        canonical_nifty_future_symbol,
+    )
+
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    first_seen: dict[tuple[str, str], datetime] = {}
+    for row in records:
+        try:
+            stamp = datetime.fromisoformat(str(row["bar_timestamp"]))
+            decision = datetime.fromisoformat(str(row["decision_at"]))
+            future = canonical_nifty_future_symbol(row.get("futures_symbol"))
+            atr_bps = row.get("futures_atr_bps")
+            if (
+                future is None
+                or stamp.tzinfo is None
+                or decision.tzinfo is None
+                or stamp.astimezone(_IST).date() != session_date
+                or decision.astimezone(_IST).date() != session_date
+                or stamp.second != 0
+                or stamp.microsecond != 0
+                or not 60 <= (decision - stamp).total_seconds() <= 150
+                or row.get("source") != "contiguous_session_futures_1m"
+                or not isinstance(atr_bps, (int, float))
+                or isinstance(atr_bps, bool)
+                or not math.isfinite(atr_bps)
+                or atr_bps <= 0
+            ):
+                continue
+            stamp = stamp.astimezone(_IST)
+            key = (future, stamp.isoformat())
+            if key in first_seen and first_seen[key] <= decision:
+                continue
+            first_seen[key] = decision
+            unique[key] = {**row, "clock_minute_ist": stamp.strftime("%H:%M")}
+        except (ValueError, TypeError, KeyError, OverflowError):
+            continue
+
+    # Existing dated reports are the only historical source. No future day,
+    # same-day report, missing minute, or synthetic baseline is eligible.
+    references: dict[str, list[float]] = defaultdict(list)
+    prior_sessions = 0
+    for path in sorted(report_directory.glob("????-??-??.json"), reverse=True):
+        if prior_sessions >= 10:
+            break
+        try:
+            prior_date = date.fromisoformat(path.stem)
+            if prior_date >= session_date:
+                continue
+            prior = json.loads(path.read_text(encoding="utf-8"))
+            if prior.get("date_ist") != prior_date.isoformat():
+                continue
+            daily: dict[str, float] = {}
+            for row in prior.get("local_regime_minutes", []):
+                stamp = datetime.fromisoformat(str(row.get("bar_timestamp")))
+                value = row.get("futures_atr_bps")
+                if (
+                    stamp.tzinfo is not None
+                    and stamp.astimezone(_IST).date() == prior_date
+                    and row.get("source") == "contiguous_session_futures_1m"
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    and value > 0
+                ):
+                    daily.setdefault(stamp.astimezone(_IST).strftime("%H:%M"), value)
+            if daily:
+                prior_sessions += 1
+                for minute, value in daily.items():
+                    references[minute].append(value)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+    rows = [unique[key] for key in sorted(unique, key=lambda key: key[1])]
+    state_counts: dict[str, int] = defaultdict(int)
+    shadow_transition_counts: dict[str, int] = defaultdict(int)
+    unknown_local_range = 0
+    denied_observations = 0
+    confirmed_in_trend = 0
+    independent_local_reclaims = 0
+    for row in rows:
+        matched = references.get(row["clock_minute_ist"], [])
+        baseline = statistics.median(matched) if len(matched) >= 5 else None
+        row["clock_matched_prior_sessions"] = len(matched)
+        row["clock_matched_atr_bps_median"] = baseline
+        row["atr_vs_clock_matched_median"] = (
+            round(row["futures_atr_bps"] / baseline, 4) if baseline else None
+        )
+        state = str(row.get("local_range_state") or "UNPROVEN")
+        state_counts[state] += 1
+        candidate = row.get("shadow_transition_candidate")
+        if candidate in ("TREND", "RANGE"):
+            shadow_transition_counts[str(candidate)] += 1
+        denied_observations += int(row.get("regime_gate_allowed") is False)
+        unknown_local_range += int(
+            state == "RANGE" and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+        )
+        confirmed_in_trend += int(
+            state == "RANGE"
+            and str(row.get("regime") or "").upper() == "TREND"
+            and str(row.get("regime_raw") or "").upper() == "TREND"
+            and row.get("regime_gate_allowed") is True
+            and row.get("regime_transition_pending") is not True
+        )
+        independent_local_reclaims += int(
+            row.get("local_reclaim_side") in {"CE", "PE"}
+            and row.get("session_vwap_setup_qualified") is not True
+        )
+    return rows, {
+        "unit": "distinct_completed_futures_minute_not_trade",
+        "observed_minutes": len(rows),
+        "state_counts": dict(state_counts),
+        "shadow_transition_counts": dict(shadow_transition_counts),
+        "canonical_denied_observed_minutes": denied_observations,
+        "unknown_with_confirmed_local_range_minutes": unknown_local_range,
+        "clock_matched_calibration_status": (
+            "reference_available_research_only"
+            if any(row["atr_vs_clock_matched_median"] is not None for row in rows)
+            else "insufficient_clock_matched_evidence"
+        ),
+        "confirmed_local_range_in_trend_minutes": confirmed_in_trend,
+        "local_reclaim_without_session_setup_minutes": independent_local_reclaims,
+        "clock_matched_reference_sessions": prior_sessions,
+        "clock_matched_minimum_sessions": 5,
+        "clock_matched_labelled_minutes": sum(
+            row["atr_vs_clock_matched_median"] is not None for row in rows
+        ),
+        "reference": "prior_dated_reports_same_ist_minute_atr_bps_median",
+        "live_policy_changed": False,
+    }
 
 
 def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -619,9 +755,54 @@ def _range_excursion_markouts(
                 if option is not None and quantity is not None
                 else None
             )
+            # Compare frozen VWAP targets against the same observed futures
+            # path. A touch is not an option fill or a stop-adjusted outcome.
+            target_reach: dict[str, Any] = {}
+            direction = 1 if row["side"] == "CE" else -1
+            initial = float(fut["entry_futures_price"]) if fut is not None else None
+            for name, center in (
+                ("session_vwap", row.get("session_vwap")),
+                ("local_vwap", row.get("rolling_center")),
+            ):
+                distance: float | None = None
+                touch: float | None = None
+                if (
+                    initial is not None
+                    and isinstance(center, (int, float))
+                    and not isinstance(center, bool)
+                    and math.isfinite(center)
+                    and center > 0
+                ):
+                    target = float(center)
+                    distance = direction * (target - initial)
+                    if distance > 0:
+                        touch = next(
+                            (
+                                timestamp
+                                for timestamp, price in scoped_future
+                                if when < timestamp <= when + horizon
+                                and direction * (price - target) >= 0
+                            ),
+                            None,
+                        )
+                target_reach[name] = {
+                    "forward_distance_points": (
+                        round(distance, 4) if distance is not None else None
+                    ),
+                    "touched": (
+                        touch is not None
+                        if distance is not None and distance > 0
+                        else None
+                    ),
+                    "first_touch_seconds": (
+                        round(touch - when, 3) if touch is not None else None
+                    ),
+                    "option_fill_verified": False,
+                }
             outcomes.append(
                 {
                     "excursion_id": row["excursion_id"],
+                    "frozen_vwap_target_reach": target_reach,
                     "first_seen_ts": when,
                     "futures_contract": future,
                     "option_contract": symbol,
@@ -640,6 +821,22 @@ def _range_excursion_markouts(
                     ),
                     "counterfactual_range_width_candidate": (
                         first_rejection == "range_width_unproven"
+                    ),
+                    "shadow_local_range_in_trend_candidate": (
+                        row.get("local_range_session_vwap_setup") is True
+                        and first_rejection == "strategy_regime_ineligible"
+                    ),
+                    "shadow_confirmed_local_range_in_trend_candidate": (
+                        row.get("local_range_confirmed_in_trend") is True
+                        and first_rejection == "strategy_regime_ineligible"
+                    ),
+                    "shadow_unknown_local_range_candidate": (
+                        str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+                        and row.get("regime_gate_allowed") is False
+                        and row.get("shadow_transition_candidate") == "RANGE"
+                        and row.get("local_range_state") == "RANGE"
+                        and row.get("local_reclaim_side") == row.get("side")
+                        and first_rejection == "canonical_regime_gate_block"
                     ),
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
@@ -666,6 +863,12 @@ def _range_excursion_markouts(
         ("current_admission", "baseline_signal_emitted_at_first_decision"),
         ("ignore_center_disagreement_only", "counterfactual_center_gate_candidate"),
         ("ignore_range_width_only", "counterfactual_range_width_candidate"),
+        ("shadow_local_range_in_trend", "shadow_local_range_in_trend_candidate"),
+        (
+            "shadow_confirmed_local_range_in_trend",
+            "shadow_confirmed_local_range_in_trend_candidate",
+        ),
+        ("shadow_unknown_local_range", "shadow_unknown_local_range_candidate"),
     ):
         for horizon in (300, 600, 900):
             group = [
@@ -693,6 +896,21 @@ def _range_excursion_markouts(
                         for row in group
                     ),
                     "verified_risk_and_observed_horizon": len(feasible),
+                    "futures_target_touch_counts": {
+                        name: {
+                            "forward_target_observed": sum(
+                                item["frozen_vwap_target_reach"][name]["touched"]
+                                is not None
+                                for item in group
+                            ),
+                            "touched": sum(
+                                item["frozen_vwap_target_reach"][name]["touched"]
+                                is True
+                                for item in group
+                            ),
+                        }
+                        for name in ("session_vwap", "local_vwap")
+                    },
                     "modeled_net_rupees_mean": (
                         round(
                             statistics.mean(
@@ -753,6 +971,11 @@ def build_session_research_report(
     range_excursion_decisions = _parse_records(
         journal, "RANGE_VWAP_EXCURSION_DECISION", session_date
     )
+    local_minutes, local_summary = _local_regime_minutes(
+        _parse_records(journal, "RANGE_VWAP_LOCAL_REGIME", session_date),
+        session_date=session_date,
+        report_directory=output_path.parent,
+    )
     if not replay_path.is_file() and replay_path.name.endswith(".jsonl"):
         compressed_path = replay_path.with_name(replay_path.name + ".gz")
         if compressed_path.is_file():
@@ -769,6 +992,8 @@ def build_session_research_report(
         "structural_strata": [],
         "independent_setup_count": 0,
         "range_excursion_opportunities": [],
+        "local_regime_minutes": local_minutes,
+        "local_regime_summary": local_summary,
         "range_excursion_horizons": [],
         "range_admission_comparisons": [],
         "range_excursion_observed_events": len(range_excursion_observed),
@@ -882,6 +1107,7 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         ),
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
+        "local_regime_summary": report.get("local_regime_summary"),
     }
 
     def encoded(row: Mapping[str, Any]) -> str:

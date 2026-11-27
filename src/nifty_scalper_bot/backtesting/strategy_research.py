@@ -1269,6 +1269,7 @@ def _scenario(
                 future,
                 {
                     "price": bars[future]["close"],
+                    "completed_bar_timestamp": timestamp.timestamp(),
                     "price_series": engine.get_history(future, count=20),
                     "ema_fast": engine.get_ema(future, 12),
                     "ema_slow": engine.get_ema(future, 26),
