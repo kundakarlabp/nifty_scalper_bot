@@ -102,9 +102,6 @@ class RegimeParameters:
     atr_range_threshold: float = 12.0
     atr_volatile_threshold: float = 22.0
     atr_event_threshold: float = 35.0
-    # Point thresholds retain their original protective floor. This reference
-    # also expresses them in index-level-normalised units, not fitted values.
-    atr_reference_index_level: float = 25000.0
     volume_trend_multiple: float = 1.15
     volume_event_multiple: float = 1.8
     calm_volume_multiple: float = 0.75
@@ -120,6 +117,8 @@ class RegimeParameters:
     price_momentum_event: float = 0.007
     event_signal_threshold: float = 0.6
     realized_vol_event_threshold: float = 45.0
+    # Preserve positional compatibility and the original point-based floor.
+    atr_reference_index_level: float = 25000.0
 
 
 class MarketRegimeDetector:
@@ -455,7 +454,9 @@ class MarketRegimeDetector:
                 volume_ratio if volume_ratio is not None and volume_ratio >= 0 else None
             )
             event_signal = (
-                event_signal if event_signal is not None and 0 <= event_signal <= 1 else None
+                event_signal
+                if event_signal is not None and 0 <= event_signal <= 1
+                else None
             )
             effective_atr = atr
             if (
