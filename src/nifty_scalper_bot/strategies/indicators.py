@@ -819,9 +819,7 @@ class IndicatorEngine:
                 )
                 features["local_30bar_displacement_atr"] = move / atr
                 if travel > 0:
-                    features["local_30bar_directional_efficiency"] = (
-                        abs(move) / travel
-                    )
+                    features["local_30bar_directional_efficiency"] = abs(move) / travel
         if len(closes) >= 21:
             features["ema_fast"] = self._calculate_ema(closes, 9)
             features["ema_slow"] = self._calculate_ema(closes, 21)
