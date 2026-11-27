@@ -5,6 +5,8 @@ conditions from corroborated market inputs; publish timestamped snapshots
 with completed-bar evidence identity and broad context when supplied by the
 canonical manager. Canonical ADX is 0–100; legacy trend_score ratios are explicit.
 Independent volatility hazard cannot be hidden by a higher directional score.
+Intermediate ADX structural candidates are exposed separately for research;
+completed spot reference prices carry the existing normalized event threshold.
 The lightweight runner classifier is diagnostic only, not a live entry authority.
 
 Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
@@ -491,6 +493,60 @@ class MarketRegimeDetector:
             adjustments = self._build_adjustments(regime)
             adjustments["volatility_risk_confidence"] = volatility_risk
             adjustments["effective_atr_reference_points"] = effective_atr
+            adjustments["completed_reference_price"] = price
+            adjustments["intrabar_event_move_points"] = (
+                min(
+                    params.atr_event_threshold,
+                    params.atr_event_threshold * price
+                    / params.atr_reference_index_level,
+                )
+                if price is not None
+                and params.atr_reference_index_level > 0
+                else params.atr_event_threshold
+            )
+            # Candidate classification does not change live admission. Use
+            # only independently verified completed 30-bar structure.
+            efficiency = self._extract_float(
+                indicators, ("local_30bar_directional_efficiency",)
+            )
+            displacement = self._extract_float(
+                indicators, ("local_30bar_displacement_atr",)
+            )
+            crossings = self._extract_float(
+                indicators, ("local_30bar_center_crossings",)
+            )
+            adx = self._normalise_adx(trend_score)
+            candidate = None
+            if (
+                regime == "unknown"
+                and verified_bars is not None
+                and verified_bars >= 30
+                and evidence_at is not None
+                and evidence_at > 0
+                and adx is not None
+                and params.adx_chop_threshold < adx < params.adx_trend_threshold
+                and effective_atr is not None
+                and effective_atr < params.atr_volatile_threshold
+                and efficiency is not None
+                and 0 <= efficiency <= 1
+                and displacement is not None
+                and crossings is not None
+            ):
+                if (
+                    efficiency <= 0.25
+                    and abs(displacement) <= 1.5
+                    and crossings >= 3
+                ):
+                    candidate = "RANGE"
+                elif (
+                    efficiency >= 0.60
+                    and abs(displacement) >= 2.0
+                    and ema_fast is not None
+                    and ema_slow is not None
+                    and (ema_fast - ema_slow) * displacement > 0
+                ):
+                    candidate = "TREND"
+            adjustments["shadow_transition_candidate"] = candidate
             # Evaluation time is not the identity of the underlying evidence.
             for key in (
                 "completed_bar_timestamp",
@@ -499,6 +555,9 @@ class MarketRegimeDetector:
                 "atr_bps",
                 "broader_60bar_displacement_bps",
                 "broader_60bar_directional_efficiency",
+                "local_30bar_directional_efficiency",
+                "local_30bar_displacement_atr",
+                "local_30bar_center_crossings",
             ):
                 if key in indicators:
                     adjustments[key] = self._extract_float(indicators, (key,))
