@@ -5,7 +5,9 @@ first-observed RangeVWAP futures excursions with 5/10/15-minute futures and
 full-lot option bid outcomes stressed at the same default slippage as live,
 with frozen local/session target touch and prior-session clock-matched ATR
 research, while preserving the existing structural decisions,
-minute-sampled rejections, cost/MAE labels and option volume parity evidence.
+regime-stratified minute-sampled rejections, cost/MAE labels and option volume
+parity evidence. Range admission cohorts distinguish observed markouts from
+risk-verified outcomes and are mirrored in bounded archive telemetry.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.config.regime_ontology import regime_label
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RangeVWAPReclaimStrategyConfig,
@@ -454,7 +457,9 @@ def _sampled_markouts(
         contract: [item[0] for item in books] for contract, books in quotes.items()
     }
     outcomes: list[dict[str, Any]] = []
-    groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str, int, str, str, str], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
     for (strategy, contract, minute), row in sorted(samples.items()):
         try:
             instant = datetime.fromisoformat(str(row["decision_at"]))
@@ -474,6 +479,22 @@ def _sampled_markouts(
             raw_context = row.get("context")
             context: dict[str, Any] = (
                 raw_context if isinstance(raw_context, dict) else {}
+            )
+            regime = (
+                regime_label(context["regime"])
+                if context.get("regime") is not None
+                else "UNRECORDED"
+            )
+            raw_regime = (
+                regime_label(context["regime_raw"])
+                if context.get("regime_raw") is not None
+                else "UNRECORDED"
+            )
+            gate = context.get("regime_gate_allowed")
+            gate_state = (
+                "allowed"
+                if gate is True
+                else "blocked" if gate is False else "unrecorded"
             )
             recorded_lot_size = context.get("lot_size")
             verified_lot_size = (
@@ -530,14 +551,21 @@ def _sampled_markouts(
                     else "unverified_default_nifty_lot_assumption"
                 ),
                 "decision_context": context,
+                "regime": regime,
+                "regime_raw": raw_regime,
+                "regime_gate_state": gate_state,
                 "sampling": "first_no_vote_per_contract_strategy_utc_minute",
                 "independent_structural_setup": False,
             }
             outcomes.append(result)
-            groups[(strategy, reason, horizon)].append(result)
+            groups[(strategy, reason, horizon, regime, raw_regime, gate_state)].append(
+                result
+            )
 
     strata: list[dict[str, Any]] = []
-    for (strategy, reason, horizon), items in sorted(groups.items()):
+    for (strategy, reason, horizon, regime, raw_regime, gate_state), items in sorted(
+        groups.items()
+    ):
         labelled = [
             float(item["markout"]["gross_spread_adjusted_markout_pct"])
             for item in items
@@ -553,6 +581,9 @@ def _sampled_markouts(
             {
                 "strategy": strategy,
                 "reason": reason,
+                "regime": regime,
+                "regime_raw": raw_regime,
+                "regime_gate_state": gate_state,
                 "horizon_seconds": horizon,
                 "sampled_minutes": len(items),
                 "labelled": len(labelled),
@@ -717,6 +748,14 @@ def _range_excursion_markouts(
             and net_rr >= 1.5
         )
         first_rejection = str(row.get("first_rejection_reason") or "")
+        shadow_unknown_reclaim = (
+            str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+            and row.get("regime_gate_allowed") is False
+            and row.get("shadow_transition_candidate") == "RANGE"
+            and row.get("local_range_state") == "RANGE"
+            and row.get("local_reclaim_side") == row.get("side")
+            and first_rejection == "canonical_regime_gate_block"
+        )
         for horizon in (300, 600, 900):
             fut, fut_status = observed_futures_markout(
                 scoped_future,
@@ -828,13 +867,10 @@ def _range_excursion_markouts(
                         row.get("local_range_confirmed_in_trend") is True
                         and first_rejection == "strategy_regime_ineligible"
                     ),
-                    "shadow_unknown_local_range_candidate": (
-                        str(row.get("regime_raw") or "").upper() == "UNKNOWN"
-                        and row.get("regime_gate_allowed") is False
-                        and row.get("shadow_transition_candidate") == "RANGE"
-                        and row.get("local_range_state") == "RANGE"
-                        and row.get("local_reclaim_side") == row.get("side")
-                        and first_rejection == "canonical_regime_gate_block"
+                    "shadow_unknown_local_range_candidate": shadow_unknown_reclaim,
+                    "shadow_unknown_session_reclaim_candidate": (
+                        shadow_unknown_reclaim
+                        and row.get("structural_qualified") is True
                     ),
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
@@ -867,6 +903,10 @@ def _range_excursion_markouts(
             "shadow_confirmed_local_range_in_trend_candidate",
         ),
         ("shadow_unknown_local_range", "shadow_unknown_local_range_candidate"),
+        (
+            "shadow_unknown_session_reclaim",
+            "shadow_unknown_session_reclaim_candidate",
+        ),
     ):
         for horizon in (300, 600, 900):
             group = [
@@ -879,6 +919,11 @@ def _range_excursion_markouts(
                 for row in group
                 if row["same_decision_risk_773_and_net_rr_verified"]
                 and row["observed_book_and_futures_complete"]
+            ]
+            observed_net = [
+                float(row["option_cost_adjusted"]["terminal"]["net_rupees"])
+                for row in group
+                if row["observed_book_and_futures_complete"]
             ]
             comparisons.append(
                 {
@@ -894,6 +939,20 @@ def _range_excursion_markouts(
                         for row in group
                     ),
                     "verified_risk_and_observed_horizon": len(feasible),
+                    "observed_full_lot_net_rupees_mean": (
+                        round(statistics.mean(observed_net), 2)
+                        if len(observed_net) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "observed_full_lot_net_positive_fraction": (
+                        round(
+                            sum(value > 0 for value in observed_net) / len(observed_net),
+                            4,
+                        )
+                        if len(observed_net) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "observed_markout_not_risk_verified": True,
                     "futures_target_touch_counts": {
                         name: {
                             "forward_target_observed": sum(
@@ -1112,6 +1171,14 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
+        (
+            "range_admission",
+            [
+                row
+                for row in report.get("range_admission_comparisons", [])
+                if row["unique_first_seen_excursions"] > 0
+            ],
+        ),
     ):
         for row in strata:
             lines.append(
