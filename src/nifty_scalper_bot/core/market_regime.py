@@ -4,6 +4,7 @@ Responsibilities: classify trend, range, high-volatility, event and low-activity
 conditions from corroborated market inputs; publish timestamped snapshots
 with completed-bar evidence identity and broad context when supplied by the
 canonical manager. Canonical ADX is 0–100; legacy trend_score ratios are explicit.
+Independent volatility hazard cannot be hidden by a higher directional score.
 The lightweight runner classifier is diagnostic only, not a live entry authority.
 
 Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
@@ -101,6 +102,9 @@ class RegimeParameters:
     atr_range_threshold: float = 12.0
     atr_volatile_threshold: float = 22.0
     atr_event_threshold: float = 35.0
+    # Point thresholds retain their original protective floor. This reference
+    # also expresses them in index-level-normalised units, not fitted values.
+    atr_reference_index_level: float = 25000.0
     volume_trend_multiple: float = 1.15
     volume_event_multiple: float = 1.8
     calm_volume_multiple: float = 0.75
@@ -442,13 +446,34 @@ class MarketRegimeDetector:
                         snapshot,
                         ("event_score", "event_flag", "event_signal"),
                     )
+            # Invalid physical values cannot become quiet-range evidence.
+            atr = atr if atr is not None and atr > 0 else None
+            price = price if price is not None and price > 0 else None
+            ema_fast = ema_fast if ema_fast is not None and ema_fast > 0 else None
+            ema_slow = ema_slow if ema_slow is not None and ema_slow > 0 else None
+            volume_ratio = (
+                volume_ratio if volume_ratio is not None and volume_ratio >= 0 else None
+            )
+            event_signal = (
+                event_signal if event_signal is not None and 0 <= event_signal <= 1 else None
+            )
+            effective_atr = atr
+            if (
+                "completed_bar_timestamp" in indicators
+                and atr is not None
+                and price is not None
+                and math.isfinite(params.atr_reference_index_level)
+                and params.atr_reference_index_level > 0
+            ):
+                # Never weaken the existing point-based volatility protection.
+                effective_atr = max(atr, atr * params.atr_reference_index_level / price)
             price_momentum = self._price_momentum(price, price_series)
-            regime, confidence, reason = self._classify(
+            regime, confidence, reason, volatility_risk = self._classify(
                 params,
                 ema_fast=ema_fast,
                 ema_slow=ema_slow,
                 trend_score=trend_score,
-                atr=atr,
+                atr=effective_atr,
                 volume_ratio=volume_ratio,
                 iv_rank=iv_rank,
                 event_signal=event_signal,
@@ -456,6 +481,8 @@ class MarketRegimeDetector:
                 realized_vol=realized_vol,
             )
             adjustments = self._build_adjustments(regime)
+            adjustments["volatility_risk_confidence"] = volatility_risk
+            adjustments["effective_atr_reference_points"] = effective_atr
             # Evaluation time is not the identity of the underlying evidence.
             for key in (
                 "completed_bar_timestamp",
@@ -1136,8 +1163,8 @@ class MarketRegimeDetector:
         event_signal: float | None,
         price_momentum: float | None,
         realized_vol: float | None,
-    ) -> tuple[str, float, str]:
-        """Return ``(regime, confidence, reason)`` for the current context.
+    ) -> tuple[str, float, str, float]:
+        """Return the regime and independent volatility hazard confidence.
 
         Args:
             params: Tunable thresholds guiding the classification logic.
@@ -1169,7 +1196,7 @@ class MarketRegimeDetector:
             and price_momentum is None
             and realized_vol is None
         ):
-            return "unknown", 0.0, "insufficient_regime_features"
+            return "unknown", 0.0, "insufficient_regime_features", 0.0
 
         scores, reasons = self._compute_feature_scores(
             params,
@@ -1190,18 +1217,18 @@ class MarketRegimeDetector:
             and (iv_rank - realized_pct) >= params.iv_realized_gap_event
         ):
             confidence = min(1.0, 0.75 + (iv_rank - realized_pct) / 120.0)
-            return "event", round(confidence, 4), "iv_realized_gap"
+            return "event", round(confidence, 4), "iv_realized_gap", 0.0
 
         if event_signal is not None and event_signal >= params.event_signal_threshold:
             confidence = min(
                 1.0,
                 0.75 + (event_signal - params.event_signal_threshold) * 0.25,
             )
-            return "event", round(confidence, 4), "event_signal_triggered"
+            return "event", round(confidence, 4), "event_signal_triggered", 0.0
 
         if atr is not None and atr >= params.atr_event_threshold:
             confidence = min(1.0, 0.75 + (atr - params.atr_event_threshold) / 60.0)
-            return "event", round(confidence, 4), "atr_event_threshold"
+            return "event", round(confidence, 4), "atr_event_threshold", 0.0
 
         if (
             (volume is not None and volume >= params.volume_event_multiple)
@@ -1218,11 +1245,11 @@ class MarketRegimeDetector:
                 )
                 * 0.12,
             )
-            return "event", round(confidence, 4), "volume_price_spike"
+            return "event", round(confidence, 4), "volume_price_spike", 0.0
 
         if scores.get("event", 0.0) >= 1.0:
             confidence = min(1.0, 0.72 + min(scores["event"], 2.5) * 0.12)
-            return "event", round(confidence, 4), reasons["event"]
+            return "event", round(confidence, 4), reasons["event"], 0.0
 
         volatile_score = scores.get("volatile", 0.0)
         if atr is not None and atr >= params.atr_volatile_threshold:
@@ -1307,7 +1334,7 @@ class MarketRegimeDetector:
                 or realized_pct < params.realized_vol_calm_threshold
             )
         ):
-            return "low_activity", 0.65, "low_volume_flat_trend_confirmed"
+            return "low_activity", 0.65, "low_volume_flat_trend_confirmed", 0.0
 
         scored = {
             "volatile": volatile_score,
@@ -1333,7 +1360,7 @@ class MarketRegimeDetector:
             )
         )
         if regime == "range" and not range_proven:
-            return "unknown", 0.0, "range_evidence_unverified"
+            return "unknown", 0.0, "range_evidence_unverified", 0.0
         reason = reasons.get(regime, "insufficient_features")
 
         base_confidence = {"volatile": 0.62, "trend": 0.6, "range": 0.55}
@@ -1341,7 +1368,12 @@ class MarketRegimeDetector:
         intensity = min(max(scored.get(regime, 0.0), 0.0), 3.0)
         confidence = base_confidence[regime] + intensity * multiplier[regime]
         confidence = min(1.0, confidence)
-        return regime, round(confidence, 4), reason
+        volatility_risk = (
+            round(min(1.0, 0.62 + 0.12 * min(volatile_score, 3.0)), 4)
+            if volatile_score >= 1.0
+            else 0.0
+        )
+        return regime, round(confidence, 4), reason, volatility_risk
 
     @staticmethod
     def _extract_float(
