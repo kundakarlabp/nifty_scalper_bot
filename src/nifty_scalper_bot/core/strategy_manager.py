@@ -3799,13 +3799,20 @@ class StrategyManager(_BaseStrategyManager):
             if self._data_hub is not None:
                 selected_getter = getattr(self._data_hub, "get_selected_option_symbols", None)
                 if callable(selected_getter):
-                    selected_ce, selected_pe = selected_getter()
-                    indicators["selected_ce"] = selected_ce
-                    indicators["selected_pe"] = selected_pe
-                    indicators["is_selected_option"] = symbol in {
-                        normalize_symbol(str(selected_ce or "")),
-                        normalize_symbol(str(selected_pe or "")),
-                    }
+                    try:
+                        selected_ce, selected_pe = selected_getter()
+                    except Exception as exc:
+                        log_throttled(log, f"range_selected_basket_unavailable:{symbol}",
+                            "RANGE_SELECTED_BASKET_UNAVAILABLE symbol=%s error=%s",
+                            symbol, str(exc), interval_sec=60.0, level=logging.WARNING)
+                    else:
+                        if selected_ce is not None or selected_pe is not None:
+                            indicators["selected_ce"] = selected_ce
+                            indicators["selected_pe"] = selected_pe
+                            indicators["is_selected_option"] = symbol in {
+                                normalize_symbol(str(selected_ce or "")),
+                                normalize_symbol(str(selected_pe or "")),
+                            }
             indicators = _enrich_option_candidate_metadata(symbol, indicators)
             recent_bars: list[dict[str, float]] = []
             for owner, method_name in (
