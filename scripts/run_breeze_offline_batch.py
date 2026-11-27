@@ -35,10 +35,8 @@ def _shadow_only() -> None:
     if (
         os.getenv("EXECUTION_MODE", "").upper() != "SHADOW"
         or os.getenv("ENABLE_LIVE", "false").lower() in {"true", "1", "yes"}
-        or os.getenv("ENABLE_LIVE_TRADING", "false").lower()
-        in {"true", "1", "yes"}
-        or os.getenv("ALLOW_REAL_BROKER", "false").lower()
-        in {"true", "1", "yes"}
+        or os.getenv("ENABLE_LIVE_TRADING", "false").lower() in {"true", "1", "yes"}
+        or os.getenv("ALLOW_REAL_BROKER", "false").lower() in {"true", "1", "yes"}
     ):
         raise ValueError("breeze_offline_batch_requires_explicit_shadow")
 
@@ -85,7 +83,8 @@ def run_batch(
     experiment_settings = {
         "elite": asdict(get_settings().elite),
         "cost_controls": {
-            key: value for key, value in os.environ.items()
+            key: value
+            for key, value in os.environ.items()
             if key.startswith(("COST_", "MIN_NET_", "RISK_MIN_"))
         },
     }
@@ -205,15 +204,17 @@ def run_batch(
     result_rows = []
     for bps, strategy in sorted(trades):
         metrics = summarize(trades[(bps, strategy)])
-        result_rows.append({
-            "strategy": strategy,
-            "slippage_bps_per_side": bps,
-            "trade_count": metrics["trade_count"],
-            "net_pnl": metrics["net_pnl"],
-            "fees": metrics["fees"],
-            "profit_factor": metrics["profit_factor"],
-            "max_realized_drawdown": metrics["max_realized_drawdown"],
-        })
+        result_rows.append(
+            {
+                "strategy": strategy,
+                "slippage_bps_per_side": bps,
+                "trade_count": metrics["trade_count"],
+                "net_pnl": metrics["net_pnl"],
+                "fees": metrics["fees"],
+                "profit_factor": metrics["profit_factor"],
+                "max_realized_drawdown": metrics["max_realized_drawdown"],
+            }
+        )
     report = {
         "scope": "Breeze_identified_OHLCV_strategy_component_research",
         "dataset_sha256": database_digest,
@@ -253,11 +254,15 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=1000)
     args = parser.parse_args()
     result = run_batch(
-        breeze_db=args.breeze_db, eod_db=args.eod_db,
-        summary_path=args.summary, staged_dir=args.staged_dir,
-        output_dir=args.output_dir, selected_days=tuple(args.day),
+        breeze_db=args.breeze_db,
+        eod_db=args.eod_db,
+        summary_path=args.summary,
+        staged_dir=args.staged_dir,
+        output_dir=args.output_dir,
+        selected_days=tuple(args.day),
         include_partial=args.include_partial,
-        expected_windows=args.expected_windows, limit=args.limit,
+        expected_windows=args.expected_windows,
+        limit=args.limit,
     )
     print(json.dumps(result, sort_keys=True))
 
