@@ -367,7 +367,9 @@ def test_day_limit_covers_all_original_breeze_source_dates(tmp_path: Path) -> No
         )
 
 
-def test_option_lot_transition_does_not_block_context_future_lot(tmp_path: Path) -> None:
+def test_option_lot_transition_does_not_block_context_future_lot(
+    tmp_path: Path,
+) -> None:
     """Front-future lot 25 is valid context for weekly CE/PE lot 75."""
     breeze, eod, summary = _sources(tmp_path)
     with sqlite3.connect(eod) as db:
