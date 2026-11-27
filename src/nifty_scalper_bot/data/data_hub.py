@@ -1337,12 +1337,10 @@ class DataHub:
             row = lookup(symbol)
         except Exception:  # noqa: BLE001 - optional analytics must stay non-gating
             return None
-        if (
-            not isinstance(row, Mapping)
-            or str(row.get("instrument_type") or "").strip().upper() not in {"CE", "PE"}
-        ):
+        if not isinstance(row, Mapping):
             return None
-        return row
+        side = str(row.get("instrument_type") or "").strip().upper()
+        return row if side in {"CE", "PE"} else None
 
     def _parse_option_symbol(
         self, symbol: str
