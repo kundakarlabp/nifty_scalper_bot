@@ -5,6 +5,8 @@ These fixtures assert *logic*, not executable historical NIFTY profitability.
 
 from __future__ import annotations
 
+import json
+
 import math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1403,3 +1405,41 @@ def test_weekly_selected_option_reaches_existing_range_observer(caplog) -> None:
     records = strategy.get_research_snapshot()["opportunities"]
     assert len(records) == 1
     assert records[0]["symbol"] == weekly
+
+
+def test_rolling_only_reclaim_does_not_reserve_live_opportunity(monkeypatch) -> None:
+    from nifty_scalper_bot.strategies.elite_strategies import range_vwap_reclaim
+
+    captured = []
+    monkeypatch.setattr(
+        range_vwap_reclaim.LOGGER,
+        "info",
+        lambda message, *args, **kwargs: captured.append((message, args)),
+    )
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    structure = {
+        "qualified": False,
+        "reason": "session_rolling_center_disagree",
+        "local_range_confirmed": True,
+        "local_range_state": "RANGE",
+        "local_reclaim_side": "CE",
+        "local_reclaim_previous_bar_timestamp": bars()[-2]["timestamp"],
+        "bar_timestamp": bars()[-1]["timestamp"],
+        "rolling_20m_secondary_center": 25250.0,
+    }
+    context = indicators(regime="UNKNOWN", is_selected_option=True)
+    for _ in range(2):
+        strategy._observe_excursion(
+            OPTION, context, structure, decision_at=decision_at()
+        )
+    records = [
+        json.loads(args[0])
+        for message, args in captured
+        if message == "RANGE_VWAP_EXCURSION_OBSERVED %s"
+    ]
+    assert len(records) == 1
+    assert records[0]["excursion_basis"] == "rolling_vwap"
+    assert strategy._active_opportunity is None
+    assert not strategy.get_research_snapshot()["opportunities"]
