@@ -9,7 +9,6 @@ on:
   push:
     branches: [main]
     paths:
-      - deploy/breeze_targeted_backfill_20261109.csv
       - deploy/breeze_five_date_recovery_20261127.csv
 
 permissions:
