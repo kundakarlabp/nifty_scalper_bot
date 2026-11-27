@@ -39,6 +39,4 @@ def test_historical_backfill_targets_only_exact_missing_contracts() -> None:
         ("2025-07-11", "options", "2025-07-17", "25250", "PE"),
     }
     assert {row["priority"] for row in targets} == {"1"}
-    assert {row["reason"] for row in targets} == {
-        "provider_or_validation_failed"
-    }
+    assert {row["reason"] for row in targets} == {"provider_or_validation_failed"}
