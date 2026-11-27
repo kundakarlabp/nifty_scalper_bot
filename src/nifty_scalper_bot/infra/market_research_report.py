@@ -946,7 +946,8 @@ def _range_excursion_markouts(
                     ),
                     "observed_full_lot_net_positive_fraction": (
                         round(
-                            sum(value > 0 for value in observed_net) / len(observed_net),
+                            sum(value > 0 for value in observed_net)
+                            / len(observed_net),
                             4,
                         )
                         if len(observed_net) >= _MIN_LABELLED

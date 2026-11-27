@@ -711,7 +711,9 @@ def test_unknown_local_reclaim_requires_separate_session_confirmation(tmp_path) 
     )
     for qualified in (False, True):
         row["structural_qualified"] = qualified
-        journal = f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
+        journal = (
+        f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
+    )
         report = build_session_research_report(
             session_date=date(2026, 11, 3),
             journal=journal,
