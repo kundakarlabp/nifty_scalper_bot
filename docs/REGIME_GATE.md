@@ -61,3 +61,27 @@ pending transition.
 admission rules; it no longer recomputes a second ADX/ATR/VWAP-slope regime. The
 runner's coarse ATR low-volatility check remains a separate execution-safety guard,
 not a regime classifier or direction authority.
+
+
+## Completed-bar confirmation and local structure research
+
+Indicator-driven TREND/RANGE transitions require distinct adjacent completed
+one-minute evidence. Repeated refreshes of the same candle cannot confirm a
+new directional regime. Missing or gapped history cannot manufacture a
+confirmation. Raw safety observations retain their immediate veto behavior.
+Explicit injected observations retain their existing external snapshot contract.
+
+RangeVWAPReclaim observes local range structure before session-VWAP setup
+filters: 25-bar efficiency, ATR-normalised 30-bar width, rolling-center slope,
+adjacent-window persistence and two-sided rejection. A continued completed
+breakout invalidates the local range immediately. The 60-bar directional
+context is absent until sufficient completed history exists. The descriptive
+evidence fraction is not a calibrated probability.
+
+The existing journal and post-market report record distinct completed futures
+minutes, first-seen session excursions, and observed frozen local/session VWAP
+futures target touches. Prior dated reports supply a clock-matched ATR-bps
+median only when at least five prior sessions have that exact IST minute.
+This is research evidence, not a live override or an option fill simulation.
+The existing live session-VWAP admission rules, risk ceiling, protective
+stops and broker reconciliation are unchanged.
