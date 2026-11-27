@@ -76,7 +76,9 @@ class MarketRegimeManager:
     _pending_regime: str | None = field(init=False, default=None, repr=False)
     _pending_count: int = field(init=False, default=0, repr=False)
     _pending_evidence_at: float | None = field(init=False, default=None, repr=False)
-    _last_verified_evidence_at: float | None = field(init=False, default=None, repr=False)
+    _last_verified_evidence_at: float | None = field(
+        init=False, default=None, repr=False
+    )
     _last_filter_reasons: tuple[str, ...] = field(
         init=False, default_factory=tuple, repr=False
     )
@@ -797,7 +799,9 @@ class MarketRegimeManager:
             history = getattr(self.indicators, "get_history", None)
             if strict:
                 price_series = list(data.get("price_series") or ())
-                completed_bar_timestamp = float(data.get("completed_bar_timestamp") or 0)
+                completed_bar_timestamp = float(
+                    data.get("completed_bar_timestamp") or 0
+                )
             elif callable(history):
                 try:
                     bars = history(self._indicator_symbol, count=16, field="bars")
@@ -1112,7 +1116,9 @@ class MarketRegimeManager:
                     reasons.append("confidence_below_floor")
                 raw_regime = normalize_regime(raw_snapshot.regime)
                 if strict:
-                    evidence_at = raw_snapshot.adjustments.get("completed_bar_timestamp")
+                    evidence_at = raw_snapshot.adjustments.get(
+                        "completed_bar_timestamp"
+                    )
                     if (
                         not isinstance(evidence_at, (int, float))
                         or isinstance(evidence_at, bool)
