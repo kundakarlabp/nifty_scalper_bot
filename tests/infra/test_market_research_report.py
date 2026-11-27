@@ -651,11 +651,27 @@ def test_local_regime_clock_reference_is_prior_only_and_deduplicated(tmp_path) -
         [denied], session_date=day, report_directory=tmp_path
     )
     assert summary["canonical_denied_observed_minutes"] == 1
+    assert summary["blocked_local_range_minutes"] == 1
+    assert summary["blocked_local_range_reclaim_minutes"] == 1
+    assert summary["blocked_local_range_without_reclaim_minutes"] == 0
+    assert summary["blocked_local_range_session_setup_minutes"] == 0
     assert summary["unknown_with_confirmed_local_range_minutes"] == 1
     assert summary["shadow_transition_counts"] == {"RANGE": 1}
     assert summary["clock_matched_calibration_status"] == (
         "reference_available_research_only"
     )
+    no_reclaim = dict(
+        denied,
+        local_reclaim_side=None,
+        bar_timestamp=(stamp + timedelta(minutes=1)).isoformat(),
+        decision_at=(DECISION + timedelta(minutes=1)).isoformat(),
+    )
+    _, summary = _local_regime_minutes(
+        [denied, denied, no_reclaim], session_date=day, report_directory=tmp_path
+    )
+    assert summary["blocked_local_range_minutes"] == 2
+    assert summary["blocked_local_range_reclaim_minutes"] == 1
+    assert summary["blocked_local_range_without_reclaim_minutes"] == 1
 
 
 def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
