@@ -758,6 +758,12 @@ class InstrumentManager:
             symbol_by_token=symbol_by_token,
             metadata={
                 "source": "instrument_manager",
+                "option_lot_size_by_symbol": {
+                    self._exchange_qualified(item[4]): item[4]["lot_size"]
+                    for item in selected_options
+                    if type(item[4].get("lot_size")) is int
+                    and 0 < item[4]["lot_size"] < 10000
+                },
                 "spot_price": spot,
                 "strikes_around_atm": around,
                 "strike_step": int(strike_step),

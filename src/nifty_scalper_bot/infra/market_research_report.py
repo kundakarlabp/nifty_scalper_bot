@@ -281,6 +281,9 @@ def _local_regime_minutes(
     denied_observations = 0
     confirmed_in_trend = 0
     independent_local_reclaims = 0
+    blocked_range_minutes = 0
+    blocked_range_reclaims = 0
+    blocked_range_session_setups = 0
     for row in rows:
         matched = references.get(row["clock_minute_ist"], [])
         baseline = statistics.median(matched) if len(matched) >= 5 else None
@@ -295,6 +298,12 @@ def _local_regime_minutes(
         if candidate in ("TREND", "RANGE"):
             shadow_transition_counts[str(candidate)] += 1
         denied_observations += int(row.get("regime_gate_allowed") is False)
+        if state == "RANGE" and row.get("regime_gate_allowed") is False:
+            blocked_range_minutes += 1
+            blocked_range_reclaims += int(row.get("local_reclaim_side") in ("CE", "PE"))
+            blocked_range_session_setups += int(
+                row.get("session_vwap_setup_qualified") is True
+            )
         unknown_local_range += int(
             state == "RANGE" and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
         )
@@ -315,6 +324,12 @@ def _local_regime_minutes(
         "state_counts": dict(state_counts),
         "shadow_transition_counts": dict(shadow_transition_counts),
         "canonical_denied_observed_minutes": denied_observations,
+        "blocked_local_range_minutes": blocked_range_minutes,
+        "blocked_local_range_reclaim_minutes": blocked_range_reclaims,
+        "blocked_local_range_without_reclaim_minutes": (
+            blocked_range_minutes - blocked_range_reclaims
+        ),
+        "blocked_local_range_session_setup_minutes": blocked_range_session_setups,
         "unknown_with_confirmed_local_range_minutes": unknown_local_range,
         "clock_matched_calibration_status": (
             "reference_available_research_only"

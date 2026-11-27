@@ -241,3 +241,35 @@ def test_unknown_observation_does_not_validate_retained_trend() -> None:
     diagnostic = manager.build_diagnostics()
     assert diagnostic["current"]["regime"] == "trend"
     assert diagnostic["raw"]["regime"] == "unknown"
+
+
+def test_regime_log_throttle_keys_ignore_context_but_preserve_real_reasons(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.core import market_regime_manager
+
+    calls = []
+    monkeypatch.setattr(
+        market_regime_manager,
+        "log_throttled",
+        lambda logger, key, msg, *args, **kwargs: calls.append((key, args, kwargs)),
+    )
+    manager = MarketRegimeManager(MarketRegimeDetector())
+    snapshot = _make_snapshot("unknown", 0.5)
+    for allowed, reasons in (
+        (False, ("regime_block_unknown", "ctx_a")),
+        (True, ("ctx_b",)),
+        (False, ("regime_block_unknown", "ctx_c")),
+        (False, ("regime_block_intrabar_spot_shock",)),
+    ):
+        manager._emit_decision_log(
+            allowed=allowed, bypassed=False, reasons=reasons, snapshot=snapshot
+        )
+    assert calls[0][0] == calls[2][0]
+    assert calls[0][0] != calls[1][0]
+    assert calls[0][0] != calls[3][0]
+    assert calls[2][2]["extra"]["reasons"] == [
+        "regime_block_unknown",
+        "ctx_c",
+    ]
+    assert calls[2][2]["interval_sec"] == 60.0

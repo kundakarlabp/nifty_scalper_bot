@@ -17,6 +17,7 @@ remain owned by their execution components.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import threading
 import time
@@ -92,13 +93,6 @@ class MarketRegimeManager:
     _stats: MutableMapping[str, int] = field(
         init=False, default_factory=dict, repr=False
     )
-    _last_logged_decision: tuple[bool, tuple[str, ...], bool] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
-    _last_logged_at: float = field(init=False, default=0.0, repr=False)
-    _log_cooldown: float = field(init=False, default=12.0, repr=False)
     _indicator_settings: dict[str, Any] = field(
         init=False, repr=False, default_factory=dict
     )
@@ -166,8 +160,6 @@ class MarketRegimeManager:
         self._bypass = False
         self._listener_registered = False
         self._stats: MutableMapping[str, int] = {"pass": 0, "block": 0, "bypass": 0}
-        self._last_logged_decision = None
-        self._last_logged_at = 0.0
 
         self._apply_env_overrides()
 
@@ -1309,39 +1301,40 @@ class MarketRegimeManager:
         reasons: tuple[str, ...],
         snapshot: RegimeSnapshot | None,
     ) -> None:
-        """Emit deduplicated decision logs to avoid per-tick noise."""
-        logger.debug(
-            "Entered MarketRegimeManager._emit_decision_log",
-            extra={"event": "regime_manager_emit_log"},
+        """Throttle repeated decision classes, not exact adjacent contexts."""
+        # Context field names are diagnostics, not distinct safety reasons.
+        # Keep all original reasons in the emitted record and decision history.
+        semantic_reasons = tuple(
+            sorted({reason for reason in reasons if not reason.startswith("ctx_")})
         )
-        now = time.time()
-        decision_key = (allowed, reasons, bypassed)
-        should_log = True
-        with self._lock:
-            last = self._last_logged_decision
-            last_at = self._last_logged_at
-            if last == decision_key and (now - last_at) < self._log_cooldown:
-                should_log = False
-            else:
-                self._last_logged_decision = decision_key
-                self._last_logged_at = now
-        if not should_log:
-            return
-        extras = {
-            "event": "regime_manager_can_trade",
-            "regime": getattr(snapshot, "regime", None),
-            "confidence": getattr(snapshot, "confidence", None),
-            "reasons": list(reasons),
-        }
-        if bypassed:
-            extras["event"] = "regime_manager_can_trade_bypass"
-            logger.info("Condition met: regime_manager_can_trade_bypass", extra=extras)
-            return
-        if allowed:
-            logger.info("Condition met: regime_manager_can_trade", extra=extras)
-        else:
-            extras["event"] = "regime_manager_trade_blocked"
-            logger.warning("Condition met: regime_manager_trade_blocked", extra=extras)
+        regime = getattr(snapshot, "regime", None)
+        confidence = getattr(snapshot, "confidence", None)
+        event = (
+            "regime_manager_can_trade_bypass"
+            if bypassed
+            else (
+                "regime_manager_can_trade"
+                if allowed
+                else "regime_manager_trade_blocked"
+            )
+        )
+        log_throttled(
+            logger,
+            f"{event}:{regime}:{semantic_reasons}",
+            "%s regime=%s reasons=%s confidence=%s",
+            event,
+            regime,
+            reasons,
+            confidence,
+            interval_sec=60.0,
+            level=logging.INFO if allowed or bypassed else logging.WARNING,
+            extra={
+                "event": event,
+                "regime": regime,
+                "confidence": confidence,
+                "reasons": list(reasons),
+            },
+        )
 
     # ------------------------------------------------------------------
     def get_filter_reasons(self) -> tuple[str, ...]:

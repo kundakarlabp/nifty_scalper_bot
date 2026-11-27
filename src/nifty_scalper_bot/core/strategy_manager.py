@@ -2795,9 +2795,8 @@ class StrategyManager(_BaseStrategyManager):
         if classify_symbol_role(symbol) != "tradable_option" or self._data_hub is None:
             return
         try:
-            selection = active_contract_selection_from_basket(
-                self._data_hub.get_active_contract_basket()
-            )
+            basket = self._data_hub.get_active_contract_basket()
+            selection = active_contract_selection_from_basket(basket)
             ce, pe = selection.selected_ce, selection.selected_pe
             if normalize_symbol(symbol) not in {
                 normalize_symbol(str(ce or "")), normalize_symbol(str(pe or ""))
@@ -2828,12 +2827,44 @@ class StrategyManager(_BaseStrategyManager):
             # Retain only broker-owned lot metadata so the archived full-lot
             # bid/ask tape can label this observation later. No quote or risk
             # model is inferred, and no option pricing is performed here.
-            metadata_getter = getattr(self._data_hub, "get_option_contract_metadata", None)
-            row = metadata_getter(symbol) if callable(metadata_getter) else None
-            if isinstance(row, t.Mapping) and str(row.get("name") or "").upper() == "NIFTY" and str(row.get("instrument_type") or "").upper() == symbol[-2:]:
-                lot_size = _safe_float_value(row.get("lot_size"))
-                if lot_size is not None and isfinite(lot_size) and 0 < lot_size < 10000 and lot_size.is_integer() and not isinstance(row.get("lot_size"), bool):
-                    context["lot_size"] = int(lot_size)
+            metadata = (
+                basket.get("metadata")
+                if isinstance(basket, t.Mapping)
+                else getattr(basket, "metadata", None)
+            )
+            lots = (
+                metadata.get("option_lot_size_by_symbol")
+                if isinstance(metadata, t.Mapping)
+                and metadata.get("source") == "instrument_manager"
+                else None
+            )
+            lot = (
+                lots.get(normalize_symbol(symbol))
+                if isinstance(lots, t.Mapping)
+                else None
+            )
+            if type(lot) is int and 0 < lot < 10000:
+                context["lot_size"] = lot
+            else:
+                metadata_getter = getattr(
+                    self._data_hub, "get_option_contract_metadata", None
+                )
+                row = metadata_getter(symbol) if callable(metadata_getter) else None
+                if (
+                    isinstance(row, t.Mapping)
+                    and str(row.get("name") or "").upper() == "NIFTY"
+                    and str(row.get("instrument_type") or "").upper() == symbol[-2:]
+                ):
+                    raw_lot = row.get("lot_size")
+                    lot_size = _safe_float_value(raw_lot)
+                    if (
+                        lot_size is not None
+                        and isfinite(lot_size)
+                        and 0 < lot_size < 10000
+                        and lot_size.is_integer()
+                        and not isinstance(raw_lot, bool)
+                    ):
+                        context["lot_size"] = int(lot_size)
             for strategy in self._strategies:
                 if getattr(strategy, "name", "") != "RangeVWAPReclaim":
                     continue
