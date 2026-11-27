@@ -2,8 +2,8 @@
 
 Responsibilities: refresh timestamped underlying indicators and completed
 in-memory price history, stabilise directional transitions on distinct adjacent
-completed observations, and explain the accepted
-regime evidence in throttled runtime diagnostics.
+completed observations, and explain the accepted regime evidence. The live
+path uses the indicator owner's completed spot snapshot and aligned futures volume.
 
 Safety: Missing, stale, future-dated, UNKNOWN or LOW_ACTIVITY raw evidence
 cannot inherit trade permission from an older stable regime. Raw EVENT and
@@ -31,6 +31,7 @@ from nifty_scalper_bot.core.market_regime import (
     RegimeSnapshot,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.env import coalesce_bool, coalesce_float, coalesce_int
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
@@ -73,6 +74,7 @@ class MarketRegimeManager:
     _pending_regime: str | None = field(init=False, default=None, repr=False)
     _pending_count: int = field(init=False, default=0, repr=False)
     _pending_evidence_at: float | None = field(init=False, default=None, repr=False)
+    _last_verified_evidence_at: float | None = field(init=False, default=None, repr=False)
     _last_filter_reasons: tuple[str, ...] = field(
         init=False, default_factory=tuple, repr=False
     )
@@ -447,6 +449,26 @@ class MarketRegimeManager:
         with self._lock:
             previous = self._current
             prior_raw = self._raw_current
+            strict = self._indicator_settings.get("require_completed_evidence") is True
+            if strict and snapshot.symbol != self._indicator_symbol:
+                return previous
+            incoming = normalize_regime(snapshot.regime)
+            directional = incoming in {MarketRegime.TREND, MarketRegime.RANGE}
+            evidence_at = snapshot.adjustments.get("completed_bar_timestamp")
+            valid_evidence = bool(
+                isinstance(evidence_at, (int, float))
+                and not isinstance(evidence_at, bool)
+                and math.isfinite(evidence_at)
+                and evidence_at % 60 == 0
+                and 60 <= snapshot.updated_at - evidence_at <= 180
+            )
+            if strict and valid_evidence and isinstance(evidence_at, (int, float)):
+                if (
+                    self._last_verified_evidence_at is not None
+                    and evidence_at < self._last_verified_evidence_at
+                ):
+                    return previous
+                self._last_verified_evidence_at = float(evidence_at)
             if (
                 prior_raw is not None
                 and prior_raw.symbol == snapshot.symbol
@@ -460,10 +482,15 @@ class MarketRegimeManager:
             self._raw_current = snapshot
             self._history.append(snapshot)
 
-            incoming = normalize_regime(snapshot.regime)
             current = normalize_regime(getattr(previous, "regime", None))
 
-            if previous is None:
+            if strict and directional and not valid_evidence:
+                self._pending_regime = incoming.value
+                self._pending_count = 0
+                self._pending_evidence_at = None
+                return previous
+
+            if previous is None and not (strict and directional):
                 self._current = snapshot
                 self._pending_regime = None
                 self._pending_count = 0
@@ -654,7 +681,12 @@ class MarketRegimeManager:
             return
 
         # 1. Pull required metrics from IndicatorEngine
-        getter = getattr(self.indicators, "get_indicators", None)
+        strict = self._indicator_settings.get("require_completed_evidence") is True
+        getter = getattr(
+            self.indicators,
+            "get_completed_regime_inputs" if strict else "get_indicators",
+            None,
+        )
         if not callable(getter):
             logger.warning(
                 "REGIME_REFRESH_SKIPPED reason=indicator_engine_unavailable",
@@ -679,7 +711,30 @@ class MarketRegimeManager:
 
         try:
             # 2. Fetch indicators
-            data = getter(self._indicator_symbol, required_keys)
+            if strict:
+                now = datetime.now(ZoneInfo("Asia/Kolkata"))
+                data = getter(self._indicator_symbol, now=now) or {}
+                active_future = getattr(self.datahub, "get_active_futures_symbol", None)
+                if callable(active_future) and data:
+                    future = canonical_nifty_future_symbol(active_future())
+                    if future is not None:
+                        future_data = getter(future, now=now) or {}
+                        ratio = future_data.get("volume_spike_ratio")
+                        if (
+                            canonical_nifty_future_symbol(active_future()) == future
+                            and future_data.get("completed_bar_timestamp")
+                            == data.get("completed_bar_timestamp")
+                            and isinstance(ratio, (int, float))
+                            and not isinstance(ratio, bool)
+                            and math.isfinite(ratio)
+                            and ratio >= 0
+                        ):
+                            data["volume_spike_ratio"] = ratio
+                # Unavailable history is an explicit raw UNKNOWN, not a refresh
+                # of the previous observation or a fabricated feature.
+                data.setdefault("completed_bar_timestamp", 0.0)
+            else:
+                data = getter(self._indicator_symbol, required_keys)
             if not data:
                 logger.debug(
                     "No indicator data returned",
@@ -694,7 +749,7 @@ class MarketRegimeManager:
                 data.get(key) is not None
                 for key in ("adx", "atr", "volume_spike_ratio")
             ) or (data.get("ema_fast") is not None and data.get("ema_slow") is not None)
-            if not has_regime_features:
+            if not has_regime_features and not strict:
                 logger.debug(
                     "REGIME_REFRESH_SKIPPED reason=insufficient_regime_features"
                 )
@@ -705,7 +760,10 @@ class MarketRegimeManager:
             price_series: list[float] = []
             completed_bar_timestamp = 0.0
             history = getattr(self.indicators, "get_history", None)
-            if callable(history):
+            if strict:
+                price_series = list(data.get("price_series") or ())
+                completed_bar_timestamp = float(data.get("completed_bar_timestamp") or 0)
+            elif callable(history):
                 try:
                     bars = history(self._indicator_symbol, count=16, field="bars")
                     now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -894,8 +952,9 @@ class MarketRegimeManager:
         *,
         context: Mapping[str, object] | None = None,
         record_decision: bool = True,
+        expected_regime: object | None = None,
     ) -> bool:
-        """Return ``True`` when trades are allowed under the current regime."""
+        """Gate current evidence; optionally reject a changed entry regime."""
         logger.debug(
             "Entered MarketRegimeManager.can_trade",
             extra={"event": "regime_manager_can_trade"},
@@ -908,7 +967,11 @@ class MarketRegimeManager:
             with self._lock:
                 snapshot = self.get_execution_snapshot()
                 raw_snapshot = self._raw_current
-                bypass = self._bypass
+                stable_snapshot = self._current
+                strict = (
+                    self._indicator_settings.get("require_completed_evidence") is True
+                )
+                bypass = self._bypass and not strict
             if bypass:
                 bypass_reasons = ("bypass_enabled",)
                 decision = RegimeDecision(
@@ -937,7 +1000,7 @@ class MarketRegimeManager:
                     "REGIME_BYPASS_ON_UNAVAILABLE", default=False
                 )
 
-                if auto_bypass:
+                if auto_bypass and not strict:
                     # Log warning but allow trading with caution
                     logger.warning(
                         "⚠️ Regime unavailable - BYPASS ACTIVE (trading with reduced confidence)",
@@ -984,7 +1047,11 @@ class MarketRegimeManager:
                         "REGIME_BYPASS_ON_STALE", default=False
                     )
 
-                    if stale_bypass and age < (self.stale_after_seconds * 3):
+                    if (
+                        stale_bypass
+                        and not strict
+                        and age < (self.stale_after_seconds * 3)
+                    ):
                         # Allow if data is stale but not ancient (3x threshold)
                         logger.warning(
                             f"⚠️ Regime data stale ({age:.1f}s) - BYPASS ACTIVE",
@@ -1007,6 +1074,32 @@ class MarketRegimeManager:
                     allowed = False
                     reasons.append("confidence_below_floor")
                 raw_regime = normalize_regime(raw_snapshot.regime)
+                if strict:
+                    evidence_at = raw_snapshot.adjustments.get("completed_bar_timestamp")
+                    if (
+                        not isinstance(evidence_at, (int, float))
+                        or isinstance(evidence_at, bool)
+                        or not math.isfinite(evidence_at)
+                        or not 60 <= now - evidence_at <= 180
+                        or evidence_at % 60 != 0
+                    ):
+                        allowed = False
+                        reasons.append("regime_completed_evidence_unavailable_or_stale")
+                    if (
+                        raw_regime in {MarketRegime.TREND, MarketRegime.RANGE}
+                        and normalize_regime(getattr(stable_snapshot, "regime", None))
+                        is not raw_regime
+                    ):
+                        allowed = False
+                        reasons.append("regime_transition_unconfirmed")
+                if expected_regime is not None and (
+                    normalize_regime(expected_regime) is MarketRegime.UNKNOWN
+                    or normalize_regime(expected_regime) is not raw_regime
+                    or normalize_regime(getattr(snapshot, "regime", None))
+                    is not raw_regime
+                ):
+                    allowed = False
+                    reasons.append("regime_changed_before_entry")
                 if raw_regime is MarketRegime.UNKNOWN:
                     allowed = False
                     reasons.append("regime_unknown")
@@ -1049,7 +1142,10 @@ class MarketRegimeManager:
                 exc,
                 extra={"event": "regime_manager_can_trade_error"},
             )
-            if self.fail_closed:
+            if (
+                self.fail_closed
+                or self._indicator_settings.get("require_completed_evidence") is True
+            ):
                 failure_reasons = ("regime_fail_closed_error",)
                 decision = RegimeDecision(
                     allowed=False,
