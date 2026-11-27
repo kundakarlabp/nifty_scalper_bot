@@ -501,6 +501,46 @@ def test_shadow_local_range_in_trend_uses_selected_contract() -> None:
         assert row["local_range_session_vwap_setup"] is False
 
 
+def test_local_range_is_independent_of_session_center_gate() -> None:
+    cfg = RangeVWAPReclaimStrategyConfig(max_secondary_center_deviation_atr=0.001)
+    result = assess_range_vwap_reclaim(bars(), decision_at=decision_at(), config=cfg)
+    assert result["qualified"] is False
+    assert result["local_range_candidate"] is True
+    assert result["local_range_persistent"] is True
+    assert result["local_range_state"] == "RANGE"
+    assert result["local_lower_boundary_rejections"] > 0
+    assert result["local_upper_boundary_rejections"] > 0
+    assert result["broader_60bar_directional_efficiency"] is None
+
+    breakout = bars()
+    breakout[-1].update(open=25275.0, high=25285.0, low=25270.0, close=25280.0)
+    changed = assess_range_vwap_reclaim(
+        breakout, decision_at=decision_at(), config=cfg
+    )
+    assert changed["local_range_state"] == "BREAKOUT"
+    assert changed["local_range_confirmed"] is False
+    assert changed["local_range_evidence_fraction"] == 0.0
+    assert changed["rolling_20m_secondary_center"] == result[
+        "rolling_20m_secondary_center"
+    ]
+
+
+def test_local_regime_is_logged_without_session_excursion(caplog) -> None:
+    data = bars()
+    data[-2] = dict(data[-3], timestamp=data[-2]["timestamp"])
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), History(data))
+    context = indicators(regime="TREND", regime_raw="trend", regime_gate_allowed=True)
+    with caplog.at_level("INFO"):
+        strategy.observe_research_excursion(
+            OPTION, context, blocked_reason="strategy_regime_ineligible"
+        )
+        strategy.observe_research_excursion(
+            OPTION, context, blocked_reason="strategy_regime_ineligible"
+        )
+    records = [r for r in caplog.records if "RANGE_VWAP_LOCAL_REGIME " in r.message]
+    assert len(records) == 1
+
+
 def test_qualified_excursion_reuses_first_futures_identity_not_option_bar() -> None:
     strategy = RangeVWAPReclaimStrategy(
         RangeVWAPReclaimStrategyConfig(), History(bars())
