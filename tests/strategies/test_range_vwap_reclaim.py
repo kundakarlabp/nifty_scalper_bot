@@ -6,7 +6,6 @@ These fixtures assert *logic*, not executable historical NIFTY profitability.
 from __future__ import annotations
 
 import json
-
 import math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1408,11 +1407,9 @@ def test_weekly_selected_option_reaches_existing_range_observer(caplog) -> None:
 
 
 def test_rolling_only_reclaim_does_not_reserve_live_opportunity(monkeypatch) -> None:
-    from nifty_scalper_bot.strategies.elite_strategies import range_vwap_reclaim
-
     captured = []
     monkeypatch.setattr(
-        range_vwap_reclaim.LOGGER,
+        range_module.LOGGER,
         "info",
         lambda message, *args, **kwargs: captured.append((message, args)),
     )
