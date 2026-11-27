@@ -203,6 +203,17 @@ def test_normalised_atr_cannot_weaken_original_volatility_protection() -> None:
     detector = MarketRegimeDetector()
     for price, expected in ((20000.0, 25.0), (30000.0, 20.0)):
         snapshot = detector.evaluate(
-            "NIFTY", {"price": price, "atr": 20.0, "completed_bar_timestamp": 60.0}
+            "NIFTY",
+            {
+                "price": price,
+                "atr": 20.0,
+                "completed_bar_timestamp": 60.0,
+                "verified_completed_bars": 28.0,
+            },
         )
         assert snapshot.adjustments["effective_atr_reference_points"] == expected
+
+    legacy = detector.evaluate(
+        "NIFTY", {"price": 100.0, "atr": 14.0, "completed_bar_timestamp": 0.0}
+    )
+    assert legacy.adjustments["effective_atr_reference_points"] == 14.0
