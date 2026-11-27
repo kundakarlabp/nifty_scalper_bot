@@ -371,7 +371,6 @@ def test_missing_candle_identity_cannot_confirm_directional_transition() -> None
     assert manager.get_current_regime() == "event"
 
 
-
 def test_live_regime_requires_completed_evidence_and_reconfirms_after_gap(
     monkeypatch,
 ) -> None:
@@ -403,8 +402,15 @@ def test_live_regime_requires_completed_evidence_and_reconfirms_after_gap(
     assert not manager.can_trade()
     clock[0] += 59
     ingest(stamp=first + 60)
-    assert manager.can_trade(expected_regime="TREND")
-    assert not manager.can_trade(expected_regime="RANGE")
+    assert manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first + 60
+    )
+    assert not manager.can_trade(
+        expected_regime="RANGE", expected_completed_bar_timestamp=first + 60
+    )
+    assert not manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first
+    )
     ingest(stamp=first + 60, symbol="NFO:OTHER", regime="event")
     assert manager.can_trade()
     clock[0] += 120
@@ -414,7 +420,9 @@ def test_live_regime_requires_completed_evidence_and_reconfirms_after_gap(
     ingest(stamp=first + 240)
     assert manager.can_trade()
     ingest(stamp=first + 180, regime="range")
-    assert manager.can_trade(expected_regime="TREND")
+    assert manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first + 240
+    )
     clock[0] += 181
     assert not manager.can_trade()
 
