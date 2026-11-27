@@ -377,7 +377,7 @@ def test_regime_provider_failure_never_generates_option_signal() -> None:
     assert manager._observability_counters["signals_blocked_by_regime"] == 1
 
 
-def test_canonical_regime_denial_still_observes_selected_contract(monkeypatch) -> None:
+def test_canonical_regime_denial_still_observes_selected_contract() -> None:
     from types import SimpleNamespace
 
     symbol = "NFO:NIFTY26NOV25700CE"
@@ -386,13 +386,17 @@ def test_canonical_regime_denial_still_observes_selected_contract(monkeypatch) -
         [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
     )
     manager._data_hub = SimpleNamespace(
-        get_selected_option_symbols=lambda: (symbol, "NFO:NIFTY26NOV25700PE"),
+        get_active_contract_basket=lambda: {
+            "selected_ce": symbol,
+            "selected_pe": "NFO:NIFTY26NOV25700PE",
+            "futures_symbol": "NFO:NIFTY26NOVFUT",
+        },
+        get_option_contract_metadata=lambda _symbol: {
+            "name": "NIFTY",
+            "instrument_type": "CE",
+            "lot_size": 65,
+        },
         indicators_ready=False,
-    )
-    monkeypatch.setattr(
-        manager,
-        "_resolve_active_futures_symbol_for_metrics",
-        lambda: "NFO:NIFTY26NOVFUT",
     )
     manager._strategies = [
         SimpleNamespace(
@@ -411,6 +415,7 @@ def test_canonical_regime_denial_still_observes_selected_contract(monkeypatch) -
     assert context["decision_at"].tzinfo is not None
     assert kwargs["blocked_reason"] == "canonical_regime_gate_block"
     assert "bid" not in context
+    assert context["lot_size"] == 65
     manager._observe_denied_range_research(
         "NFO:NIFTY26NOV25800CE", manager._regime_manager
     )
