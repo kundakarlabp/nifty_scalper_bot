@@ -8,7 +8,8 @@ bands are compared without look-ahead, before later quote admission.
 assess_option_cost_risk accepts spot-referenced delta and observed spot/futures
 basis and emits conservative option IV/theta/time-stop and early-exit scenarios.
 RangeVWAPReclaimStrategy records first-seen futures excursions, shadow local
-range evidence including canonical UNKNOWN independently of live admission. In the
+range evidence including canonical UNKNOWN independently of live admission.
+Unique research records use their own bounded dedup, not generic log sampling. In the
 existing eligible RANGE route, verified local breakouts veto reversal entries;
 strong opposing 60-bar context requires local confirmation and the existing
 stronger same-quote option flow and first-barrier after-cost payoff requirements.
@@ -1044,6 +1045,10 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                         separators=(",", ":"),
                         allow_nan=False,
                     ),
+                    extra={
+                        "event": "range_vwap_local_regime",
+                        "bypass_filters": True,
+                    },
                 )
         if structural.get("excursion_side") != side or not first:
             return
@@ -1147,6 +1152,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         LOGGER.info(
             "RANGE_VWAP_EXCURSION_OBSERVED %s",
             json.dumps(record, separators=(",", ":"), allow_nan=False),
+            extra={"event": "range_vwap_excursion_observed", "bypass_filters": True},
         )
         if reason:
             self._record_excursion_decision(reason)
@@ -1185,6 +1191,7 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                 separators=(",", ":"),
                 allow_nan=False,
             ),
+            extra={"event": "range_vwap_excursion_decision", "bypass_filters": True},
         )
 
     def observe_research_excursion(

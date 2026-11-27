@@ -420,3 +420,19 @@ def test_canonical_regime_denial_still_observes_selected_contract() -> None:
         "NFO:NIFTY26NOV25800CE", manager._regime_manager
     )
     assert len(observed) == 1
+    trend = SimpleNamespace(regime="trend")
+    regime = SimpleNamespace(
+        get_latest_snapshot=lambda: trend, get_raw_snapshot=lambda: trend
+    )
+    manager._observe_denied_range_research(
+        symbol,
+        regime,
+        blocked_reason="strategy_regime_ineligible",
+        regime_gate_allowed=True,
+    )
+    assert len(observed) == 2
+    _, context, kwargs = observed[1]
+    assert context["regime"] == "trend"
+    assert context["regime_gate_allowed"] is True
+    assert context["lot_size"] == 65
+    assert kwargs["blocked_reason"] == "strategy_regime_ineligible"

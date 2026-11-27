@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from nifty_scalper_bot.instruments.active_contracts import cap_option_universe
+from nifty_scalper_bot.instruments.active_contracts import (
+    canonical_nifty_option_symbol,
+    cap_option_universe,
+)
 
 
 def _full_universe(atm: int = 23300, step: int = 50, around: int = 3) -> list[tuple[str, int, float, str]]:
@@ -69,3 +72,25 @@ def test_cap_noop_when_under_limit_or_disabled() -> None:
     universe = _full_universe(around=1)  # 6 options
     assert cap_option_universe(universe, selected_ce=universe[0][0], selected_pe=universe[1][0], atm_strike=23300.0, max_options=8) == universe
     assert cap_option_universe(universe, selected_ce=universe[0][0], selected_pe=universe[1][0], atm_strike=23300.0, max_options=0) == universe
+
+
+def test_canonical_option_identity_supports_weekly_and_monthly_contracts() -> None:
+    for symbol in (
+        "NFO:NIFTY26D0125700CE",
+        "NFO:NIFTY26N0323700PE",
+        "NFO:NIFTY2610625700CE",
+        "NFO:NIFTY26NOV25250CE",
+    ):
+        assert canonical_nifty_option_symbol(symbol) == symbol
+    assert canonical_nifty_option_symbol("NIFTY26D0125700CE") == (
+        "NFO:NIFTY26D0125700CE"
+    )
+    for symbol in (
+        "NFO:NIFTY2623025700CE",
+        "NFO:NIFTY26D0025700CE",
+        "NFO:NIFTY26X0125700CE",
+        "NFO:BANKNIFTY26D0125700CE",
+        "NSE:NIFTY26D0125700CE",
+        "NFO:NIFTY26DECFUT",
+    ):
+        assert canonical_nifty_option_symbol(symbol) is None
