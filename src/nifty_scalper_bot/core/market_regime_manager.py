@@ -994,8 +994,9 @@ class MarketRegimeManager:
         context: Mapping[str, object] | None = None,
         record_decision: bool = True,
         expected_regime: object | None = None,
+        expected_completed_bar_timestamp: object | None = None,
     ) -> bool:
-        """Gate current evidence; optionally reject a changed entry regime."""
+        """Gate current evidence; optionally revalidate the entry observation."""
         logger.debug(
             "Entered MarketRegimeManager.can_trade",
             extra={"event": "regime_manager_can_trade"},
@@ -1136,6 +1137,13 @@ class MarketRegimeManager:
                     ):
                         allowed = False
                         reasons.append("regime_transition_unconfirmed")
+                    if expected_regime is not None and (
+                        not isinstance(expected_completed_bar_timestamp, (int, float))
+                        or isinstance(expected_completed_bar_timestamp, bool)
+                        or expected_completed_bar_timestamp != evidence_at
+                    ):
+                        allowed = False
+                        reasons.append("regime_evidence_changed_before_entry")
                 if expected_regime is not None and (
                     normalize_regime(expected_regime) is MarketRegime.UNKNOWN
                     or normalize_regime(expected_regime) is not raw_regime
