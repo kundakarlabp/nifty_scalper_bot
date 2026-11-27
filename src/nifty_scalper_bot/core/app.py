@@ -5882,6 +5882,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     # RegimeManager refreshes the completed-candle snapshot. Raw quote ticks
     # must not publish a competing directional regime or refresh its timestamp.
+    data_dir = os.getenv("DATA_DIR", "data")
+    persistent_state = PersistentStateManager(base_path=Path(data_dir))
 
     heartbeat_interval = max(
         1.0,
