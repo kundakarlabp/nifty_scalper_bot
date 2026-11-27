@@ -409,7 +409,9 @@ def test_postmarket_excludes_other_day_trade_decisions_before_markouts(
     assert '"structural_decision_rows_excluded_non_session":2' in session_log
 
 
-def _range_excursion_session(tmp_path, *, bid_quantity: int = 65):
+def _range_excursion_session(
+    tmp_path, *, bid_quantity: int = 65, catalog_lot: int | None = None
+):
     future = "NFO:NIFTY26NOVFUT"
     archive = ReplayArchive(tmp_path / "replay_archive")
     archive.record(
@@ -420,7 +422,17 @@ def _range_excursion_session(tmp_path, *, bid_quantity: int = 65):
                 "selected_pe": OTHER,
                 "futures_symbol": future,
                 "token_by_symbol": {CONTRACT: 111, OTHER: 112, future: 113},
-            }
+            },
+            "instruments": [
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": CONTRACT.split(":", 1)[1],
+                    "instrument_token": 111,
+                    "name": "NIFTY",
+                    "instrument_type": "CE",
+                    "lot_size": catalog_lot,
+                }
+            ],
         },
         DECISION - timedelta(seconds=2),
     )
@@ -826,3 +838,60 @@ def test_rolling_vwap_reclaim_is_separate_and_never_inherits_session_risk(
     assert all(not item["same_decision_risk_773_and_net_rr_verified"] for item in local)
     assert all(not item["baseline_signal_emitted_at_first_decision"] for item in local)
     assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_missing_lot_recovers_only_from_matching_archived_catalog(tmp_path) -> None:
+    for catalog_lot in (None, 65, 75):
+        folder = tmp_path / str(catalog_lot)
+        tape, journal = _range_excursion_session(folder, catalog_lot=catalog_lot)
+        observed, decision = journal.splitlines()
+        prefix, payload = observed.split(" ", 1)
+        row = json.loads(payload)
+        row["quote"]["lot_size"] = None
+        journal = f"{prefix} {json.dumps(row)}\n{decision}"
+        report = build_session_research_report(
+            session_date=date(2026, 11, 3),
+            journal=journal,
+            replay_path=tape,
+            trade_db=folder / "missing.db",
+            output_path=folder / "catalog_recovery.json",
+        )
+        horizons = report["range_excursion_horizons"]
+        assert len(horizons) == 3
+        assert all(
+            horizon["quantity_units_from_observed_contract"] == catalog_lot
+            for horizon in horizons
+        )
+        assert all(
+            horizon["observed_book_and_futures_complete"] == (catalog_lot == 65)
+            for horizon in horizons
+        )
+        assert all(
+            horizon["quantity_evidence_source"]
+            == (
+                "prior_same_scope_instrument_catalog"
+                if catalog_lot is not None
+                else "unverified"
+            )
+            for horizon in horizons
+        )
+        assert all(
+            not horizon["same_decision_risk_773_and_net_rr_verified"]
+            for horizon in horizons
+        )
+
+
+def test_conflicting_observed_and_catalog_lot_is_not_costed(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path, catalog_lot=75)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "catalog_conflict.json",
+    )
+    assert all(
+        row["quantity_evidence_source"] == "decision_catalog_lot_conflict"
+        and row["option_cost_adjusted"] is None
+        for row in report["range_excursion_horizons"]
+    )

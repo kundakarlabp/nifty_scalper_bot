@@ -704,6 +704,7 @@ def _range_excursion_markouts(
     excursions: Sequence[Mapping[str, Any]],
     futures: Mapping[str, Sequence[tuple[float, float, str]]],
     books: Mapping[str, Sequence[tuple[float, float, float, int, int, str]]],
+    scope_lots: Mapping[tuple[str, str], int],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Price the same *first-seen* setup; keep thin/unverified paths unlabelled."""
     from scripts.reporting.rejected_setup_forward_markout import (
@@ -726,7 +727,6 @@ def _range_excursion_markouts(
             and 0 < raw_quantity < 10000
             else None
         )
-        lot_known = quantity is not None
         original_future = futures.get(future, ())
         future_times = [tick[0] for tick in original_future]
         previous = bisect.bisect_right(future_times, when) - 1
@@ -736,6 +736,15 @@ def _range_excursion_markouts(
             if previous >= 0 and 0 <= when - future_times[previous] <= 3
             else None
         )
+        archive_lot = scope_lots.get((phase, symbol)) if phase is not None else None
+        lot_source = "decision_observation" if quantity is not None else "unverified"
+        if quantity is None and archive_lot is not None:
+            quantity = archive_lot
+            lot_source = "prior_same_scope_instrument_catalog"
+        elif archive_lot is not None and quantity != archive_lot:
+            quantity = None
+            lot_source = "decision_catalog_lot_conflict"
+        lot_known = quantity is not None
         scoped_future = [
             (timestamp, price)
             for timestamp, price, scope in original_future
@@ -897,6 +906,7 @@ def _range_excursion_markouts(
                     "quantity_units_from_observed_contract": (
                         quantity if lot_known else None
                     ),
+                    "quantity_evidence_source": lot_source,
                     "modeled_cash_stop_risk": stop_risk,
                     "modeled_net_rr": net_rr,
                     "same_decision_risk_773_and_net_rr_verified": risk_verified,
@@ -1104,7 +1114,9 @@ def build_session_research_report(
         quotes, sha, quote_count = load_archive_quotes(replay_path)
         if sha != initial_sha:
             raise ValueError("replay_archive_changed_between_passes")
-        futures_tape, full_lot_books = load_excursion_quote_paths(replay_path)
+        futures_tape, full_lot_books, scope_lots = load_excursion_quote_paths(
+            replay_path
+        )
         if archive_fingerprint(replay_path) != sha:
             raise ValueError("replay_archive_changed_between_passes")
         report["writer_integrity_verified"] = True
@@ -1114,7 +1126,7 @@ def build_session_research_report(
             range_excursion_observed, range_excursion_decisions
         )
         range_outcomes, comparisons = _range_excursion_markouts(
-            opportunities, futures_tape, full_lot_books
+            opportunities, futures_tape, full_lot_books, scope_lots
         )
         report["range_excursion_opportunities"] = opportunities
         report["range_excursion_horizons"] = range_outcomes
