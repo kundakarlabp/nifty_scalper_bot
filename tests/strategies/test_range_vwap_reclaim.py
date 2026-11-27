@@ -1381,3 +1381,25 @@ def test_nested_range_requires_aligned_canonical_spot_and_futures(monkeypatch) -
     strategy._evaluate_signal(OPTION, context, 100.0)
     reason = "range_local_trend_canonical_evidence_unconfirmed"
     assert strategy.last_no_vote_reason == reason
+
+
+def test_weekly_selected_option_reaches_existing_range_observer(caplog) -> None:
+    weekly = "NFO:NIFTY26D0125700CE"
+    history = History(bars())
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), history)
+    context = indicators(
+        selected_ce=weekly,
+        is_selected_option=False,
+        regime="TREND",
+        regime_raw="trend",
+        regime_gate_allowed=True,
+    )
+    with caplog.at_level("INFO"):
+        strategy.observe_research_excursion(
+            weekly, context, blocked_reason="strategy_regime_ineligible"
+        )
+    assert history.calls == 1
+    assert any("RANGE_VWAP_LOCAL_REGIME " in r.message for r in caplog.records)
+    records = strategy.get_research_snapshot()["opportunities"]
+    assert len(records) == 1
+    assert records[0]["symbol"] == weekly
