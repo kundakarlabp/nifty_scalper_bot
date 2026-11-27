@@ -1,0 +1,82 @@
+# Temporary public-source retrieval for the first covered Breeze session.
+# No broker secrets, live mode, or private price history in this workflow.
+name: Temporary NIFTY 5-Nov-2024 EOD source recovery
+on:
+  pull_request:
+    paths:
+      - .github/workflows/breeze-eod-preflight-20241105.yml
+permissions:
+  contents: read
+jobs:
+  public_eod_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch and audit public prior-day market source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/prior-eod"
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import urllib.request
+          import zipfile
+          out = Path(os.environ["RUNNER_TEMP"]) / "prior-eod"
+          reposha = "ccf4aa6cb90f27428dd9f090556efb64286e5ad8"
+          sources = {
+              "nse_fo_eod_20241105.zip": [
+                  f"https://raw.githubusercontent.com/SantoshSrinivas79/NSE-FNO-Data-bank/{reposha}/data/2024/11/BhavCopy_NSE_FO_0_0_0_20241105_F_0000.csv.zip",
+                  "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20241105_F_0000.csv.zip",
+              ],
+              "nse_index_eod_20241105.csv": [
+                  "https://nsearchives.nseindia.com/content/indices/ind_close_all_05112024.csv",
+                  "https://archives.nseindia.com/content/indices/ind_close_all_05112024.csv",
+              ],
+          }
+          audit = {}
+          for filename, urls in sources.items():
+              success = None
+              for url in urls:
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Research archive read-only)"})
+                      with urllib.request.urlopen(req, timeout=18) as response:
+                          payload = response.read(12_000_001)
+                      if not 100 < len(payload) <= 12_000_000:
+                          raise ValueError("size_invalid")
+                      if filename.endswith(".zip"):
+                          with zipfile.ZipFile(io.BytesIO(payload)) as z:
+                              members = [m for m in z.namelist() if m.endswith(".csv")]
+                              if len(members) != 1:
+                                  raise ValueError("fo_csv_members_invalid")
+                              rows = list(csv.DictReader(io.StringIO(z.read(members[0]).decode("utf-8-sig"))))
+                          n = sum(x.get("BizDt") == "2024-11-05" and x.get("TckrSymb") == "NIFTY" for x in rows)
+                          fut = sum(x.get("BizDt") == "2024-11-05" and x.get("TckrSymb") == "NIFTY" and x.get("FinInstrmTp") == "IDF" for x in rows)
+                          if n < 100 or fut < 1:
+                              raise ValueError("fo_identity_or_date_invalid")
+                          assert all(x.get("BizDt") == "2024-11-05" for x in rows)
+                      else:
+                          rows = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"))))
+                          matching = [x for x in rows if "NIFTY 50" in " ".join(str(v) for v in x.values()).upper()]
+                          if not matching:
+                              raise ValueError("nifty50_index_row_missing")
+                      (out / filename).write_bytes(payload)
+                      success = {"status": "verified_source", "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload), "url": url}
+                      break
+                  except Exception as exc:
+                      success = {"status": "unavailable", "last_error_type": type(exc).__name__}
+              audit[filename] = success
+          (out / "source_status.json").write_text(json.dumps(audit, indent=2, sort_keys=True))
+          print(json.dumps({k:v["status"] for k,v in audit.items()}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-nifty-prior-eod-20241105
+          path: ${{ runner.temp }}/prior-eod/
+          if-no-files-found: error
+          retention-days: 1
