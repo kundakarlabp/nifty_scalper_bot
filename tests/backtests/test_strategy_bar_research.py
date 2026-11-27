@@ -431,6 +431,7 @@ def test_full_orb_research_uses_causal_regime_detector(tmp_path, monkeypatch):
 
     class Detector:
         def evaluate(self, symbol, data):
+            assert data["completed_bar_timestamp"] > 0
             regime_calls.append(symbol)
             return SimpleNamespace(regime="TREND")
 
