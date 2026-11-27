@@ -768,7 +768,9 @@ def _range_excursion_markouts(
                         round(distance, 4) if distance is not None else None
                     ),
                     "touched": (
-                        touch is not None if distance is not None and distance > 0 else None
+                        touch is not None
+                        if distance is not None and distance > 0
+                        else None
                     ),
                     "first_touch_seconds": (
                         round(touch - when, 3) if touch is not None else None
