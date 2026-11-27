@@ -4,7 +4,6 @@ No credentials, order clients or historical prices are required by this test.
 """
 
 from pathlib import Path
-
 from scripts.archive_breeze_backfill import load_targets
 
 
