@@ -322,9 +322,8 @@ def assess_range_vwap_reclaim(
     previous_center = _weighted_center(history[-21:-1])
     previous_center_5m_ago = _weighted_center(history[-26:-6])
     previous_range = history[-31:-1]
-    previous_width = (
-        max(float(row["high"]) for row in previous_range)
-        - min(float(row["low"]) for row in previous_range)
+    previous_width = max(float(row["high"]) for row in previous_range) - min(
+        float(row["low"]) for row in previous_range
     )
     local_persistent = bool(
         local_range_candidate
@@ -369,22 +368,23 @@ def assess_range_vwap_reclaim(
     local_state = (
         "BREAKOUT"
         if local_breakout
-        else "RANGE"
-        if local_confirmed
-        else "EMERGING_RANGE"
-        if local_range_candidate
-        else "UNPROVEN"
+        else (
+            "RANGE"
+            if local_confirmed
+            else "EMERGING_RANGE" if local_range_candidate else "UNPROVEN"
+        )
     )
     # A transparent evidence fraction is NOT a calibrated regime probability.
-    local_score = sum(
-        (local_range_candidate, local_persistent, two_sided, recent_tr_ratio <= 1.0)
-    ) / 4.0
+    local_score = (
+        sum(
+            (local_range_candidate, local_persistent, two_sided, recent_tr_ratio <= 1.0)
+        )
+        / 4.0
+    )
     if local_breakout:
         local_score = 0.0
     broader_closes = [float(row["close"]) for row in history[-60:]]
-    broader_travel = sum(
-        abs(b - a) for a, b in zip(broader_closes, broader_closes[1:])
-    )
+    broader_travel = sum(abs(b - a) for a, b in zip(broader_closes, broader_closes[1:]))
     broader_move = (
         broader_closes[-1] - broader_closes[0] if len(broader_closes) == 60 else None
     )
