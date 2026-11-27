@@ -750,9 +750,13 @@ class MarketRegimeManager:
                     completed = sorted(unique.items())
                     # Use the contiguous tail, not a history with silent gaps.
                     start = len(completed) - 1
-                    while start > 0 and (
-                        completed[start][0] - completed[start - 1][0]
-                    ).total_seconds() == 60.0:
+                    while (
+                        start > 0
+                        and (
+                            completed[start][0] - completed[start - 1][0]
+                        ).total_seconds()
+                        == 60.0
+                    ):
                         start -= 1
                     completed = completed[start:]
                     if (
