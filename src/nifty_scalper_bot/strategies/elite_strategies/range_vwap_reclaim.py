@@ -1442,12 +1442,16 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
             self._no_vote("range_durable_setup_guard_unavailable")
             return None
         self._maybe_reset_excursions(future, structural)
+        timestamp = str(structural.get("bar_timestamp") or "")
+        regime_confirmed = bool(
+            timestamp and self._regime_bar_confirmed(future, timestamp)
+        )
+        # A local breakout invalidates this entry, not the independent
+        # canonical RANGE observation. A later completed reclaim may qualify.
         if structural.get("local_range_breakout") is True:
-            self._regime_bars.pop(future, None)
             self._no_vote("range_local_breakout_invalidated")
             return None
-        timestamp = str(structural.get("bar_timestamp") or "")
-        if not timestamp or not self._regime_bar_confirmed(future, timestamp):
+        if not regime_confirmed:
             self._no_vote("range_two_completed_regime_bars_required")
             return None
         if not structural.get("qualified"):
