@@ -390,7 +390,8 @@ def test_canonical_regime_denial_still_observes_selected_contract(monkeypatch) -
         indicators_ready=False,
     )
     monkeypatch.setattr(
-        manager, "_resolve_active_futures_symbol_for_metrics",
+        manager,
+        "_resolve_active_futures_symbol_for_metrics",
         lambda: "NFO:NIFTY26NOVFUT",
     )
     manager._strategies = [
