@@ -1,0 +1,32 @@
+name: Temporary read-only NIFTY bot code snapshot for private offline research
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/research-code-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source_snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout pinned public bot source only
+        uses: actions/checkout@v4
+        with:
+          ref: c596ef8a055693533a825d93dbccfa7ee7c4cc1d
+          persist-credentials: false
+      - name: Package public code only, no credentials or market data
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/nifty-public-code-only.tar.gz" \
+            src scripts tests pyproject.toml AGENTS.md docs/architecture/agent_manifest.json
+      - name: Export code for isolated local SHADOW validation
+        uses: actions/upload-artifact@v4
+        with:
+          name: nifty-public-code-only-c596ef8
+          path: ${{ runner.temp }}/nifty-public-code-only.tar.gz
+          if-no-files-found: error
+          retention-days: 1
