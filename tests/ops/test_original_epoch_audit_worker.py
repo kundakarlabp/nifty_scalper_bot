@@ -72,12 +72,18 @@ def test_epoch_request_rejects_digest_substitution_and_other_modes():
         )
 
 
-def test_fixed_manifest_pins_original_source():
+def test_deployed_manifest_validates_without_freezing_request_rotation():
     root = Path(__file__).resolve().parents[2]
     manifest = json.loads((root / "deploy/research_request.json").read_text())
-    assert manifest["mode"] == "epoch_audit"
-    assert manifest["session_date"] == _DAY
-    assert manifest["expected_uncompressed_sha256"] == _SHA
+    day = manifest.get("session_date", "2026-11-27")
+    request = validate_request(
+        manifest, now=datetime.fromisoformat(f"{day}T18:00:00+05:30")
+    )
+    assert request["id"] == manifest["id"]
+    if manifest["id"] == "research-20261111-exact-full-depth-epoch-01":
+        assert request["mode"] == "epoch_audit"
+        assert request["session_date"] == _DAY
+        assert request["expected_uncompressed_sha256"] == _SHA
 
 
 def test_worker_reads_original_local_tape_without_broker_or_archive_fetch(

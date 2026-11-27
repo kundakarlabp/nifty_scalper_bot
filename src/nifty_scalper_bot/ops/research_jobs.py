@@ -2,7 +2,8 @@
 
 Responsibilities: Manage single-flight collection and credential-free historical
 replay, date-pin completed sessions, partition genuine process epochs, and admit
-pinned SHADOW-only original-tape audits strictly outside market hours.
+pinned SHADOW-only original-tape audits and production baseline launches
+strictly outside market hours.
 run_recorded_replays supports unchanged captured-config and paired exits research.
 Safety: Never import live application entrypoints, send broker orders, invent
 missing quotes or treat an invalid replay as a successful backtest.
@@ -34,20 +35,27 @@ _SYSTEMD_RESEARCH_UNIT = "niftybot-research-worker.service"
 _SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
-def require_epoch_audit_offmarket(moment: datetime) -> None:
+def _require_research_offmarket(
+    moment: datetime, request: dict[str, Any], *, label: str
+) -> None:
     """Reserve the entire bounded worker lifetime before 05:00 IST."""
     if moment.tzinfo is None:
-        raise ValueError("epoch_audit_timezone_required")
+        raise ValueError(f"{label}_timezone_required")
     local = moment.astimezone(IST)
     if 5 <= local.hour < 17:
-        raise ValueError("epoch_audit_off_market_only")
+        raise ValueError(f"{label}_off_market_only")
     next_protected_start = local.replace(hour=5, minute=0, second=0, microsecond=0)
     if local.hour >= 17:
         next_protected_start += timedelta(days=1)
     # Include the systemd worker's termination grace and a 5-minute buffer.
-    budget_seconds = _worker_wait_timeout_seconds({"mode": "epoch_audit"}) + 300
+    budget_seconds = _worker_wait_timeout_seconds(request) + 300
     if (next_protected_start - local).total_seconds() <= budget_seconds:
-        raise ValueError("epoch_audit_insufficient_offmarket_budget")
+        raise ValueError(f"{label}_insufficient_offmarket_budget")
+
+
+def require_epoch_audit_offmarket(moment: datetime) -> None:
+    """Keep original-tape audits outside the protected production window."""
+    _require_research_offmarket(moment, {"mode": "epoch_audit"}, label="epoch_audit")
 
 
 def validate_request(
@@ -202,10 +210,12 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
         return False
     special = ("session_date", "profile", "expected_uncompressed_sha256")
     if any(key in existing or key in request for key in special):
-        return all(
-            existing.get(key) == request.get(key) for key in (*special, "start", "end")
-        )
-    # Historical in-progress research statuses did not store start/end.
+        if not all(existing.get(key) == request.get(key) for key in special):
+            return False
+        if request.get("session_date") is not None:
+            return all(existing.get(key) == request.get(key) for key in ("start", "end"))
+    # Rolling requests resolve their dates once; polling tomorrow is not a
+    # new job. Explicit pinned dates and source digests remain immutable.
     return True
 
 
@@ -435,6 +445,20 @@ def start_job(
         write_json(directory / "latest.json", stale)
         lock.close()
         return stale
+
+    if launcher == "systemd" and request.get("profile") == "captured_baseline":
+        try:
+            _require_research_offmarket(
+                datetime.now(IST), request, label="captured_baseline"
+            )
+        except ValueError as exc:
+            lock.close()
+            # A deferred request must remain launchable on a later poll.
+            return {
+                "state": "busy",
+                "backtest_completed": False,
+                "error_code": str(exc),
+            }
 
     if launcher not in {"direct", "systemd"}:
         failed = {

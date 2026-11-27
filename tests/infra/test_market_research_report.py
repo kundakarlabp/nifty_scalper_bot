@@ -590,6 +590,12 @@ def test_local_range_shadow_report_never_invents_risk(tmp_path) -> None:
     assert all(row["unique_first_seen_excursions"] == 1 for row in cohort)
     assert all(row["verified_risk_and_observed_horizon"] == 0 for row in cohort)
     assert all(row["modeled_net_rupees_mean"] is None for row in cohort)
+    assert all(row["observed_full_lot_net_rupees_mean"] is None for row in cohort)
+    assert any(
+        '"kind":"range_admission"' in line
+        and '"policy":"shadow_local_range_in_trend"' in line
+        for line in research_report_log_lines(report)
+    )
     assert report["eligible_for_entry_filter_change"] is False
 
 
@@ -674,3 +680,133 @@ def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
         row["verified_risk_and_observed_horizon"] == 0
         for row in report["range_admission_comparisons"]
     )
+
+
+def test_sampled_markouts_keep_regime_and_gate_evidence_separate() -> None:
+    samples = []
+    for offset, context in enumerate(
+        (
+            {"regime": "trend", "regime_raw": "TREND", "regime_gate_allowed": True},
+            {"regime": "trend", "regime_raw": "unknown", "regime_gate_allowed": False},
+            {},
+        )
+    ):
+        instant = DECISION + timedelta(minutes=offset)
+        samples.append(
+            {
+                "strategy": "SMC",
+                "symbol": CONTRACT,
+                "decision_at": instant.isoformat(),
+                "evaluation_minute": instant.isoformat(),
+                "reason": "strategy_regime_ineligible",
+                "context": context,
+            }
+        )
+    _, strata = _sampled_markouts(samples, {})
+    assert {
+        (row["regime"], row["regime_raw"], row["regime_gate_state"])
+        for row in strata
+        if row["horizon_seconds"] == 300
+    } == {
+        ("TREND", "TREND", "allowed"),
+        ("TREND", "UNKNOWN", "blocked"),
+        ("UNRECORDED", "UNRECORDED", "unrecorded"),
+    }
+    assert all(row["sampled_minutes"] == 1 for row in strata)
+    assert all(row["eligible_for_filter_change"] is False for row in strata)
+
+
+def test_unknown_local_reclaim_requires_separate_session_confirmation(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, decision = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        regime="UNKNOWN",
+        regime_raw="unknown",
+        regime_gate_allowed=False,
+        shadow_transition_candidate="RANGE",
+        local_range_state="RANGE",
+        local_reclaim_side="CE",
+        structural_qualified=False,
+    )
+    decision_prefix, decision_payload = decision.split(" ", 1)
+    event = json.loads(decision_payload)
+    event.update(
+        reason="canonical_regime_gate_block",
+        decision_at=row["decision_at"],
+    )
+    for qualified in (False, True):
+        row["structural_qualified"] = qualified
+        journal = (
+            f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
+        )
+        report = build_session_research_report(
+            session_date=date(2026, 11, 3),
+            journal=journal,
+            replay_path=tape,
+            trade_db=tmp_path / "missing.db",
+            output_path=tmp_path / "unknown_range.json",
+        )
+        groups = {
+            item["policy"]: item
+            for item in report["range_admission_comparisons"]
+            if item["horizon_seconds"] == 300
+        }
+        local = groups["shadow_unknown_local_range"]
+        assert local["unique_first_seen_excursions"] == 1
+        strict = groups["shadow_unknown_session_reclaim"]
+        assert strict["unique_first_seen_excursions"] == int(qualified)
+        assert strict["verified_risk_and_observed_horizon"] == 0
+        assert strict["modeled_net_rupees_mean"] is None
+        assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_rolling_vwap_reclaim_is_separate_and_never_inherits_session_risk(
+    tmp_path,
+) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, _ = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        excursion_basis="rolling_vwap",
+        excursion_id=(
+            f"{row['futures_symbol']}:{row['side']}:LOCAL:{row['excursion_first_bar']}"
+        ),
+        local_range_state="RANGE",
+        local_reclaim_side="CE",
+        structural_reason="rolling_vwap_reclaim_shadow_only",
+        structural_qualified=False,
+    )
+    forged_risk = {
+        "v": 1,
+        "decision_at": row["decision_at"],
+        "excursion_id": row["excursion_id"],
+        "symbol": CONTRACT,
+        "reason": "signal_emitted",
+        "modeled_stop_risk": 500,
+        "modeled_net_rr": 2.0,
+    }
+    journal += (
+        f"\n{prefix} {json.dumps(row)}\n"
+        f"RANGE_VWAP_EXCURSION_DECISION {json.dumps(forged_risk)}"
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "rolling_only.json",
+    )
+    assert len(report["range_excursion_opportunities"]) == 2
+    local = [
+        item
+        for item in report["range_excursion_horizons"]
+        if item["excursion_basis"] == "rolling_vwap"
+    ]
+    assert len(local) == 3
+    assert all(item["observed_book_and_futures_complete"] for item in local)
+    assert all(not item["same_decision_risk_773_and_net_rr_verified"] for item in local)
+    assert all(not item["baseline_signal_emitted_at_first_decision"] for item in local)
+    assert report["eligible_for_entry_filter_change"] is False

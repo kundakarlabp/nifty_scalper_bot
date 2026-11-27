@@ -164,3 +164,66 @@ def test_baseline_rejects_unmatched_replay_sha(tmp_path: Path, monkeypatch):
     assert report["state"] == "failed"
     assert report["slippage_stress"] == []
     assert report["error_code"] == "replay_baseline_scenario_failed"
+
+
+def test_rolling_baseline_request_retains_original_window_across_polls():
+    payload = {
+        "id": "rolling-baseline",
+        "mode": "runtime",
+        "days": 8,
+        "profile": "captured_baseline",
+    }
+    first = validate_request(payload, now=datetime(2026, 11, 27, 18, tzinfo=IST))
+    later = validate_request(payload, now=datetime(2026, 11, 28, 18, tzinfo=IST))
+    assert (first["start"], first["end"]) == ("2026-11-19", "2026-11-26")
+    assert first["end"] != later["end"]
+    assert _same_request_definition(first, later)
+    assert not _same_request_definition(first, {**later, "days": 7})
+    assert not _same_request_definition(first, {**later, "profile": "paired_adaptive"})
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "expected"),
+    (
+        (13, 0, "captured_baseline_off_market_only"),
+        (4, 45, "captured_baseline_insufficient_offmarket_budget"),
+        (18, 0, None),
+    ),
+)
+def test_production_baseline_defers_without_consuming_request(
+    tmp_path, monkeypatch, hour, minute, expected
+):
+    from nifty_scalper_bot.ops import research_jobs
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 27, hour, minute, tzinfo=IST).astimezone(tz)
+
+    monkeypatch.setattr(research_jobs, "datetime", Clock)
+    monkeypatch.setattr(research_jobs, "_launcher_mode", lambda: "systemd")
+    monkeypatch.setattr(research_jobs, "_systemd_unit_state", lambda: "inactive")
+    monkeypatch.setattr(research_jobs, "_current_revision", lambda _: "test-revision")
+    calls = []
+    monkeypatch.setattr(
+        research_jobs,
+        "_launch_systemd_worker",
+        lambda *args, **kwargs: calls.append(args),
+    )
+    payload = {
+        "id": "offmarket-baseline",
+        "mode": "runtime",
+        "days": 8,
+        "profile": "captured_baseline",
+    }
+    result = research_jobs.start_job(tmp_path, payload)
+    status = tmp_path / "data/research/offmarket-baseline/status.json"
+    if expected is not None:
+        assert result["state"] == "busy"
+        assert result["error_code"] == expected
+        assert not calls
+        assert not status.exists()
+    else:
+        assert result["state"] == "queued"
+        assert len(calls) == 1
+        assert status.is_file()

@@ -1,10 +1,14 @@
-"""Stage verified Breeze SQLite candles for offline strategy research.
+"""Stage recovered Breeze OHLCV with causal contract and lot-size evidence.
 
-Responsibilities: Point-in-time EOD contract referencing, gap-aware session gating,
-optional existing strategy-research replay and inspectable exclusion counts.
-Ownership: Operator-invoked offline research only; not the production research worker.
-Safety: No broker API, quote reconstruction, synthetic token, same-day EOD lookahead,
-Live promotion, or mutation of either the historical database or raw archives.
+Responsibilities: Use prior EOD and the completed 09:15 spot bar to select
+fixed listed CE/PE and front-futures context; check option CE/PE lot equality
+without assuming future lots match during exchange lot-size transitions.
+Preserve minute gaps, original-source/EOD hashes and rejected-day reasons.
+Entry points: run(..., limit=1000) stages up to 1,000 dates, checks source
+SHA and optionally runs existing SHADOW component replay; main() exposes CLI.
+Ownership: Operator-invoked offline research, not production runtime.
+Safety: No broker API, synthetic tokens, same-day EOD lookahead, quote/depth
+fabrication, LIVE promotion, historical full-chain inference or source mutation.
 """
 
 from __future__ import annotations
@@ -81,15 +85,20 @@ def _series(
 def _available_contracts(
     eod: sqlite3.Connection, previous: str, kind: str
 ) -> list[dict[str, Any]]:
+    # Filtering by kind in SQLite can choose a cross-date kind-only index
+    # instead of the much cheaper per-session lookup on historical EOD files.
     rows = eod.execute(
-        "SELECT instrument_name,expiry,strike,lot_size FROM contract_eod "
-        "WHERE day=? AND kind=? AND lot_size>0 ORDER BY expiry,strike",
-        (previous, kind),
+        "SELECT instrument_name,expiry,strike,lot_size,kind FROM contract_eod "
+        "WHERE day=? AND lot_size>0 ORDER BY expiry,strike",
+        (previous,),
     ).fetchall()
     return [
         {"name": name, "expiry": expiry, "strike": strike, "lot": int(lot)}
-        for name, expiry, strike, lot in rows
-        if name and name.startswith("NIFTY") and name.endswith(kind)
+        for name, expiry, strike, lot, row_kind in rows
+        if row_kind == kind
+        and name
+        and name.startswith("NIFTY")
+        and name.endswith(kind)
     ]
 
 
@@ -104,16 +113,33 @@ def _find_pair(
     anchor = _previous_spot(eod, day)
     if previous is None or anchor is None:
         raise ValueError("previous_eod_contract_master_or_spot_unavailable")
-    future = next(
+    # The archived Breeze CE/PE strikes were selected around the first observed
+    # spot candle, not the *prior close*. The 09:15 bar-close price becomes
+    # available only at 09:16; never infer an opening basket from later bars.
+    opening_stamp = datetime.combine(date.fromisoformat(day), time(9, 15), IST)
+    spot_opening_bar = next(
         (
-            {**c, **avail[("futures", c["expiry"], None, "FUT")]}
-            for c in _available_contracts(eod, previous, "FUT")
-            if c["expiry"] >= day and ("futures", c["expiry"], None, "FUT") in avail
+            row
+            for row in _candles(futures, index["id"])
+            if row[0] == opening_stamp.isoformat()
         ),
         None,
     )
-    if future is None:
+    if spot_opening_bar is None:
+        raise ValueError("opening_spot_minute_not_observed")
+    opening_anchor = float(spot_opening_bar[4])
+    candidates = [
+        item
+        for item in _available_contracts(eod, previous, "FUT")
+        if item["expiry"] >= day
+    ]
+    if not candidates:
         raise ValueError("previous_day_futures_identity_not_available")
+    front = candidates[0]
+    future_history = avail.get(("futures", front["expiry"], None, "FUT"))
+    if future_history is None:
+        raise ValueError("front_futures_minute_history_not_available")
+    future = {**front, **future_history}
     calls = {
         (c["expiry"], int(c["strike"])): c
         for c in _available_contracts(eod, previous, "CE")
@@ -124,22 +150,26 @@ def _find_pair(
         for c in _available_contracts(eod, previous, "PE")
         if c["strike"] is not None and c["expiry"] >= day
     }
-    possible = sorted(
-        (
-            (expiry, abs(strike - anchor), strike)
-            for expiry, strike in calls.keys() & puts.keys()
-            if ("options", expiry, strike, "CE") in avail
-            and ("options", expiry, strike, "PE") in avail
-        )
+    listed = sorted(
+        (expiry, abs(strike - opening_anchor), strike)
+        for expiry, strike in calls.keys() & puts.keys()
     )
-    if not possible:
+    if not listed:
         raise ValueError("previous_day_option_pair_not_available")
-    expiry, _, strike = possible[0]
-    ce = {**calls[(expiry, strike)], **avail[("options", expiry, strike, "CE")]}
-    pe = {**puts[(expiry, strike)], **avail[("options", expiry, strike, "PE")]}
-    # Lot mismatches need independent resolution, never silently choose one.
-    if ce["lot"] != pe["lot"] or ce["lot"] != future["lot"]:
-        raise ValueError("historical_lot_size_mismatch")
+    expiry, _, strike = listed[0]
+    ce_history = avail.get(("options", expiry, strike, "CE"))
+    pe_history = avail.get(("options", expiry, strike, "PE"))
+    if ce_history is None or pe_history is None:
+        # Fail closed instead of cherry-picking an available strike using
+        # later-session option-data completeness (survivorship/lookahead).
+        raise ValueError("opening_atm_contract_minutes_not_available")
+    ce = {**calls[(expiry, strike)], **ce_history}
+    pe = {**puts[(expiry, strike)], **pe_history}
+    # Front futures provide underlying context, not the traded option lot.
+    # NSE futures and weekly options may validly use different lot sizes
+    # during exchange lot-size transitions, while CE and PE must still match.
+    if ce["lot"] != pe["lot"]:
+        raise ValueError("historical_option_lot_size_mismatch")
     return index, future, ce, pe
 
 
@@ -164,6 +194,8 @@ def _prepare_day(
     outdir: Path,
     *,
     permit_partial: bool,
+    source_dataset_sha256: str = "",
+    source_eod_sha256: str = "",
 ) -> dict[str, Any]:
     index, fut, ce, pe = _find_pair(breeze, eod, day)
     selected = [("INDEX", index), ("FUT", fut), ("CE", ce), ("PE", pe)]
@@ -230,11 +262,15 @@ def _prepare_day(
         path = candle_dir / f"{kind}.json"
         path.write_text(json.dumps(payload, sort_keys=True))
         path.chmod(0o600)
-        outputs[kind] = {"symbol": symbol, "bars": len(rows)}
+        outputs[kind] = {"symbol": symbol, "bars": len(rows), "lot_size": lot}
     report = {
         "trade_day": day,
         "status": "staged",
         "source": "verified_Breeze_SQLite_and_prior_session_EOD",
+        "source_dataset_sha256": source_dataset_sha256,
+        "source_eod_sha256": source_eod_sha256,
+        "contract_selection": "previous_session_list_first_completed_spot_bar",
+        "contract_selection_not_before": (first + timedelta(minutes=1)).isoformat(),
         "source_minutes_per_contract": {k: len(v) for k, v in originals.items()},
         "complete_synchronized_minutes": len(synchronized),
         "missing_or_unsynchronized_minutes": len(missing),
@@ -244,6 +280,8 @@ def _prepare_day(
         ),
         "discontinuous_minutes_excluded": len(synchronized) - len(longest),
         "selected": outputs,
+        "historical_option_lots_equal": ce["lot"] == pe["lot"],
+        "futures_context_lot_differs_from_options": fut["lot"] != ce["lot"],
         "historical_token_verified": False,
         "historical_quote_depth_available": False,
         "historical_broker_fills_available": False,
@@ -293,10 +331,10 @@ def run(
     day: str | None = None,
     permit_partial: bool = False,
     execute: bool = False,
-    limit: int = 500,
+    limit: int = 1000,
 ) -> dict[str, Any]:
     """Create offline strategy input and optionally use the existing research engine."""
-    if output_root.exists() or not 1 <= limit <= 500:
+    if output_root.exists() or not 1 <= limit <= 1000:
         raise ValueError("research_output_exists_or_limit_invalid")
     if execute and (
         os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW"
@@ -304,7 +342,14 @@ def run(
         or os.getenv("ALLOW_REAL_BROKER", "false").lower() == "true"
     ):
         raise ValueError("research_requires_shadow_process")
-    _verify_research_source(breeze_db, summary_path, expected_windows)
+    verified = _verify_research_source(breeze_db, summary_path, expected_windows)
+    eod_digest = hashlib.sha256()
+    with eod_db.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            eod_digest.update(chunk)
+    expected_eod = verified.get("eod_reference_sha256")
+    if expected_eod and eod_digest.hexdigest() != expected_eod:
+        raise ValueError("breeze_eod_reference_checksum_mismatch")
     with closing(_readonly(breeze_db)) as breeze, closing(_readonly(eod_db)) as eod:
         if day is not None:
             date.fromisoformat(day)
@@ -330,6 +375,8 @@ def run(
                     session,
                     output_root / session,
                     permit_partial=permit_partial,
+                    source_dataset_sha256=str(verified["dataset_sha256"]),
+                    source_eod_sha256=eod_digest.hexdigest(),
                 )
             except (ValueError, sqlite3.Error) as exc:
                 rejected[str(exc)] += 1
@@ -388,7 +435,7 @@ def main() -> None:
     parser.add_argument("--day")
     parser.add_argument("--permit-partial", action="store_true")
     parser.add_argument("--run-strategies", action="store_true")
-    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--limit", type=int, default=1000)
     args = parser.parse_args()
     result = run(
         args.breeze_db,
