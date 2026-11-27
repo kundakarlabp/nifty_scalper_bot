@@ -85,3 +85,12 @@ median only when at least five prior sessions have that exact IST minute.
 This is research evidence, not a live override or an option fill simulation.
 The existing live session-VWAP admission rules, risk ceiling, protective
 stops and broker reconciliation are unchanged.
+
+The live RANGE route consumes the verified local-breakout veto and, when a
+60-bar opposing directional context is proven (efficiency above the existing
+range ceiling and displacement at least 1.5 current ATR), requires confirmed
+same-side local reclaim and the existing conditional-flow and net-payoff
+buffers. Missing 60-bar evidence is not relabeled as RANGE. This conservative
+engineering guard is uncalibrated; it does not admit new trades during a
+canonical TREND or weaken any cash-risk or broker gate. Clock-matched ATR
+and alternative target outcomes remain research-only pending evidence.
