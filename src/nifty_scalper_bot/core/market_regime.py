@@ -2,7 +2,8 @@
 
 Responsibilities: classify trend, range, high-volatility, event and low-activity
 conditions from corroborated market inputs; publish timestamped snapshots
-with completed-bar evidence identity when supplied by the canonical manager.
+with completed-bar evidence identity and broad context when supplied by the
+canonical manager. Canonical ADX is 0–100; legacy trend_score ratios are explicit.
 The lightweight runner classifier is diagnostic only, not a live entry authority.
 
 Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
@@ -11,6 +12,7 @@ mean reversion, and caller-owned entry/risk guards remain authoritative.
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -343,7 +345,13 @@ class MarketRegimeDetector:
             params = self._params
             ema_fast = self._extract_float(indicators, ("ema_fast", "ema_12"))
             ema_slow = self._extract_float(indicators, ("ema_slow", "ema_26"))
-            trend_score = self._extract_float(indicators, ("trend_score", "adx"))
+            trend_score = self._extract_float(indicators, ("adx",))
+            if trend_score is None:
+                legacy_score = self._extract_float(indicators, ("trend_score",))
+                if legacy_score is not None:
+                    trend_score = (
+                        legacy_score * 100.0 if 0 <= legacy_score <= 1 else legacy_score
+                    )
             atr = self._extract_float(indicators, ("atr", "atr_14"))
             volume_ratio = self._extract_float(indicators, ("volume_ratio",))
             iv_rank = self._extract_float(indicators, ("iv_rank", "iv_percentile"))
@@ -381,10 +389,17 @@ class MarketRegimeDetector:
                         ("ema_slow", "ema_26", "slow_ema"),
                     )
                 if trend_score is None:
-                    trend_score = self._snapshot_float(
-                        snapshot,
-                        ("trend_score", "adx", "trend_strength"),
-                    )
+                    trend_score = self._snapshot_float(snapshot, ("adx",))
+                    if trend_score is None:
+                        legacy_score = self._snapshot_float(
+                            snapshot, ("trend_score", "trend_strength")
+                        )
+                        if legacy_score is not None:
+                            trend_score = (
+                                legacy_score * 100.0
+                                if 0 <= legacy_score <= 1
+                                else legacy_score
+                            )
                 if volume_ratio is None:
                     volume_ratio = self._snapshot_float(
                         snapshot,
@@ -442,10 +457,15 @@ class MarketRegimeDetector:
             )
             adjustments = self._build_adjustments(regime)
             # Evaluation time is not the identity of the underlying evidence.
-            if "completed_bar_timestamp" in indicators:
-                adjustments["completed_bar_timestamp"] = self._extract_float(
-                    indicators, ("completed_bar_timestamp",)
-                )
+            for key in (
+                "completed_bar_timestamp",
+                "verified_completed_bars",
+                "atr_bps",
+                "broader_60bar_displacement_bps",
+                "broader_60bar_directional_efficiency",
+            ):
+                if key in indicators:
+                    adjustments[key] = self._extract_float(indicators, (key,))
             display_regime = adjustments.get("display_regime")
             snapshot_obj = RegimeSnapshot(
                 symbol=symbol,
@@ -664,7 +684,9 @@ class MarketRegimeDetector:
             updated_raw = payload.get("updated_at")
             updated_at = time.time()
             coerced_updated = MarketRegimeDetector._coerce_float(updated_raw)
-            if coerced_updated is not None:
+            if updated_raw is not None:
+                if coerced_updated is None:
+                    return None
                 updated_at = coerced_updated
             adjustments: Dict[str, object] = {}
             raw_adjustments = payload.get("adjustments")
@@ -1246,6 +1268,20 @@ class MarketRegimeDetector:
             )
             reasons["trend"] = "ema_divergence"
 
+        # Volume is corroboration, not evidence of directional movement.
+        trend_proven = bool(
+            (adx_norm is not None and adx_norm >= params.adx_trend_threshold)
+            or (momentum is not None and momentum >= params.price_momentum_trend)
+            or (
+                ema_fast is not None
+                and ema_slow is not None
+                and ema_slow > 0
+                and abs(ema_fast - ema_slow) / ema_slow >= params.ema_ratio_trend
+            )
+        )
+        if not trend_proven:
+            trend_score_value = 0.0
+
         range_score_value = scores.get("range", 0.0)
         if (
             atr is not None
@@ -1287,7 +1323,7 @@ class MarketRegimeDetector:
             ema_fast is not None
             and ema_slow is not None
             and ema_slow != 0
-            and abs((ema_fast - ema_slow) / abs(ema_slow)) < params.ema_ratio_trend
+            and abs((ema_fast - ema_slow) / abs(ema_slow)) < params.ema_ratio_flat
         )
         range_proven = bool(
             adx_norm is not None
@@ -1328,13 +1364,20 @@ class MarketRegimeDetector:
 
         for key in keys:
             value = indicators.get(key)
-            if isinstance(value, (int, float)):
+            if isinstance(value, bool):
+                if key == "event_flag":
+                    return float(value)
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(value):
                 return float(value)
-            if isinstance(value, Sequence):
-                if value:
-                    head = value[0]
-                    if isinstance(head, (int, float)):
-                        return float(head)
+            if isinstance(value, Sequence) and value:
+                head = value[0]
+                if (
+                    isinstance(head, (int, float))
+                    and not isinstance(head, bool)
+                    and math.isfinite(head)
+                ):
+                    return float(head)
         return None
 
     @staticmethod
@@ -1358,11 +1401,14 @@ class MarketRegimeDetector:
         for key in keys:
             value = indicators.get(key)
             if isinstance(value, Sequence):
-                numeric = [
-                    float(item) for item in value if isinstance(item, (int, float))
-                ]
-                if numeric:
-                    return numeric
+                if value and all(
+                    isinstance(item, (int, float))
+                    and not isinstance(item, bool)
+                    and math.isfinite(item)
+                    and item > 0
+                    for item in value
+                ):
+                    return [float(item) for item in value]
         return []
 
     @staticmethod
@@ -1382,18 +1428,12 @@ class MarketRegimeDetector:
         if value is None:
             return None
         if isinstance(value, bool):
-            return 1.0 if value else 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return None
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
             return None
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
 
     @staticmethod
     def _snapshot_float(
@@ -1443,11 +1483,14 @@ class MarketRegimeDetector:
         for key in keys:
             value = snapshot.get(key)
             if isinstance(value, Sequence):
-                numeric = [
-                    float(item) for item in value if isinstance(item, (int, float))
-                ]
-                if numeric:
-                    return numeric
+                if value and all(
+                    isinstance(item, (int, float))
+                    and not isinstance(item, bool)
+                    and math.isfinite(item)
+                    and item > 0
+                    for item in value
+                ):
+                    return [float(item) for item in value]
         return []
 
     @staticmethod
@@ -1478,10 +1521,10 @@ class MarketRegimeDetector:
 
     @staticmethod
     def _normalise_adx(value: float | None) -> float | None:
-        """Return ADX on a 0-100 scale regardless of the input range.
+        """Validate ADX in its canonical 0-100 domain.
 
         Args:
-            value: Raw ADX measurement, e.g. 0-1 ratio or 0-100 reading.
+            value: Canonical ADX measurement on a 0-100 scale.
 
         Returns:
             Normalised ADX value on a 0-100 scale or ``None`` when invalid.
@@ -1493,13 +1536,7 @@ class MarketRegimeDetector:
         if value is None:
             return None
         adx_value = float(value)
-        if adx_value < 0.0:
-            return None
-        if adx_value <= 1.0:
-            return max(0.0, adx_value * 100.0)
-        if adx_value > 100.0:
-            return 100.0
-        return adx_value
+        return adx_value if math.isfinite(adx_value) and 0 <= adx_value <= 100 else None
 
     @staticmethod
     def _normalise_vol(value: float | None) -> float | None:
@@ -1518,7 +1555,7 @@ class MarketRegimeDetector:
         if value is None:
             return None
         vol = float(value)
-        if vol < 0:
+        if not math.isfinite(vol) or vol < 0:
             return None
         if vol <= 1.0:
             return vol * 100.0
