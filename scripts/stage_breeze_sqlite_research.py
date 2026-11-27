@@ -130,7 +130,8 @@ def _find_pair(
         raise ValueError("opening_spot_minute_not_observed")
     opening_anchor = float(spot_opening_bar[4])
     candidates = [
-        item for item in _available_contracts(eod, previous, "FUT")
+        item
+        for item in _available_contracts(eod, previous, "FUT")
         if item["expiry"] >= day
     ]
     if not candidates:
@@ -263,9 +264,7 @@ def _prepare_day(
         "status": "staged",
         "source": "verified_Breeze_SQLite_and_prior_session_EOD",
         "contract_selection": "previous_session_list_first_completed_spot_bar",
-        "contract_selection_not_before": (
-            first + timedelta(minutes=1)
-        ).isoformat(),
+        "contract_selection_not_before": (first + timedelta(minutes=1)).isoformat(),
         "source_minutes_per_contract": {k: len(v) for k, v in originals.items()},
         "complete_synchronized_minutes": len(synchronized),
         "missing_or_unsynchronized_minutes": len(missing),
