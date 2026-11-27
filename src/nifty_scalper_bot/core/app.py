@@ -10,6 +10,7 @@ Runtime role:
   readiness as genuine selected-option history becomes sufficient or regresses.
 - Requires both selected sides for evaluation, but recognizes independently
   verified, affordable near-ATM basket candidates for execution readiness.
+- Wires the canonical completed-spot regime path, with aligned futures volume.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
