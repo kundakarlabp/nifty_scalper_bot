@@ -336,6 +336,14 @@ def canonicalize_range_excursions(
                 "regime_raw": first.get("regime_raw"),
                 "regime_gate_allowed": first.get("regime_gate_allowed"),
                 "local_range_candidate": first.get("local_range_candidate"),
+                "local_range_state": first.get("local_range_state"),
+                "local_range_evidence_fraction": first.get(
+                    "local_range_evidence_fraction"
+                ),
+                "local_reclaim_side": first.get("local_reclaim_side"),
+                "local_range_confirmed_in_trend": first.get(
+                    "local_range_confirmed_in_trend"
+                ),
                 "local_rolling_center_slope_bps_per_min": first.get(
                     "local_rolling_center_slope_bps_per_min"
                 ),
