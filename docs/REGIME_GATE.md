@@ -157,3 +157,9 @@ The post-session report counts UNKNOWN/local RANGE overlap and denied minutes,
 shadow transition candidates and clock-matched reference coverage. Fewer than
 five prior observed sessions at the same minute is insufficient; no adaptive
 threshold is promoted without chronological after-cost evidence.
+
+Weekly NIFTY options (exchange numeric month codes 1–9 and O/N/D) and monthly
+options are both accepted by the canonical syntax validator. This does not
+infer expiry or authorize execution: the active basket, broker instrument row,
+quote and original risk gates remain authoritative. Both canonical and
+strategy-level denials reuse the same atomic basket observation and actual lot.
