@@ -411,6 +411,7 @@ def test_mismatched_traded_option_lots_still_fail_closed(tmp_path: Path) -> None
     assert report["staged_days"] == 0
     assert report["rejections"] == {"historical_option_lot_size_mismatch": 1}
 
+
 def test_independent_eod_source_digest_blocks_tampered_contract_master(
     tmp_path: Path,
 ) -> None:
