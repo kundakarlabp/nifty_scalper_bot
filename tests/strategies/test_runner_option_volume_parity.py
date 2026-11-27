@@ -229,3 +229,51 @@ def test_live_completed_projection_does_not_fallback_to_sampled_tick() -> None:
     runner._last_bar_ts = {}
     runner._indicator_engine = SimpleNamespace(get_history=lambda *_a, **_k: [])
     assert runner._ingest_live_canonical_completed_bars(SYMBOL) is None
+
+
+def test_live_projection_recovers_more_than_eight_finalized_minutes() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    start = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    rows = [
+        {
+            "timestamp": start + timedelta(minutes=i),
+            "open": 150.0,
+            "high": 151.0,
+            "low": 149.0,
+            "close": 150.5,
+            "volume": 65,
+        }
+        for i in range(15)
+    ]
+    runner._candle_engines = {
+        SYMBOL: SimpleNamespace(get_completed_tail=lambda limit: rows[-limit:])
+    }
+    runner._last_bar_ts = {SYMBOL: start}
+    runner._indicator_engine = SimpleNamespace(get_history=lambda *_a, **_k: [])
+    accepted = []
+
+    def ingest(symbol, bar):
+        accepted.append(bar.timestamp)
+        runner._last_bar_ts[symbol] = bar.timestamp
+
+    runner._ingest_bar = ingest
+    runner._ingest_live_canonical_completed_bars(SYMBOL)
+    assert accepted == [row["timestamp"] for row in rows[1:]]
+
+
+def test_gap_repair_rejects_incomplete_or_invalid_cached_ohlcv() -> None:
+    runner = StrategyRunner.__new__(StrategyRunner)
+    start = datetime(2026, 11, 5, 4, 0, tzinfo=timezone.utc)
+    runner._main_loop = None
+    runner._should_log_throttled = lambda *_a: False
+    row = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 65}
+    runner._load_history_cache = lambda _s: [
+        {**row, "timestamp": start + timedelta(minutes=1), "open": None},
+        {**row, "timestamp": start + timedelta(minutes=2), "volume": -1},
+        {**row, "timestamp": start + timedelta(minutes=3), "is_provisional": True},
+        {**row, "timestamp": start + timedelta(minutes=4)},
+    ]
+    previous = SimpleNamespace(timestamp=start, close=100.0)
+    incoming = SimpleNamespace(timestamp=start + timedelta(minutes=5))
+    repaired = runner._repair_candle_gap(SYMBOL, previous, incoming)
+    assert [bar.timestamp for bar in repaired] == [start + timedelta(minutes=4)]
