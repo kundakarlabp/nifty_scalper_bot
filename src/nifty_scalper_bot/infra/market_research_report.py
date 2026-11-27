@@ -270,6 +270,9 @@ def _local_regime_minutes(
 
     rows = [unique[key] for key in sorted(unique, key=lambda key: key[1])]
     state_counts: dict[str, int] = defaultdict(int)
+    shadow_transition_counts: dict[str, int] = defaultdict(int)
+    unknown_local_range = 0
+    denied_observations = 0
     confirmed_in_trend = 0
     independent_local_reclaims = 0
     for row in rows:
@@ -282,6 +285,14 @@ def _local_regime_minutes(
         )
         state = str(row.get("local_range_state") or "UNPROVEN")
         state_counts[state] += 1
+        candidate = row.get("shadow_transition_candidate")
+        if candidate in ("TREND", "RANGE"):
+            shadow_transition_counts[str(candidate)] += 1
+        denied_observations += int(row.get("regime_gate_allowed") is False)
+        unknown_local_range += int(
+            state == "RANGE"
+            and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+        )
         confirmed_in_trend += int(
             state == "RANGE"
             and str(row.get("regime") or "").upper() == "TREND"
@@ -297,6 +308,14 @@ def _local_regime_minutes(
         "unit": "distinct_completed_futures_minute_not_trade",
         "observed_minutes": len(rows),
         "state_counts": dict(state_counts),
+        "shadow_transition_counts": dict(shadow_transition_counts),
+        "canonical_denied_observed_minutes": denied_observations,
+        "unknown_with_confirmed_local_range_minutes": unknown_local_range,
+        "clock_matched_calibration_status": (
+            "reference_available_research_only"
+            if any(row["atr_vs_clock_matched_median"] is not None for row in rows)
+            else "insufficient_clock_matched_evidence"
+        ),
         "confirmed_local_range_in_trend_minutes": confirmed_in_trend,
         "local_reclaim_without_session_setup_minutes": independent_local_reclaims,
         "clock_matched_reference_sessions": prior_sessions,
