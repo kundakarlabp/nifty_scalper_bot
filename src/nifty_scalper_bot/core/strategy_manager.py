@@ -11,7 +11,8 @@ Runtime role:
   adaptive weighting is applied only after the canonical regime gate passes.
   Preserve completed-bar identity and broader context through final admission.
   Read-only range observations share one selected-basket path across
-  canonical and strategy-level regime denials.
+  canonical and strategy-level regime denials. Persist early canonical veto
+  decisions for trace-matched runner attribution without changing admission.
 - get_regime_hard_block_count exposes the existing cumulative option-evaluation
   safety vetoes for accurate, read-only runner interval summaries.
 - can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
@@ -3101,6 +3102,15 @@ class StrategyManager(_BaseStrategyManager):
                     self._observe_denied_range_research(symbol, regime_manager)
                     _emit_no_signal("regime_gate_block", {"gate_reasons": reasons})
                     no_signal_reasons.append("regime_gate_block")
+                    self._record_no_signal_decision(
+                        symbol=symbol_norm,
+                        category="strategy_regime_blocked",
+                        reason=reasons[0] if reasons else "regime_gate_block",
+                        blocked_at="regime_gate",
+                        indicators=indicators,
+                        trace_id=trace_id,
+                        final_block_reason="regime_gate_block",
+                    )
                     _emit_strategy_exit()
                     return None
             except Exception as exc:  # noqa: BLE001
@@ -3114,6 +3124,15 @@ class StrategyManager(_BaseStrategyManager):
                 _log_reject("regime_gate_error", {"error_type": type(exc).__name__})
                 _emit_no_signal("regime_gate_error")
                 no_signal_reasons.append("regime_gate_error")
+                self._record_no_signal_decision(
+                    symbol=symbol_norm,
+                    category="strategy_error",
+                    reason="regime_gate_error",
+                    blocked_at="regime_gate",
+                    indicators=indicators,
+                    trace_id=trace_id,
+                    final_block_reason="regime_gate_error",
+                )
                 _emit_strategy_exit()
                 return None
         if regime_snapshot is not None and isinstance(

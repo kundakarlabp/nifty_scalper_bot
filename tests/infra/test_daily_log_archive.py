@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from nifty_scalper_bot.infra.daily_log_archive import DailyLogArchiver
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -126,6 +128,9 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
             "replay_sha256": "a" * 64,
             "tradable_ws_quote_ticks": 4,
             "independent_setup_count": 0,
+            "range_excursion_opportunities": [],
+            "range_excursion_duplicate_observations": 0,
+            "range_excursion_horizons": [],
             "sampled_observations": [],
             "sampled_strata": [],
             "structural_strata": [],
@@ -149,9 +154,74 @@ def test_research_waits_for_settle_and_replicates_summary() -> None:
     assert len(research_calls) == 1
     assert "RESEARCH_SESSION_EVIDENCE " not in calls[0]["log_text"]
     assert "RESEARCH_SESSION_EVIDENCE " in calls[1]["log_text"]
+    assert '"status":"analysed"' in calls[1]["log_text"]
+    assert "postmarket_runner_failed" not in calls[1]["log_text"]
     assert calls[1]["build_sha"] is not None
     assert calls[1]["line_count"] == 2
     assert archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST)) == {
         "archived": False,
         "reason": "already_finalized",
     }
+
+
+def test_transient_replay_failure_retries_once_then_finalizes() -> None:
+    calls = []
+    research_calls = []
+
+    def research(day, _journal):
+        research_calls.append(day)
+        return {
+            "date_ist": day.isoformat(),
+            "status": "unavailable",
+            "blocker": "replay_archive_changed_between_passes",
+            "replay_sha256": None,
+            "independent_setup_count": 0,
+            "range_excursion_opportunities": [],
+            "range_excursion_duplicate_observations": 0,
+            "range_excursion_horizons": [],
+            "sampled_observations": [],
+            "sampled_strata": [],
+            "structural_strata": [],
+            "volume_parity": {},
+        }
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        log_reader=lambda _start, _end: "journal",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        research_runner=research,
+    )
+    first = archiver.archive_once(datetime(2026, 11, 3, 15, 35, tzinfo=IST))
+    second = archiver.archive_once(datetime(2026, 11, 3, 15, 40, tzinfo=IST))
+    third = archiver.archive_once(datetime(2026, 11, 3, 15, 45, tzinfo=IST))
+    assert first["finalized"] is False
+    assert second["finalized"] is True
+    assert third == {"archived": False, "reason": "already_finalized"}
+    assert len(research_calls) == 2
+    assert len(calls) == 2
+    assert all(
+        '"blocker":"replay_archive_changed_between_passes"' in call["log_text"]
+        for call in calls
+    )
+
+
+def test_exchange_holiday_keeps_logs_without_replay_research(monkeypatch) -> None:
+    from nifty_scalper_bot.infra import daily_log_archive
+
+    calls = []
+    monkeypatch.setattr(daily_log_archive, "is_exchange_holiday", lambda _day: True)
+
+    def fail_research(*_args):
+        pytest.fail("holiday must not require a trading-session tape")
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        log_reader=lambda _start, _end: "holiday journal",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        research_runner=fail_research,
+    )
+    result = archiver.archive_once(datetime(2026, 11, 24, 16, 0, tzinfo=IST))
+    assert result["finalized"] is True
+    assert calls[0]["log_text"] == "holiday journal"
