@@ -137,7 +137,9 @@ normalisation convention, not empirically optimised time-of-day thresholds.
 
 The selected-contract observation hook records completed futures evidence even
 when the canonical gate denies entry, with an explicit decision timestamp and
-no synthetic execution quote. Missing completed history is retried rather than
+no synthetic execution quote. One active-basket snapshot binds the selected
+option and future; broker-owned lot metadata permits later full-lot tape labels
+without inventing model risk. Missing completed history is retried rather than
 consuming the current minute's research slot. The live gate continues to deny
 UNKNOWN. In the ADX interval between the existing chop and trend thresholds,
 30 completed spot bars provide descriptive efficiency, ATR-normalised move
