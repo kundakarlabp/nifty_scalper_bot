@@ -115,9 +115,16 @@ def test_attempted_opening_minute_fill_is_never_accepted(tmp_path, monkeypatch):
             "evidence_label": "RESEARCH_CANDIDATE",
             "live_equivalent": False,
             "data_sha256": digest,
-            "scenarios": [{"slippage_bps_per_side": 10.0, "strategies": {
-                "SMC": {"trades": [{"entry_time": "2025-02-04T09:15:00+05:30"}]},
-            }}],
+            "scenarios": [
+                {
+                    "slippage_bps_per_side": 10.0,
+                    "strategies": {
+                        "SMC": {
+                            "trades": [{"entry_time": "2025-02-04T09:15:00+05:30"}]
+                        },
+                    },
+                }
+            ],
         }
 
     monkeypatch.setattr(
