@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - deploy/breeze_targeted_backfill_20261109.csv
+      - deploy/breeze_five_date_recovery_20261127.csv
 
 permissions:
   contents: read
@@ -42,7 +43,7 @@ jobs:
           BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: >-
           python -m scripts.archive_breeze_backfill
-          --plan deploy/breeze_targeted_backfill_20261109.csv
+          --plan deploy/breeze_five_date_recovery_20261127.csv
           --outdir "$RUNNER_TEMP/breeze-repair"
       - name: Encrypt private repair results including partial coverage
         if: always()
