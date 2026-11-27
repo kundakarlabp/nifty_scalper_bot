@@ -5,7 +5,6 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-
 from scripts.run_breeze_offline_batch import run_batch
 from scripts.stage_breeze_sqlite_research import run
 
