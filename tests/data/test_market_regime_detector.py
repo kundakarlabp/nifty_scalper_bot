@@ -158,3 +158,24 @@ def test_choppy_and_normal_labels_do_not_authorize_mean_reversion() -> None:
 
     assert normalize_regime("CHOPPY") is MarketRegime.UNKNOWN
     assert normalize_regime("NORMAL") is MarketRegime.UNKNOWN
+
+
+
+def test_canonical_adx_units_and_volume_are_not_directional_proof() -> None:
+    detector = MarketRegimeDetector()
+    quiet = detector.evaluate(
+        "NIFTY",
+        {"adx": 0.75, "atr": 4.0, "price_series": [25000.0, 25000.5, 25000.0]},
+    )
+    assert quiet.regime == "range"
+    assert detector.evaluate("NIFTY", {"volume_ratio": 1.2}).regime == "unknown"
+
+
+def test_nonfinite_and_boolean_features_cannot_manufacture_regime() -> None:
+    detector = MarketRegimeDetector()
+    for features in (
+        {"adx": float("inf"), "atr": float("nan")},
+        {"adx": True, "atr": False},
+        {"price_series": [25000.0, float("nan"), 25500.0]},
+    ):
+        assert detector.evaluate("NIFTY", features).regime == "unknown"
