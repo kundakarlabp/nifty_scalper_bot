@@ -73,6 +73,9 @@ def run_batch(
     validated = _verify_research_source(breeze_db, summary_path, expected_windows)
     database_digest = str(validated["dataset_sha256"])
     eod_digest = _sha256(eod_db)
+    expected_eod = validated.get("eod_reference_sha256")
+    if expected_eod and eod_digest != expected_eod:
+        raise ValueError("breeze_eod_reference_checksum_mismatch")
     from nifty_scalper_bot.backtesting.strategy_research import (
         load_archive,
         run_archived_research,
