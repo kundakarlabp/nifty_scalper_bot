@@ -207,8 +207,7 @@ def load_excursion_quote_paths(
             selected_lots = {
                 symbol: evidence[1]
                 for symbol, evidence in catalog_lots.items()
-                if symbol not in conflicting_lots
-                and evidence[0] == tokens.get(symbol)
+                if symbol not in conflicting_lots and evidence[0] == tokens.get(symbol)
             }
             phase_key = (
                 str(event["run_id"]),
