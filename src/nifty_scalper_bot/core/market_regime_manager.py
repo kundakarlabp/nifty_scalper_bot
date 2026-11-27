@@ -771,7 +771,12 @@ class MarketRegimeManager:
                 "price": data.get("close"),
                 **{k: v for k, v in data.items() if v is not None},
             }
-            for key in ("price_series", "close_series", "price_history", "close_history"):
+            for key in (
+                "price_series",
+                "close_series",
+                "price_history",
+                "close_history",
+            ):
                 enrichment.pop(key, None)
             if price_series:
                 enrichment["price_series"] = price_series
