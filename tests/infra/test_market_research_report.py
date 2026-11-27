@@ -566,6 +566,49 @@ def test_local_range_shadow_report_never_invents_risk(tmp_path) -> None:
     assert report["eligible_for_entry_filter_change"] is False
 
 
+def test_local_regime_clock_reference_is_prior_only_and_deduplicated(tmp_path) -> None:
+    from nifty_scalper_bot.infra.market_research_report import _local_regime_minutes
+
+    day = DECISION.date()
+    stamp = DECISION - timedelta(minutes=1)
+    sample = {
+        "v": 1,
+        "decision_at": DECISION.isoformat(),
+        "bar_timestamp": stamp.isoformat(),
+        "futures_symbol": "NFO:NIFTY26NOVFUT",
+        "source": "contiguous_session_futures_1m",
+        "futures_atr_bps": 4.0,
+        "local_range_state": "RANGE",
+        "local_reclaim_side": "CE",
+        "regime": "trend",
+        "regime_raw": "trend",
+        "regime_gate_allowed": True,
+        "session_vwap_setup_qualified": False,
+    }
+    for offset in (-5, -4, -3, -2, -1, 0, 1):
+        prior_date = day + timedelta(days=offset)
+        reference = dict(
+            sample,
+            bar_timestamp=(stamp + timedelta(days=offset)).isoformat(),
+            futures_atr_bps=2.0 if offset < 0 else 100.0,
+        )
+        (tmp_path / f"{prior_date}.json").write_text(
+            json.dumps(
+                {"date_ist": str(prior_date), "local_regime_minutes": [reference]}
+            )
+        )
+    rows, summary = _local_regime_minutes(
+        [sample, dict(sample, futures_atr_bps=99.0)],
+        session_date=day,
+        report_directory=tmp_path,
+    )
+    assert len(rows) == 1
+    assert rows[0]["clock_matched_prior_sessions"] == 5
+    assert rows[0]["atr_vs_clock_matched_median"] == 2.0
+    assert summary["confirmed_local_range_in_trend_minutes"] == 1
+    assert summary["local_reclaim_without_session_setup_minutes"] == 1
+
+
 def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
     tmp_path,
 ) -> None:
