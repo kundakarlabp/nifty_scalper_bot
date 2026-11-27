@@ -501,6 +501,7 @@ class MarketRegimeManager:
                 or not 0 <= snapshot.confidence <= 1
                 or not math.isfinite(snapshot.updated_at)
                 or (directional and not valid_evidence)
+                or (directional and snapshot.confidence < self.min_confidence)
             ):
                 self._pending_regime = incoming.value
                 self._pending_count = 0
@@ -1149,6 +1150,20 @@ class MarketRegimeManager:
                 if threshold and raw_snapshot.confidence >= threshold:
                     allowed = False
                     reasons.append(f"regime_block_{raw_snapshot.regime}")
+                volatility_risk = raw_snapshot.adjustments.get(
+                    "volatility_risk_confidence"
+                )
+                volatility_threshold = self._block_threshold_for(MarketRegime.VOLATILE)
+                if (
+                    volatility_threshold
+                    and isinstance(volatility_risk, (int, float))
+                    and not isinstance(volatility_risk, bool)
+                    and math.isfinite(volatility_risk)
+                    and volatility_risk >= volatility_threshold
+                    and raw_regime is not MarketRegime.VOLATILE
+                ):
+                    allowed = False
+                    reasons.append("regime_block_independent_volatile")
             if context:
                 reasons.extend(
                     [f"ctx_{key}" for key in context.keys() if isinstance(key, str)]
