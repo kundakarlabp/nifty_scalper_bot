@@ -11,6 +11,7 @@ this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
 observational quotes cannot authorize changing any live entry or risk policy.
 Date-scoped journal decisions must match the replay session's IST calendar date.
+All markout passes must read the same immutable replay bytes.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.storage.replay_archive import archive_fingerprint
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     RangeVWAPReclaimStrategyConfig,
 )
@@ -1017,11 +1019,16 @@ def build_session_research_report(
         # failures, sequence continuity and all per-run sidecars.
         if storage["pending_events"]:
             raise ValueError("replay_capture_writer_not_settled")
+        initial_sha = archive_fingerprint(replay_path)
         quotes, sha, quote_count = load_archive_quotes(replay_path)
+        if sha != initial_sha:
+            raise ValueError("replay_archive_changed_between_passes")
+        futures_tape, full_lot_books = load_excursion_quote_paths(replay_path)
+        if archive_fingerprint(replay_path) != sha:
+            raise ValueError("replay_archive_changed_between_passes")
         report["writer_integrity_verified"] = True
         report["replay_sha256"] = sha
         report["tradable_ws_quote_ticks"] = quote_count
-        futures_tape, full_lot_books = load_excursion_quote_paths(replay_path)
         opportunities = canonicalize_range_excursions(
             range_excursion_observed, range_excursion_decisions
         )
@@ -1191,11 +1198,20 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             "replay_sha256": fidelity["capture_sha256"],
         }
     except (OSError, ValueError, TypeError) as exc:
-        if isinstance(exc, ValueError) and str(exc) == (
+        archive_changed = isinstance(exc, ValueError) and str(exc) == (
             "replay_archive_changed_between_passes"
-        ):
+        )
+        if not archive_changed and report.get("replay_sha256") is not None:
+            # An audit may fail before returning its fingerprint. Distinguish
+            # a semantic fidelity limitation from a changed or missing tape.
+            try:
+                archive_changed = archive_fingerprint(path) != report["replay_sha256"]
+            except OSError:
+                archive_changed = True
+        if archive_changed:
             report["status"] = "unavailable"
-            report["blocker"] = str(exc)
+            report["blocker"] = "replay_archive_changed_between_passes"
+            report["writer_integrity_verified"] = False
             report["sampled_observations"] = []
             report["sampled_strata"] = []
             report["structural_outcomes"] = []
@@ -1206,7 +1222,13 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
         fidelity = {
             "status": "unavailable",
             "blocker": (
-                str(exc)[:110] if isinstance(exc, ValueError) else type(exc).__name__
+                "replay_archive_changed_between_passes"
+                if archive_changed
+                else (
+                    str(exc)[:110]
+                    if isinstance(exc, ValueError)
+                    else type(exc).__name__
+                )
             ),
             "archive_integrity_verified": False,
             "full_session_selected_coverage_proven": False,
