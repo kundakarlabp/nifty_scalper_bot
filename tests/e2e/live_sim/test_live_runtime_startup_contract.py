@@ -784,13 +784,19 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 failure_message=f"startup tick did not reach DataHub for {sym}",
             )
         _pump_runtime(loop, ctx, iterations=20)
-        # This isolated RSI routing fixture does not construct an authoritative
-        # regime observation. Bypass only this regime gate in the test; the
-        # dedicated regime safety tests still enforce fail-closed production.
-        assert ctx.strategy_manager._regime_manager is not None  # noqa: SLF001
-        ctx.strategy_manager._regime_manager.set_regime_filter_bypass(
-            True
-        )  # noqa: SLF001
+        # Hydrated spot/futures history contains the previous two closed
+        # minutes. Exercise the real production regime gate, never bypass it.
+        manager = ctx.market_regime_manager
+        assert manager is not None
+        now = pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo))
+        with freeze_time(
+            (now - pd.Timedelta(minutes=1)).to_pydatetime(),
+            real_asyncio=True,
+        ):
+            loop.run_until_complete(manager.refresh_from_indicators())
+        assert not manager.can_trade(), manager.build_diagnostics()
+        loop.run_until_complete(manager.refresh_from_indicators())
+        assert manager.can_trade(), manager.build_diagnostics()
         # Runtime ownership is established by explicit registration above; start only after it.
         ctx.strategy_runner.start()
         _pump_runtime(loop, ctx, iterations=2)

@@ -8,6 +8,7 @@ Responsibilities:
 Boundaries: Pure vote policy; no quote fetching, symbol selection or order entry.
 Safety: Context-only votes cannot create triggers; range reversal requires a
 separately attested structural and option-flow contract in LIVE pilot mode.
+The stronger nested/conditional reversal payoff floor survives final repricing.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from nifty_scalper_bot.config.strategy_taxonomy import (
     is_context_only_strategy,
     normalize_strategy_name,
     range_vwap_live_enabled,
+    range_vwap_local_trend_enabled,
 )
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
@@ -31,6 +33,27 @@ _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 class SetupGateDecision:
     passed: bool
     reason: str | None = None
+
+
+def _range_minimum_net_rr(metadata: Mapping[str, Any]) -> float:
+    """Preserve the stronger strategy threshold across the broker-plan boundary."""
+    structure = metadata.get("range_structure")
+    stronger = (
+        metadata.get("range_local_trend_pilot") is True
+        or metadata.get("range_counter_broad_trend") is True
+        or metadata.get("range_conditional_center_exception") is True
+        or (
+            isinstance(structure, Mapping)
+            and structure.get("conditional_center_exception_used") is True
+        )
+    )
+    floor = 1.75 if stronger else 1.5
+    value = metadata.get("range_required_net_rr", floor)
+    try:
+        required = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return max(floor, required) if isfinite(required) else float("inf")
 
 
 def verified_range_vwap_reversal(
@@ -61,12 +84,26 @@ def verified_range_vwap_reversal(
         or economics.get("model_only") is not True
     ):
         return False
+    if metadata.get("range_local_trend_pilot") is True and not (
+        range_vwap_local_trend_enabled()
+        and structure.get("local_range_confirmed") is True
+        and structure.get("local_reclaim_side") == side
+        and structure.get("broader_60bar_trend_side") in {"CE", "PE"}
+        and metadata.get("range_spot_broad_trend_side")
+        == structure.get("broader_60bar_trend_side")
+    ):
+        return False
     try:
         risk = float(economics["worst_stop_loss_including_costs"])
         rr = float(economics["net_reward_risk"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
-    return bool(isfinite(risk) and isfinite(rr) and 0 < risk <= 773.0 and rr >= 1.5)
+    return bool(
+        isfinite(risk)
+        and isfinite(rr)
+        and 0 < risk <= 773.0
+        and rr >= _range_minimum_net_rr(metadata)
+    )
 
 
 def range_legacy_context_mismatch_only(
@@ -197,7 +234,7 @@ def verified_range_vwap_final_order_risk(
         isfinite(final_cash_risk)
         and isfinite(net_target_reward)
         and 0 < final_cash_risk <= 773.0
-        and net_target_reward / final_cash_risk >= 1.5
+        and net_target_reward / final_cash_risk >= _range_minimum_net_rr(metadata)
     )
 
 

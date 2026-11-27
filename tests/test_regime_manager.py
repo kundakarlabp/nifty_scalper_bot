@@ -369,3 +369,112 @@ def test_missing_candle_identity_cannot_confirm_directional_transition() -> None
     assert manager.get_current_regime() == "trend"
     manager.ingest_snapshot(RegimeSnapshot("NIFTY", "event", 0.99, "shock", now + 0.04))
     assert manager.get_current_regime() == "event"
+
+
+def test_live_regime_requires_completed_evidence_and_reconfirms_after_gap(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.core import market_regime_manager as regime_module
+
+    clock = [float(int(time.time() // 60) * 60 + 15)]
+    monkeypatch.setattr(regime_module.time, "time", lambda: clock[0])
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(),
+        regime_settings={"symbol": "NSE:NIFTY", "require_completed_evidence": True},
+    )
+
+    def ingest(*, stamp=None, symbol="NSE:NIFTY", regime="trend"):
+        adjustments = {} if stamp is None else {"completed_bar_timestamp": stamp}
+        manager.ingest_snapshot(
+            RegimeSnapshot(symbol, regime, 0.8, "test", clock[0], adjustments)
+        )
+
+    ingest()
+    assert manager.get_current_regime() is None
+    assert not manager.can_trade()
+    manager.set_regime_filter_bypass(True)
+    assert not manager.can_trade()
+    manager.set_regime_filter_bypass(False)
+    first = clock[0] - 75
+    ingest(stamp=first)
+    clock[0] += 1
+    ingest(stamp=first)
+    assert not manager.can_trade()
+    clock[0] += 59
+    ingest(stamp=first + 60)
+    assert manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first + 60
+    )
+    assert not manager.can_trade(
+        expected_regime="RANGE", expected_completed_bar_timestamp=first + 60
+    )
+    assert not manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first
+    )
+    ingest(stamp=first + 60, symbol="NFO:OTHER", regime="event")
+    assert manager.can_trade()
+    clock[0] += 120
+    ingest(stamp=first + 180)
+    assert not manager.can_trade()
+    clock[0] += 60
+    ingest(stamp=first + 240)
+    assert manager.can_trade()
+    ingest(stamp=first + 180, regime="range")
+    assert manager.can_trade(
+        expected_regime="TREND", expected_completed_bar_timestamp=first + 240
+    )
+    clock[0] += 181
+    assert not manager.can_trade()
+
+
+def test_completed_regime_inputs_exclude_provisional_and_unverified_volume(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+
+    engine = IndicatorEngine()
+    start = datetime(2026, 11, 27, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rows = []
+    for i in range(65):
+        close = 25000.0 + 1.25 * i
+        rows.append(
+            {
+                "timestamp": start + timedelta(minutes=i),
+                "open": close - 1,
+                "high": close + 2,
+                "low": close - 2,
+                "close": close,
+                "volume": 1000,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+        )
+    now = start + timedelta(minutes=65, seconds=20)
+    monkeypatch.setattr(engine, "get_history", lambda *args, **kwargs: list(rows))
+    baseline = engine.get_completed_regime_inputs("NSE:NIFTY", now=now)
+    assert baseline["verified_completed_bars"] == 65
+    assert baseline["broader_60bar_directional_efficiency"] == 1
+    assert baseline["adx"] == 100.0
+    assert MarketRegimeDetector().evaluate("NSE:NIFTY", baseline).regime == "trend"
+    assert "volume_spike_ratio" not in baseline
+    assert (
+        engine.get_completed_regime_inputs("NFO:NIFTY26NOVFUT", now=now)[
+            "volume_spike_ratio"
+        ]
+        == 1
+    )
+    rows[-1]["volume"] = 0
+    assert "volume_spike_ratio" not in engine.get_completed_regime_inputs(
+        "NFO:NIFTY26NOVFUT", now=now
+    )
+    rows.append(dict(rows[-1], timestamp=now, close=1e9, is_provisional=True))
+    assert engine.get_completed_regime_inputs("NSE:NIFTY", now=now) == baseline
+    rows.pop()
+    missing = rows.pop(-3)
+    assert engine.get_completed_regime_inputs("NSE:NIFTY", now=now) == {}
+    rows.append(missing)
+    rows.append(dict(rows[-1], close=rows[-1]["close"] + 0.5))
+    assert engine.get_completed_regime_inputs("NSE:NIFTY", now=now) == {}

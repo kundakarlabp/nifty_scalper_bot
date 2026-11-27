@@ -3,6 +3,7 @@
 Responsibility: store canonical symbol-scoped OHLCV history in PriceHistory and
 calculate indicator snapshots through IndicatorEngine. The named EMA9/EMA21
 contract is owned here rather than duplicated in strategy or regime callers.
+The completed-regime snapshot uses one contiguous, verified session history.
 
 Safety: missing or insufficient underlying bar history must never be turned
 into fabricated indicator evidence; live broker execution and risk guards live
@@ -725,6 +726,109 @@ class IndicatorEngine:
         except Exception as e:  # noqa: BLE001
             LOGGER.error("Failure in IndicatorEngine.get_history: %s", e, exc_info=True)
             return []
+
+    def get_completed_regime_inputs(
+        self, symbol: str, *, now: datetime
+    ) -> dict[str, float | list[float]]:
+        """Calculate regime features from one verified completed session snapshot."""
+        if now.tzinfo is None:
+            return {}
+        local_now = now.astimezone(_INDIA_TZ)
+        session_open = local_now.replace(hour=9, minute=15, second=0, microsecond=0)
+        session_close = local_now.replace(hour=15, minute=30, second=0, microsecond=0)
+        observed: dict[datetime, tuple[float, float, float, float, float]] = {}
+        try:
+            for row in self.get_history(symbol, count=400, field="bars"):
+                if (
+                    row.get("is_complete") is not True
+                    or row.get("is_provisional") is True
+                ):
+                    continue
+                raw_stamp = row.get("timestamp")
+                stamp = (
+                    raw_stamp
+                    if isinstance(raw_stamp, datetime)
+                    else datetime.fromisoformat(str(raw_stamp).replace("Z", "+00:00"))
+                )
+                if stamp.tzinfo is None:
+                    return {}
+                stamp = stamp.astimezone(_INDIA_TZ)
+                if not session_open <= stamp < session_close:
+                    continue
+                if stamp.second or stamp.microsecond:
+                    return {}
+                if (local_now - stamp).total_seconds() < 60:
+                    continue
+                values = (
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["volume"]),
+                )
+                opening, high, low, close, volume = values
+                if (
+                    not all(np.isfinite(value) for value in values)
+                    or not 0 < low <= min(opening, close) <= max(opening, close) <= high
+                    or volume < 0
+                ):
+                    return {}
+                if stamp in observed and observed[stamp] != values:
+                    return {}
+                observed[stamp] = values
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return {}
+        ordered = sorted(observed)
+        if not ordered or (local_now - ordered[-1]).total_seconds() > 180:
+            return {}
+        start = len(ordered) - 1
+        while start > 0:
+            if ordered[start] - ordered[start - 1] != timedelta(minutes=1):
+                break
+            start -= 1
+        stamps = ordered[start:]
+        if len(stamps) < 6:
+            return {}
+        rows = [observed[stamp] for stamp in stamps]
+        highs = [row[1] for row in rows]
+        lows = [row[2] for row in rows]
+        closes = [row[3] for row in rows]
+        volumes = [row[4] for row in rows]
+        features: dict[str, float | list[float]] = {
+            "completed_bar_timestamp": stamps[-1].timestamp(),
+            "verified_completed_bars": float(len(stamps)),
+            "price": closes[-1],
+            "close": closes[-1],
+            "price_series": closes[-16:],
+        }
+        if len(closes) >= 15:
+            atr = self._calculate_atr(highs, lows, closes, 14)
+            features["atr"] = atr
+            features["atr_bps"] = atr / closes[-1] * 10000.0
+        if len(closes) >= 21:
+            features["ema_fast"] = self._calculate_ema(closes, 9)
+            features["ema_slow"] = self._calculate_ema(closes, 21)
+        if len(closes) >= 28:
+            features["adx"] = self._calculate_adx(highs, lows, closes, 14)
+        if len(closes) >= 60:
+            broad = closes[-60:]
+            displacement = broad[-1] - broad[0]
+            travel = sum(abs(b - a) for a, b in zip(broad, broad[1:]))
+            features["broader_60bar_displacement_bps"] = displacement / broad[0] * 10000
+            if travel > 0:
+                features["broader_60bar_directional_efficiency"] = (
+                    abs(displacement) / travel
+                )
+        # An index has no directly traded volume. Only a traded futures
+        # contract can supply the corroborating volume ratio.
+        if (
+            symbol.upper().endswith("FUT")
+            and len(volumes) >= 21
+            and all(value > 0 for value in volumes[-21:])
+        ):
+            baseline = sum(volumes[-21:-1]) / 20
+            features["volume_spike_ratio"] = volumes[-1] / baseline
+        return features
 
     def get_indicators(
         self, symbol: str, names: Iterable[str] | None = None
@@ -2094,7 +2198,11 @@ class IndicatorEngine:
         adx = sum(dx_values[:period]) / period
         for value in dx_values[period:]:
             adx += (value - adx) / period
-        return float(adx)
+        # Wilder's formula is mathematically bounded; contain floating-point
+        # roundoff at the indicator owner instead of accepting invalid external ADX.
+        if not np.isfinite(adx):
+            raise ValueError("Non-finite ADX calculation")
+        return min(100.0, max(0.0, float(adx)))
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
         """Internal VWAP calculation.

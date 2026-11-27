@@ -9,6 +9,7 @@ Runtime role:
 - Must not select contracts or call broker instruments.
 - Raw regime safety denials block option signals even in adaptive mode;
   adaptive weighting is applied only after the canonical regime gate passes.
+  Preserve completed-bar identity and broader context through final admission.
 - get_regime_hard_block_count exposes the existing cumulative option-evaluation
   safety vetoes for accurate, read-only runner interval summaries.
 - can_evaluate_verified_reversal exposes an opt-in evaluation-only capability;
@@ -4406,6 +4407,21 @@ class StrategyManager(_BaseStrategyManager):
                 combined.metadata.setdefault("regime_effective", regime_name)
                 combined.metadata.setdefault("regime_raw", raw_regime_name)
                 combined.metadata.setdefault("regime_gate_allowed", regime_allowed)
+                combined.metadata.setdefault(
+                    "regime_completed_bar_timestamp", adjustments.get("completed_bar_timestamp")
+                )
+                combined.metadata.setdefault(
+                    "regime_broader_context",
+                    {
+                        key: adjustments.get(key)
+                        for key in (
+                            "verified_completed_bars",
+                            "atr_bps",
+                            "broader_60bar_displacement_bps",
+                            "broader_60bar_directional_efficiency",
+                        )
+                    },
+                )
                 combined.metadata.setdefault(
                     "regime_evidence_status", regime_decision_action
                 )
