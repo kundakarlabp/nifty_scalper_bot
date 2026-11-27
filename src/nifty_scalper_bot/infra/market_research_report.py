@@ -218,7 +218,8 @@ def _local_regime_minutes(
                 or stamp.microsecond != 0
                 or not 60 <= (decision - stamp).total_seconds() <= 150
                 or row.get("source") != "contiguous_session_futures_1m"
-                or type(atr_bps) not in (int, float)
+                or not isinstance(atr_bps, (int, float))
+                or isinstance(atr_bps, bool)
                 or not math.isfinite(atr_bps)
                 or atr_bps <= 0
             ):
@@ -254,7 +255,8 @@ def _local_regime_minutes(
                     stamp.tzinfo is not None
                     and stamp.astimezone(_IST).date() == prior_date
                     and row.get("source") == "contiguous_session_futures_1m"
-                    and type(value) in (int, float)
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
                     and math.isfinite(value)
                     and value > 0
                 ):
@@ -737,32 +739,32 @@ def _range_excursion_markouts(
             # path. A touch is not an option fill or a stop-adjusted outcome.
             target_reach: dict[str, Any] = {}
             direction = 1 if row["side"] == "CE" else -1
-            initial = original_future[previous][1] if fut is not None else None
+            initial = float(fut["entry_futures_price"]) if fut is not None else None
             for name, center in (
                 ("session_vwap", row.get("session_vwap")),
                 ("local_vwap", row.get("rolling_center")),
             ):
-                distance = (
-                    direction * (center - initial)
-                    if initial is not None
-                    and type(center) in (int, float)
+                distance: float | None = None
+                touch: float | None = None
+                if (
+                    initial is not None
+                    and isinstance(center, (int, float))
+                    and not isinstance(center, bool)
                     and math.isfinite(center)
                     and center > 0
-                    else None
-                )
-                touch = (
-                    next(
-                        (
-                            timestamp
-                            for timestamp, price in scoped_future
-                            if when < timestamp <= when + horizon
-                            and direction * (price - center) >= 0
-                        ),
-                        None,
-                    )
-                    if distance is not None and distance > 0
-                    else None
-                )
+                ):
+                    target = float(center)
+                    distance = direction * (target - initial)
+                    if distance > 0:
+                        touch = next(
+                            (
+                                timestamp
+                                for timestamp, price in scoped_future
+                                if when < timestamp <= when + horizon
+                                and direction * (price - target) >= 0
+                            ),
+                            None,
+                        )
                 target_reach[name] = {
                     "forward_distance_points": (
                         round(distance, 4) if distance is not None else None
