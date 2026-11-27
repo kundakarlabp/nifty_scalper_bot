@@ -410,3 +410,25 @@ def test_mismatched_traded_option_lots_still_fail_closed(tmp_path: Path) -> None
     )
     assert report["staged_days"] == 0
     assert report["rejections"] == {"historical_option_lot_size_mismatch": 1}
+
+def test_independent_eod_source_digest_blocks_tampered_contract_master(
+    tmp_path: Path,
+) -> None:
+    """Source-anchored EOD digest must be checked before writing research days."""
+    breeze, eod, summary = _sources(tmp_path)
+    provenance = json.loads(summary.read_text())
+    provenance["eod_reference_sha256"] = hashlib.sha256(eod.read_bytes()).hexdigest()
+    summary.write_text(json.dumps(provenance))
+    with sqlite3.connect(eod) as db:
+        db.execute("UPDATE contract_eod SET lot_size=25 WHERE kind='PE'")
+    with pytest.raises(ValueError, match="breeze_eod_reference_checksum_mismatch"):
+        run(
+            breeze,
+            eod,
+            tmp_path / "staged",
+            summary_path=summary,
+            expected_windows=1,
+            day="2025-02-04",
+            permit_partial=True,
+        )
+    assert not (tmp_path / "staged").exists()
