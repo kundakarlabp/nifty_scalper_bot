@@ -126,3 +126,9 @@ existing stronger configured threshold) survives final order repricing; the
 773-rupee ceiling is unchanged. Do not arm this new route without cost-aware
 chronological evidence. Existing clock-matched prior-session ATR research is
 not a calibrated live threshold; hard volatility thresholds remain binding.
+
+Independent volatility-hazard confidence is gated even when the directional
+score wins classification. The ATR point thresholds are additionally scaled
+against an explicit 25,000-index reference (equivalent to 4.8/8.8/14 bps),
+without reducing the original point-based protection. This is a conservative
+normalisation convention, not empirically optimised time-of-day thresholds.
