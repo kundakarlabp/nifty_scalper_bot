@@ -2,7 +2,11 @@
 
 Responsibilities: classify trend, range, high-volatility, event and low-activity
 conditions from corroborated market inputs; publish timestamped snapshots
-with completed-bar evidence identity when supplied by the canonical manager.
+with completed-bar evidence identity and broad context when supplied by the
+canonical manager. Canonical ADX is 0–100; legacy trend_score ratios are explicit.
+Independent volatility hazard cannot be hidden by a higher directional score.
+Intermediate ADX structural candidates are exposed separately for research;
+completed spot reference prices carry the existing normalized event threshold.
 The lightweight runner classifier is diagnostic only, not a live entry authority.
 
 Safety: missing evidence stays UNKNOWN, quiet volume alone never licenses
@@ -11,6 +15,7 @@ mean reversion, and caller-owned entry/risk guards remain authoritative.
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -114,6 +119,8 @@ class RegimeParameters:
     price_momentum_event: float = 0.007
     event_signal_threshold: float = 0.6
     realized_vol_event_threshold: float = 45.0
+    # Preserve positional compatibility and the original point-based floor.
+    atr_reference_index_level: float = 25000.0
 
 
 class MarketRegimeDetector:
@@ -343,7 +350,13 @@ class MarketRegimeDetector:
             params = self._params
             ema_fast = self._extract_float(indicators, ("ema_fast", "ema_12"))
             ema_slow = self._extract_float(indicators, ("ema_slow", "ema_26"))
-            trend_score = self._extract_float(indicators, ("trend_score", "adx"))
+            trend_score = self._extract_float(indicators, ("adx",))
+            if trend_score is None:
+                legacy_score = self._extract_float(indicators, ("trend_score",))
+                if legacy_score is not None:
+                    trend_score = (
+                        legacy_score * 100.0 if 0 <= legacy_score <= 1 else legacy_score
+                    )
             atr = self._extract_float(indicators, ("atr", "atr_14"))
             volume_ratio = self._extract_float(indicators, ("volume_ratio",))
             iv_rank = self._extract_float(indicators, ("iv_rank", "iv_percentile"))
@@ -381,10 +394,17 @@ class MarketRegimeDetector:
                         ("ema_slow", "ema_26", "slow_ema"),
                     )
                 if trend_score is None:
-                    trend_score = self._snapshot_float(
-                        snapshot,
-                        ("trend_score", "adx", "trend_strength"),
-                    )
+                    trend_score = self._snapshot_float(snapshot, ("adx",))
+                    if trend_score is None:
+                        legacy_score = self._snapshot_float(
+                            snapshot, ("trend_score", "trend_strength")
+                        )
+                        if legacy_score is not None:
+                            trend_score = (
+                                legacy_score * 100.0
+                                if 0 <= legacy_score <= 1
+                                else legacy_score
+                            )
                 if volume_ratio is None:
                     volume_ratio = self._snapshot_float(
                         snapshot,
@@ -427,13 +447,43 @@ class MarketRegimeDetector:
                         snapshot,
                         ("event_score", "event_flag", "event_signal"),
                     )
+            # Invalid physical values cannot become quiet-range evidence.
+            atr = atr if atr is not None and atr > 0 else None
+            price = price if price is not None and price > 0 else None
+            ema_fast = ema_fast if ema_fast is not None and ema_fast > 0 else None
+            ema_slow = ema_slow if ema_slow is not None and ema_slow > 0 else None
+            volume_ratio = (
+                volume_ratio if volume_ratio is not None and volume_ratio >= 0 else None
+            )
+            event_signal = (
+                event_signal
+                if event_signal is not None and 0 <= event_signal <= 1
+                else None
+            )
+            effective_atr = atr
+            verified_bars = self._extract_float(
+                indicators, ("verified_completed_bars",)
+            )
+            evidence_at = self._extract_float(indicators, ("completed_bar_timestamp",))
+            if (
+                verified_bars is not None
+                and verified_bars >= 6
+                and evidence_at is not None
+                and evidence_at > 0
+                and atr is not None
+                and price is not None
+                and math.isfinite(params.atr_reference_index_level)
+                and params.atr_reference_index_level > 0
+            ):
+                # Never weaken the existing point-based volatility protection.
+                effective_atr = max(atr, atr * params.atr_reference_index_level / price)
             price_momentum = self._price_momentum(price, price_series)
-            regime, confidence, reason = self._classify(
+            regime, confidence, reason, volatility_risk = self._classify(
                 params,
                 ema_fast=ema_fast,
                 ema_slow=ema_slow,
                 trend_score=trend_score,
-                atr=atr,
+                atr=effective_atr,
                 volume_ratio=volume_ratio,
                 iv_rank=iv_rank,
                 event_signal=event_signal,
@@ -441,11 +491,72 @@ class MarketRegimeDetector:
                 realized_vol=realized_vol,
             )
             adjustments = self._build_adjustments(regime)
-            # Evaluation time is not the identity of the underlying evidence.
-            if "completed_bar_timestamp" in indicators:
-                adjustments["completed_bar_timestamp"] = self._extract_float(
-                    indicators, ("completed_bar_timestamp",)
+            adjustments["volatility_risk_confidence"] = volatility_risk
+            adjustments["effective_atr_reference_points"] = effective_atr
+            adjustments["completed_reference_price"] = price
+            adjustments["intrabar_event_move_points"] = (
+                min(
+                    params.atr_event_threshold,
+                    params.atr_event_threshold
+                    * price
+                    / params.atr_reference_index_level,
                 )
+                if price is not None and params.atr_reference_index_level > 0
+                else params.atr_event_threshold
+            )
+            # Candidate classification does not change live admission. Use
+            # only independently verified completed 30-bar structure.
+            efficiency = self._extract_float(
+                indicators, ("local_30bar_directional_efficiency",)
+            )
+            displacement = self._extract_float(
+                indicators, ("local_30bar_displacement_atr",)
+            )
+            crossings = self._extract_float(
+                indicators, ("local_30bar_center_crossings",)
+            )
+            adx = self._normalise_adx(trend_score)
+            candidate = None
+            if (
+                regime == "unknown"
+                and verified_bars is not None
+                and verified_bars >= 30
+                and evidence_at is not None
+                and evidence_at > 0
+                and adx is not None
+                and params.adx_chop_threshold < adx < params.adx_trend_threshold
+                and effective_atr is not None
+                and effective_atr < params.atr_volatile_threshold
+                and efficiency is not None
+                and 0 <= efficiency <= 1
+                and displacement is not None
+                and crossings is not None
+            ):
+                if efficiency <= 0.25 and abs(displacement) <= 1.5 and crossings >= 3:
+                    candidate = "RANGE"
+                elif (
+                    efficiency >= 0.60
+                    and abs(displacement) >= 2.0
+                    and ema_fast is not None
+                    and ema_slow is not None
+                    and (ema_fast - ema_slow) * displacement > 0
+                ):
+                    candidate = "TREND"
+            adjustments["shadow_transition_candidate"] = candidate
+            # Evaluation time is not the identity of the underlying evidence.
+            for key in (
+                "completed_bar_timestamp",
+                "verified_completed_bars",
+                "volume_ratio",
+                "atr_bps",
+                "broader_60bar_displacement_bps",
+                "broader_60bar_directional_efficiency",
+                "local_30bar_directional_efficiency",
+                "local_30bar_displacement_atr",
+                "local_30bar_center_crossings",
+            ):
+                if key in indicators:
+                    adjustments[key] = self._extract_float(indicators, (key,))
             display_regime = adjustments.get("display_regime")
             snapshot_obj = RegimeSnapshot(
                 symbol=symbol,
@@ -664,7 +775,9 @@ class MarketRegimeDetector:
             updated_raw = payload.get("updated_at")
             updated_at = time.time()
             coerced_updated = MarketRegimeDetector._coerce_float(updated_raw)
-            if coerced_updated is not None:
+            if updated_raw is not None:
+                if coerced_updated is None:
+                    return None
                 updated_at = coerced_updated
             adjustments: Dict[str, object] = {}
             raw_adjustments = payload.get("adjustments")
@@ -742,6 +855,8 @@ class MarketRegimeDetector:
                 if value is None:
                     indicators[key] = None
                     continue
+                if isinstance(value, bool) and key != "event_flag":
+                    continue
                 coerced = self._coerce_indicator_value(value)
                 if coerced is not None:
                     indicators[key] = coerced
@@ -777,24 +892,20 @@ class MarketRegimeDetector:
         if isinstance(value, bool):
             return 1.0 if value else 0.0
         if isinstance(value, (int, float)):
-            return float(value)
+            return float(value) if math.isfinite(value) else None
         if isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
         ):
             normalised: list[float] = []
             for item in value:
-                if isinstance(item, (int, float, bool)):
-                    normalised.append(float(item))
-                    continue
-                try:
-                    normalised.append(float(item))  # type: ignore[arg-type]
-                except (TypeError, ValueError):
+                if isinstance(item, bool):
                     return None
+                number = MarketRegimeDetector._coerce_float(item)
+                if number is None:
+                    return None
+                normalised.append(number)
             return tuple(normalised)
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
+        return MarketRegimeDetector._coerce_float(value)
 
     @staticmethod
     def _tick_symbol(tick: Mapping[str, object]) -> str:
@@ -1115,8 +1226,8 @@ class MarketRegimeDetector:
         event_signal: float | None,
         price_momentum: float | None,
         realized_vol: float | None,
-    ) -> tuple[str, float, str]:
-        """Return ``(regime, confidence, reason)`` for the current context.
+    ) -> tuple[str, float, str, float]:
+        """Return the regime and independent volatility hazard confidence.
 
         Args:
             params: Tunable thresholds guiding the classification logic.
@@ -1148,7 +1259,7 @@ class MarketRegimeDetector:
             and price_momentum is None
             and realized_vol is None
         ):
-            return "unknown", 0.0, "insufficient_regime_features"
+            return "unknown", 0.0, "insufficient_regime_features", 0.0
 
         scores, reasons = self._compute_feature_scores(
             params,
@@ -1169,18 +1280,18 @@ class MarketRegimeDetector:
             and (iv_rank - realized_pct) >= params.iv_realized_gap_event
         ):
             confidence = min(1.0, 0.75 + (iv_rank - realized_pct) / 120.0)
-            return "event", round(confidence, 4), "iv_realized_gap"
+            return "event", round(confidence, 4), "iv_realized_gap", 0.0
 
         if event_signal is not None and event_signal >= params.event_signal_threshold:
             confidence = min(
                 1.0,
                 0.75 + (event_signal - params.event_signal_threshold) * 0.25,
             )
-            return "event", round(confidence, 4), "event_signal_triggered"
+            return "event", round(confidence, 4), "event_signal_triggered", 0.0
 
         if atr is not None and atr >= params.atr_event_threshold:
             confidence = min(1.0, 0.75 + (atr - params.atr_event_threshold) / 60.0)
-            return "event", round(confidence, 4), "atr_event_threshold"
+            return "event", round(confidence, 4), "atr_event_threshold", 0.0
 
         if (
             (volume is not None and volume >= params.volume_event_multiple)
@@ -1197,11 +1308,11 @@ class MarketRegimeDetector:
                 )
                 * 0.12,
             )
-            return "event", round(confidence, 4), "volume_price_spike"
+            return "event", round(confidence, 4), "volume_price_spike", 0.0
 
         if scores.get("event", 0.0) >= 1.0:
             confidence = min(1.0, 0.72 + min(scores["event"], 2.5) * 0.12)
-            return "event", round(confidence, 4), reasons["event"]
+            return "event", round(confidence, 4), reasons["event"], 0.0
 
         volatile_score = scores.get("volatile", 0.0)
         if atr is not None and atr >= params.atr_volatile_threshold:
@@ -1246,6 +1357,20 @@ class MarketRegimeDetector:
             )
             reasons["trend"] = "ema_divergence"
 
+        # Volume is corroboration, not evidence of directional movement.
+        trend_proven = bool(
+            (adx_norm is not None and adx_norm >= params.adx_trend_threshold)
+            or (momentum is not None and momentum >= params.price_momentum_trend)
+            or (
+                ema_fast is not None
+                and ema_slow is not None
+                and ema_slow > 0
+                and abs(ema_fast - ema_slow) / ema_slow >= params.ema_ratio_trend
+            )
+        )
+        if not trend_proven:
+            trend_score_value = 0.0
+
         range_score_value = scores.get("range", 0.0)
         if (
             atr is not None
@@ -1272,7 +1397,7 @@ class MarketRegimeDetector:
                 or realized_pct < params.realized_vol_calm_threshold
             )
         ):
-            return "low_activity", 0.65, "low_volume_flat_trend_confirmed"
+            return "low_activity", 0.65, "low_volume_flat_trend_confirmed", 0.0
 
         scored = {
             "volatile": volatile_score,
@@ -1287,7 +1412,7 @@ class MarketRegimeDetector:
             ema_fast is not None
             and ema_slow is not None
             and ema_slow != 0
-            and abs((ema_fast - ema_slow) / abs(ema_slow)) < params.ema_ratio_trend
+            and abs((ema_fast - ema_slow) / abs(ema_slow)) < params.ema_ratio_flat
         )
         range_proven = bool(
             adx_norm is not None
@@ -1298,7 +1423,7 @@ class MarketRegimeDetector:
             )
         )
         if regime == "range" and not range_proven:
-            return "unknown", 0.0, "range_evidence_unverified"
+            return "unknown", 0.0, "range_evidence_unverified", 0.0
         reason = reasons.get(regime, "insufficient_features")
 
         base_confidence = {"volatile": 0.62, "trend": 0.6, "range": 0.55}
@@ -1306,7 +1431,12 @@ class MarketRegimeDetector:
         intensity = min(max(scored.get(regime, 0.0), 0.0), 3.0)
         confidence = base_confidence[regime] + intensity * multiplier[regime]
         confidence = min(1.0, confidence)
-        return regime, round(confidence, 4), reason
+        volatility_risk = (
+            round(min(1.0, 0.62 + 0.12 * min(volatile_score, 3.0)), 4)
+            if volatile_score >= 1.0
+            else 0.0
+        )
+        return regime, round(confidence, 4), reason, volatility_risk
 
     @staticmethod
     def _extract_float(
@@ -1328,13 +1458,20 @@ class MarketRegimeDetector:
 
         for key in keys:
             value = indicators.get(key)
-            if isinstance(value, (int, float)):
+            if isinstance(value, bool):
+                if key == "event_flag":
+                    return float(value)
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(value):
                 return float(value)
-            if isinstance(value, Sequence):
-                if value:
-                    head = value[0]
-                    if isinstance(head, (int, float)):
-                        return float(head)
+            if isinstance(value, Sequence) and value:
+                head = value[0]
+                if (
+                    isinstance(head, (int, float))
+                    and not isinstance(head, bool)
+                    and math.isfinite(head)
+                ):
+                    return float(head)
         return None
 
     @staticmethod
@@ -1358,11 +1495,14 @@ class MarketRegimeDetector:
         for key in keys:
             value = indicators.get(key)
             if isinstance(value, Sequence):
-                numeric = [
-                    float(item) for item in value if isinstance(item, (int, float))
-                ]
-                if numeric:
-                    return numeric
+                if value and all(
+                    isinstance(item, (int, float))
+                    and not isinstance(item, bool)
+                    and math.isfinite(item)
+                    and item > 0
+                    for item in value
+                ):
+                    return [float(item) for item in value]
         return []
 
     @staticmethod
@@ -1382,18 +1522,12 @@ class MarketRegimeDetector:
         if value is None:
             return None
         if isinstance(value, bool):
-            return 1.0 if value else 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return None
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
             return None
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
 
     @staticmethod
     def _snapshot_float(
@@ -1443,11 +1577,14 @@ class MarketRegimeDetector:
         for key in keys:
             value = snapshot.get(key)
             if isinstance(value, Sequence):
-                numeric = [
-                    float(item) for item in value if isinstance(item, (int, float))
-                ]
-                if numeric:
-                    return numeric
+                if value and all(
+                    isinstance(item, (int, float))
+                    and not isinstance(item, bool)
+                    and math.isfinite(item)
+                    and item > 0
+                    for item in value
+                ):
+                    return [float(item) for item in value]
         return []
 
     @staticmethod
@@ -1478,10 +1615,10 @@ class MarketRegimeDetector:
 
     @staticmethod
     def _normalise_adx(value: float | None) -> float | None:
-        """Return ADX on a 0-100 scale regardless of the input range.
+        """Validate ADX in its canonical 0-100 domain.
 
         Args:
-            value: Raw ADX measurement, e.g. 0-1 ratio or 0-100 reading.
+            value: Canonical ADX measurement on a 0-100 scale.
 
         Returns:
             Normalised ADX value on a 0-100 scale or ``None`` when invalid.
@@ -1493,13 +1630,7 @@ class MarketRegimeDetector:
         if value is None:
             return None
         adx_value = float(value)
-        if adx_value < 0.0:
-            return None
-        if adx_value <= 1.0:
-            return max(0.0, adx_value * 100.0)
-        if adx_value > 100.0:
-            return 100.0
-        return adx_value
+        return adx_value if math.isfinite(adx_value) and 0 <= adx_value <= 100 else None
 
     @staticmethod
     def _normalise_vol(value: float | None) -> float | None:
@@ -1518,7 +1649,7 @@ class MarketRegimeDetector:
         if value is None:
             return None
         vol = float(value)
-        if vol < 0:
+        if not math.isfinite(vol) or vol < 0:
             return None
         if vol <= 1.0:
             return vol * 100.0

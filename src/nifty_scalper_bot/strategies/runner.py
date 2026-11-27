@@ -33,6 +33,7 @@ Runtime role:
   the selected candidate or lacks finite, same-contract entry/exit geometry.
 - Pins each live candidate decision to one active basket generation and reports
   the last terminal execution rejection without relaxing quote or risk checks.
+- Rechecks the canonical regime gate immediately before live entry submission.
 - Gap repair imports observed cached bars only; never invents missing
   futures/spot minutes from a prior close.
 
@@ -20819,6 +20820,38 @@ class StrategyRunner:
                             "candidate_basket_version": candidate_contract_generation.basket_version,
                             "current_basket_version": before_submit_generation.basket_version,
                             "order_symbol": order_symbol,
+                        },
+                    )
+            # A queued candidate may outlive its original market regime.
+            # Reuse the same manager gate, not a second classifier or risk owner.
+            regime_manager = getattr(
+                getattr(self, "_strategy_manager", None), "_regime_manager", None
+            )
+            if is_live_mode and (
+                str(execution_mode).upper() == "LIVE" or regime_manager is not None
+            ):
+                gate_reasons = ()
+                try:
+                    regime_allowed = regime_manager is not None and regime_manager.can_trade(
+                        context={"component": "runner_before_submit", "symbol": order_symbol},
+                        record_decision=False,
+                        expected_regime=metadata.get("regime_effective") or "UNKNOWN",
+                        expected_completed_bar_timestamp=metadata.get(
+                            "regime_completed_bar_timestamp"
+                        ),
+                    )
+                    if regime_manager is not None:
+                        gate_reasons = tuple(regime_manager.get_filter_reasons())
+                except Exception as exc:
+                    self._logger.error("Final regime revalidation failed: %s", exc)
+                    regime_allowed = False
+                if not regime_allowed:
+                    return _reject_after_dedup(
+                        reason="regime_changed_or_unavailable_before_submit",
+                        details={
+                            "stage": "before_submit",
+                            "broker_attempted": False,
+                            "gate_reasons": gate_reasons,
                         },
                     )
             submit_result_fn = getattr(

@@ -1352,3 +1352,54 @@ def test_range_guard_does_not_authorize_memory_only_write(
     strategy._seen.add("range_session_vwap:NFO:NIFTY26NOVFUT:CE:test")
     strategy._consumed_excursions.add((FUTURE, "CE", "2026-11-18"))
     assert not strategy._persist_guard()
+
+
+def test_nested_range_requires_aligned_canonical_spot_and_futures(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LOCAL_TREND_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    strategy = RangeVWAPReclaimStrategy(
+        RangeVWAPReclaimStrategyConfig(), History(bars())
+    )
+    context = indicators(
+        regime="TREND",
+        regime_raw="TREND",
+        regime_stable="TREND",
+        regime_gate_allowed=True,
+        regime_transition_pending=False,
+    )
+    strategy._evaluate_signal(OPTION, context, 100.0)
+    assert strategy.last_no_vote_reason == "range_durable_setup_guard_unavailable"
+    monkeypatch.setattr(strategy, "_load_persistent_guard", lambda _at: True)
+    strategy._evaluate_signal(OPTION, context, 100.0)
+    assert strategy.last_no_vote_reason == "range_local_trend_structure_unconfirmed"
+    context["regime_raw"] = "RANGE"
+    strategy._evaluate_signal(OPTION, context, 100.0)
+    reason = "range_local_trend_canonical_evidence_unconfirmed"
+    assert strategy.last_no_vote_reason == reason
+
+
+def test_weekly_selected_option_reaches_existing_range_observer(caplog) -> None:
+    weekly = "NFO:NIFTY26D0125700CE"
+    history = History(bars())
+    strategy = RangeVWAPReclaimStrategy(RangeVWAPReclaimStrategyConfig(), history)
+    context = indicators(
+        selected_ce=weekly,
+        is_selected_option=False,
+        regime="TREND",
+        regime_raw="trend",
+        regime_gate_allowed=True,
+    )
+    with caplog.at_level("INFO"):
+        strategy.observe_research_excursion(
+            weekly, context, blocked_reason="strategy_regime_ineligible"
+        )
+    assert history.calls == 1
+    assert any("RANGE_VWAP_LOCAL_REGIME " in r.message for r in caplog.records)
+    records = strategy.get_research_snapshot()["opportunities"]
+    assert len(records) == 1
+    assert records[0]["symbol"] == weekly

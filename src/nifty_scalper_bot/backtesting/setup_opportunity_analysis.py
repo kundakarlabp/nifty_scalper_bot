@@ -335,6 +335,7 @@ def canonicalize_range_excursions(
                 "regime": first.get("regime"),
                 "regime_raw": first.get("regime_raw"),
                 "regime_gate_allowed": first.get("regime_gate_allowed"),
+                "shadow_transition_candidate": first.get("shadow_transition_candidate"),
                 "local_range_candidate": first.get("local_range_candidate"),
                 "local_range_state": first.get("local_range_state"),
                 "local_range_evidence_fraction": first.get(

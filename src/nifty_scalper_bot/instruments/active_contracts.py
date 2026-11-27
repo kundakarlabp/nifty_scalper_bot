@@ -1,5 +1,6 @@
 """Runtime role:
-- Parsing/canonicalization utilities for active contract diagnostics.
+- Parsing/canonicalization utilities for active contract diagnostics, including
+  exchange weekly numeric/month-code and monthly option symbols.
 - Runtime active contract selection belongs to InstrumentManager.
 - The bounded live universe can prefer OTM strikes at equal ATM distance.
 - Must not derive live futures from selected options."""
@@ -18,6 +19,10 @@ from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
 NIFTY_FUT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$")
 NIFTY_OPT_RE = re.compile(
     r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$"
+)
+NIFTY_WEEKLY_OPT_RE = re.compile(
+    r"^NIFTY(?P<yy>\d{2})(?P<month>[1-9OND])(?P<day>\d{2})"
+    r"(?P<strike>\d{4,6})(?P<side>CE|PE)$"
 )
 MONTH_ABBR_TO_NUM = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
 IST = ZoneInfo("Asia/Kolkata")
@@ -67,8 +72,23 @@ def canonical_nifty_option_symbol(symbol: Any) -> str | None:
     if not canonical or ":" not in canonical:
         return None
     exchange, tradingsymbol = canonical.split(":", 1)
-    if exchange != "NFO" or not NIFTY_OPT_RE.fullmatch(tradingsymbol):
+    if exchange != "NFO":
         return None
+    if NIFTY_OPT_RE.fullmatch(tradingsymbol):
+        return f"NFO:{tradingsymbol}"
+    weekly = NIFTY_WEEKLY_OPT_RE.fullmatch(tradingsymbol)
+    if weekly is None:
+        return None
+    try:
+        date(
+            2000 + int(weekly["yy"]),
+            "123456789OND".index(weekly["month"]) + 1,
+            int(weekly["day"]),
+        )
+    except ValueError:
+        return None
+    # Syntax only. Actual expiry, lot, token and live eligibility still
+    # belong to broker instrument metadata and the existing execution gates.
     return f"NFO:{tradingsymbol}"
 
 
@@ -177,8 +197,13 @@ def derive_nifty_future_from_selected_options(
     months = set()
     for symbol in [s for s in symbols if s]:
         match = NIFTY_OPT_RE.fullmatch(symbol.split(":", 1)[1])
-        if match:
-            months.add(f"{match.group('yy')}{match.group('mon')}")
+        if match is None:
+            return ActiveFutureResolution(
+                None,
+                "selected_options",
+                reason="weekly_option_requires_instrument_master",
+            )
+        months.add(f"{match.group('yy')}{match.group('mon')}")
     if len(months) != 1:
         return ActiveFutureResolution(
             None,

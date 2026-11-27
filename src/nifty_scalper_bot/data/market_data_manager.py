@@ -15,6 +15,7 @@ Runtime role:
   drains bounded ordered batches on a dedicated serial worker rather than the
   shared asyncio executor, and exports bounded latency percentiles (worker
   dispatch/await samples are per batch; individual tick samples remain per tick).
+- Restricts replay capture to the exchange session, without gating live quotes.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -10221,6 +10222,11 @@ class MarketDataManager:
                 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
                 now = datetime.now(timezone.utc)
+                # Post-close quote refreshes must not mutate the session tape
+                # while postmarket analysis is reading it. This is a capture-only
+                # boundary; tick delivery and protective management are unchanged.
+                if get_market_session_state(now) not in {"preopen", "open"}:
+                    return
                 if self._replay_archive is None:
                     # Buffer bursts without blocking the live tick path. The
                     # session ceiling is bounded/configurable; exceeding it
