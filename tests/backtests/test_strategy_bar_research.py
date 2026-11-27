@@ -2910,6 +2910,7 @@ def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     assert comparison["promotion_eligible"] is False
     assert report["selection"]["promotion_eligible"] is False
 
+
 def test_completed_underlying_bars_are_fresh_even_without_direction(
     tmp_path, monkeypatch
 ):
