@@ -8,6 +8,7 @@ research, while preserving the existing structural decisions,
 regime-stratified minute-sampled rejections, cost/MAE labels and option volume
 parity evidence. Range admission cohorts distinguish observed markouts from
 risk-verified outcomes and are mirrored in bounded archive telemetry.
+Independent rolling-VWAP reclaims are separate from session-VWAP excursions.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
@@ -839,6 +840,7 @@ def _range_excursion_markouts(
             outcomes.append(
                 {
                     "excursion_id": row["excursion_id"],
+                    "excursion_basis": row.get("excursion_basis", "session_vwap"),
                     "frozen_vwap_target_reach": target_reach,
                     "first_seen_ts": when,
                     "futures_contract": future,
@@ -866,6 +868,9 @@ def _range_excursion_markouts(
                     "shadow_confirmed_local_range_in_trend_candidate": (
                         row.get("local_range_confirmed_in_trend") is True
                         and first_rejection == "strategy_regime_ineligible"
+                    ),
+                    "shadow_rolling_vwap_only_candidate": (
+                        row.get("excursion_basis") == "rolling_vwap"
                     ),
                     "shadow_unknown_local_range_candidate": shadow_unknown_reclaim,
                     "shadow_unknown_session_reclaim_candidate": (
@@ -903,6 +908,7 @@ def _range_excursion_markouts(
             "shadow_confirmed_local_range_in_trend_candidate",
         ),
         ("shadow_unknown_local_range", "shadow_unknown_local_range_candidate"),
+        ("shadow_rolling_vwap_only", "shadow_rolling_vwap_only_candidate"),
         (
             "shadow_unknown_session_reclaim",
             "shadow_unknown_session_reclaim_candidate",
