@@ -358,9 +358,29 @@ def test_adaptive_regime_mode_cannot_override_explicit_canonical_veto() -> None:
     )
     manager._use_regime_adaptive = True
 
-    assert manager.generate_signal("NFO:NIFTY26NOV25700CE", 100.0) is None
+    symbol = "NFO:NIFTY26NOV25700CE"
+    assert manager.generate_signal(symbol, 100.0, trace_id="regime-denial") is None
     assert manager._observability_counters["signals_blocked_by_regime"] == 1
     assert manager._observability_counters["regime_gate_denials_observed"] == 1
+    decision = manager.get_last_no_signal_decision(symbol)
+    assert decision is not None
+    assert decision.category == "strategy_regime_blocked"
+    assert decision.reason == "regime_unknown"
+    assert decision.final_block_reason == "regime_gate_block"
+    assert decision.trace_id == "regime-denial"
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._strategy_manager = manager
+    assert runner._classify_no_trade_decision(
+        symbol=symbol,
+        signal=None,
+        indicators_ctx={},
+        option_count=100,
+        option_required=20,
+        trace_id="regime-denial",
+    ) == ("strategy_regime_blocked", "regime_unknown")
 
 
 def test_regime_provider_failure_never_generates_option_signal() -> None:
@@ -373,8 +393,14 @@ def test_regime_provider_failure_never_generates_option_signal() -> None:
     )
     manager._use_regime_adaptive = True
 
-    assert manager.generate_signal("NFO:NIFTY26NOV25700CE", 100.0) is None
+    symbol = "NFO:NIFTY26NOV25700CE"
+    assert manager.generate_signal(symbol, 100.0, trace_id="regime-error") is None
     assert manager._observability_counters["signals_blocked_by_regime"] == 1
+    decision = manager.get_last_no_signal_decision(symbol)
+    assert decision is not None
+    assert decision.category == "strategy_error"
+    assert decision.reason == "regime_gate_error"
+    assert decision.trace_id == "regime-error"
 
 
 def test_canonical_regime_denial_still_observes_selected_contract() -> None:
