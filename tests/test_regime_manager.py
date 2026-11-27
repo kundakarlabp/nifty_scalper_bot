@@ -367,7 +367,5 @@ def test_missing_candle_identity_cannot_confirm_directional_transition() -> None
             )
         )
     assert manager.get_current_regime() == "trend"
-    manager.ingest_snapshot(
-        RegimeSnapshot("NIFTY", "event", 0.99, "shock", now + 0.04)
-    )
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "event", 0.99, "shock", now + 0.04))
     assert manager.get_current_regime() == "event"
