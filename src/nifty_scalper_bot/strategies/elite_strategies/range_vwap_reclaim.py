@@ -977,7 +977,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
         local_key = (future, "LOCAL")
         if bar_stamp and structural.get("local_range_state") is not None:
             with self._guard_lock:
-                new_local_bar = self._research_observed_minute.get(local_key) != bar_stamp
+                new_local_bar = (
+                    self._research_observed_minute.get(local_key) != bar_stamp
+                )
                 if new_local_bar:
                     self._research_observed_minute[local_key] = bar_stamp
             if new_local_bar:
@@ -991,7 +993,9 @@ class RangeVWAPReclaimStrategy(EliteStrategy):  # type: ignore[misc]
                             "bar_timestamp": bar_stamp,
                             "regime": str(indicators.get("regime") or "UNKNOWN"),
                             "regime_raw": indicators.get("regime_raw"),
-                            "regime_gate_allowed": indicators.get("regime_gate_allowed"),
+                            "regime_gate_allowed": indicators.get(
+                                "regime_gate_allowed"
+                            ),
                             "regime_transition_pending": indicators.get(
                                 "regime_transition_pending"
                             ),
