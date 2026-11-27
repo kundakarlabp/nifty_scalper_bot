@@ -2909,3 +2909,54 @@ def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     assert comparison["selected_for_live"] is None
     assert comparison["promotion_eligible"] is False
     assert report["selection"]["promotion_eligible"] is False
+
+
+def test_completed_underlying_bars_are_fresh_even_without_direction(
+    tmp_path, monkeypatch
+):
+    """A neutral direction estimate is not evidence that a completed bar is stale."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        IndicatorEngine,
+        RuntimeStrategyManager,
+        _research_orb_structural_context,
+        load_archive,
+    )
+
+    first = archive(tmp_path)
+    histories, _, _ = load_archive(tmp_path)
+    engine = IndicatorEngine()
+    for symbol in ("NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"):
+        engine.ingest_historical_bar(symbol, histories[symbol][first])
+    monkeypatch.setattr(
+        RuntimeStrategyManager,
+        "_derive_context_direction",
+        lambda *args, **kwargs: (None, 0.0, ["neutral_completed_minute"]),
+    )
+    context = _research_orb_structural_context(
+        engine,
+        spot_symbol="NSE:NIFTY 50",
+        futures_symbol="NFO:NIFTY26OCTFUT",
+    )
+    assert context["underlying_direction_bias"] is None
+    assert context["context_fresh"] is True
+    assert context["context_age_seconds"] == 0.0
+
+
+def test_missing_underlying_history_remains_stale_in_research(tmp_path):
+    """Do not manufacture freshness when one completed underlying stream is absent."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        IndicatorEngine,
+        _research_orb_structural_context,
+        load_archive,
+    )
+
+    first = archive(tmp_path)
+    histories, _, _ = load_archive(tmp_path)
+    engine = IndicatorEngine()
+    engine.ingest_historical_bar("NSE:NIFTY 50", histories["NSE:NIFTY 50"][first])
+    context = _research_orb_structural_context(
+        engine,
+        spot_symbol="NSE:NIFTY 50",
+        futures_symbol="NFO:NIFTY26OCTFUT",
+    )
+    assert context["context_fresh"] is False
