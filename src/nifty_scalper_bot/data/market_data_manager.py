@@ -7159,9 +7159,7 @@ class MarketDataManager:
             except (TypeError, ValueError):
                 raw_mb = 512
             try:
-                normalized_mb = int(
-                    os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024")
-                )
+                normalized_mb = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
             except (TypeError, ValueError):
                 normalized_mb = 1024
             raw_mb = max(128, min(1024, raw_mb))
@@ -7210,9 +7208,7 @@ class MarketDataManager:
                     self._raw_ingress_capture_errors += 1
                     return
                 observed = datetime.now(timezone.utc)
-                day = (
-                    observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
-                )
+                day = observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
                 if self._raw_ingress_day != day:
                     archive.record(
                         "snapshot",
@@ -7222,9 +7218,7 @@ class MarketDataManager:
                     self._raw_ingress_day = day
 
                 raw_token = raw.get("instrument_token") or raw.get("token")
-                if not isinstance(raw_token, (int, str)) or isinstance(
-                    raw_token, bool
-                ):
+                if not isinstance(raw_token, (int, str)) or isinstance(raw_token, bool):
                     raise ValueError("raw_ingress_invalid_token")
                 token = int(raw_token)
                 if token <= 0:
