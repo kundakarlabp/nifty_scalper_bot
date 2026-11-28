@@ -34,8 +34,8 @@ Runtime role:
 - Pins each live candidate decision to one active basket generation and reports
   the last terminal execution rejection without relaxing quote or risk checks.
 - Rechecks the canonical regime gate immediately before live entry submission.
-- Gap repair imports observed cached bars only; never invents missing
-  futures/spot minutes from a prior close.
+- Gap repair imports complete, valid observed cached bars only; never invents
+  OHLCV fields. Canonical catch-up expands the bounded tail after interruptions.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -6795,47 +6795,52 @@ class StrategyRunner:
             0.0,
             (incoming_bar.timestamp - previous_bar.timestamp).total_seconds(),
         )
-        upper_symbol = symbol.upper()
-        # Sparse option contracts can legitimately pause for a few minutes between prints.
-        if ("CE" in upper_symbol or "PE" in upper_symbol) and gap_seconds < 180.0:
-            return repaired
         if gap_seconds <= 180.0:
             return repaired
-        expected = previous_bar.timestamp + timedelta(minutes=1)
-        history_cache = self._load_history_cache(symbol)
+        # Iterate observed cache rows rather than every elapsed wall-clock
+        # minute (overnight/weekend gaps may be thousands of minutes).
         cache_by_minute: dict[datetime, dict[str, Any]] = {}
-        for row in history_cache:
+        for row in self._load_history_cache(symbol):
             row_ts = row.get("timestamp")
-            if not isinstance(row_ts, datetime):
+            if (
+                not isinstance(row_ts, datetime)
+                or row_ts.tzinfo is None
+                or row_ts.second
+                or row_ts.microsecond
+                or row.get("is_complete") is False
+                or row.get("is_provisional")
+                or row.get("provisional")
+                or row.get("synthetic")
+            ):
                 continue
-            ts_utc = row_ts.astimezone(timezone.utc).replace(second=0, microsecond=0)
-            cache_by_minute[ts_utc] = row
+            ts_utc = row_ts.astimezone(timezone.utc)
+            if previous_bar.timestamp < ts_utc < incoming_bar.timestamp:
+                cache_by_minute[ts_utc] = row
 
-        is_option_symbol = upper_symbol.endswith("CE") or upper_symbol.endswith("PE")
-        prev_close = float(previous_bar.close)
-        while expected < incoming_bar.timestamp:
-            row = cache_by_minute.get(expected)
-            if row:
-                close = float(row.get("close") or prev_close)
-                repaired_bar = OneMinuteBar(
-                    open=float(row.get("open") or prev_close),
-                    high=float(row.get("high") or close),
-                    low=float(row.get("low") or close),
+        for expected, row in sorted(cache_by_minute.items()):
+            try:
+                opening, high, low, close, volume = (
+                    float(row[field]) for field in ("open", "high", "low", "close", "volume")
+                )
+                if (
+                    not all(math.isfinite(v) for v in (opening, high, low, close, volume))
+                    or not 0 < low <= min(opening, close) <= max(opening, close) <= high
+                    or volume < 0
+                    or not volume.is_integer()
+                ):
+                    continue
+                repaired.append(OneMinuteBar(
+                    open=opening,
+                    high=high,
+                    low=low,
                     close=close,
-                    volume=max(int(float(row.get("volume") or 0)), 0),
+                    volume=int(volume),
                     start=expected,
                     end=expected + timedelta(seconds=59),
                     synthetic=False,
-                )
-            else:
-                # A missing minute is not proof of a missing trade. Only
-                # historical bars actually captured in the canonical cache
-                # may repair the gap, including futures and spot.
-                expected += timedelta(minutes=1)
+                ))
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
-            repaired.append(repaired_bar)
-            prev_close = repaired_bar.close
-            expected += timedelta(minutes=1)
 
         if repaired:
             if self._should_log_throttled(f"candle_gap_repaired:{symbol}", 300.0):
@@ -7343,8 +7348,26 @@ class StrategyRunner:
                     pass
 
         accepted: OneMinuteBar | None = None
-        for row in get_tail(8):
-            if not isinstance(row, Mapping):
+        rows = get_tail(8)
+        if last_known is not None and rows:
+            try:
+                newest = pd.Timestamp(rows[-1]["timestamp"])
+                if not pd.isna(newest) and newest.tzinfo is not None:
+                    missing = int((newest.to_pydatetime() - last_known).total_seconds() // 60)
+                    if missing > 8:
+                        # Preserve the fast path while recovering the complete
+                        # available session tail after a worker interruption.
+                        rows = get_tail(min(missing, 375))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
+        for row in rows:
+            if (
+                not isinstance(row, Mapping)
+                or row.get("is_complete") is False
+                or row.get("is_provisional")
+                or row.get("provisional")
+                or row.get("synthetic")
+            ):
                 continue
             try:
                 ts = pd.Timestamp(row["timestamp"])
@@ -7357,9 +7380,13 @@ class StrategyRunner:
                     float(row[field]) for field in ("open", "high", "low", "close")
                 )
                 volume = float(row["volume"])
-                if not all(math.isfinite(v) and v > 0 for v in prices):
-                    continue
-                if not math.isfinite(volume) or volume < 0:
+                if (
+                    not all(math.isfinite(v) and v > 0 for v in prices)
+                    or not prices[2] <= min(prices[0], prices[3]) <= max(prices[0], prices[3]) <= prices[1]
+                    or not math.isfinite(volume)
+                    or volume < 0
+                    or not volume.is_integer()
+                ):
                     continue
                 bar = OneMinuteBar(
                     open=prices[0],

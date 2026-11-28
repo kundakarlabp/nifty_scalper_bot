@@ -9,6 +9,14 @@ from scripts.run_breeze_offline_batch import run_batch
 from scripts.stage_breeze_sqlite_research import run
 
 
+@pytest.fixture(autouse=True)
+def _isolated_shadow_environment(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
+    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
+
+
 def _staged(tmp_path: Path) -> tuple[dict[str, object], Path]:
     from tests.scripts.test_stage_breeze_sqlite_research import _sources
 
@@ -36,9 +44,6 @@ def _staged(tmp_path: Path) -> tuple[dict[str, object], Path]:
 
 def test_resumed_runner_checks_code_config_and_data_digests(tmp_path, monkeypatch):
     args, _ = _staged(tmp_path)
-    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    monkeypatch.setenv("ENABLE_LIVE", "false")
-    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
     from nifty_scalper_bot.backtesting.strategy_research import load_archive
 
     invoked = []
@@ -102,11 +107,21 @@ def test_changes_to_eod_or_live_environment_fail_closed(tmp_path, monkeypatch):
     assert not args["output_dir"].exists()
 
 
+@pytest.mark.parametrize(
+    "flag", ["ENABLE_LIVE", "ENABLE_LIVE_TRADING", "ALLOW_REAL_BROKER"]
+)
+def test_shadow_rejects_each_live_flag(tmp_path, monkeypatch, flag):
+    args, _ = _staged(tmp_path)
+    monkeypatch.setenv(flag, "true")
+    with pytest.raises(
+        ValueError, match="breeze_offline_batch_requires_explicit_shadow"
+    ):
+        run_batch(**args)
+    assert not args["output_dir"].exists()
+
+
 def test_attempted_opening_minute_fill_is_never_accepted(tmp_path, monkeypatch):
     args, _ = _staged(tmp_path)
-    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    monkeypatch.setenv("ENABLE_LIVE", "false")
-    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
     from nifty_scalper_bot.backtesting.strategy_research import load_archive
 
     def fake_research(path: Path, *, slippage_bps: float = 10.0):
