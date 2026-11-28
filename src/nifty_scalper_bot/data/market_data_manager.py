@@ -16,6 +16,8 @@ Runtime role:
   shared asyncio executor, and exports bounded latency percentiles (worker
   dispatch/await samples are per batch; individual tick samples remain per tick).
 - Restricts replay capture to the exchange session, without gating live quotes.
+- Optional pre-queue raw receipt capture uses ReplayArchive; initialization is
+  before transport start, and capture failure invalidates research only.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -441,6 +443,14 @@ class MarketDataManager:
         self._replay_capture_lock = threading.RLock()
         self._replay_archive: Any | None = None
         self._raw_ws_receipts_total = 0
+        self._raw_ingress_enabled = os.getenv(
+            "REPLAY_RAW_INGRESS_ENABLED", "false"
+        ).lower() in {"true", "1", "yes", "on"}
+        self._raw_ingress_lock = threading.Lock()
+        self._raw_ingress_archive: Any | None = None
+        self._raw_ingress_count_by_day: dict[str, int] = {}
+        self._raw_ingress_capture_errors = 0
+        self._raw_ingress_day: str | None = None
         self._replay_snapshot_key: tuple[str, str] | None = None
         self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
         self._broker = broker
@@ -2038,6 +2048,7 @@ class MarketDataManager:
                     "ws_token_count": ws_token_count,
                 },
             )
+            self._start_raw_ingress_capture()
             self._ws.start()
             post_status = self.ws_status_snapshot()
             self._ws_connect_task_started = bool(post_status.get("connect_task_alive"))
@@ -2105,6 +2116,7 @@ class MarketDataManager:
                 self._ws.stop()
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("ws.stop() raised: %s", exc)
+        self._stop_raw_ingress_capture()
         return True
 
     async def async_stop(self) -> None:
@@ -7071,6 +7083,7 @@ class MarketDataManager:
         payload = dict(raw_tick)
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(payload, raw_receive_mono)
+        self._capture_raw_ws_ingress(payload)
         payload.setdefault("_enqueued_monotonic", raw_receive_mono)
         loop = self._main_loop
         if loop is None or not loop.is_running():
@@ -7102,6 +7115,7 @@ class MarketDataManager:
             return
         raw_receive_mono = time.monotonic()
         self._record_raw_ws_receive(tick_payload, raw_receive_mono)
+        self._capture_raw_ws_ingress(tick_payload)
         tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
         # Ingress receipt is not a substitute for a missing market timestamp.
         tick_payload.setdefault("_mdm_received_at", time.time())
@@ -7118,6 +7132,145 @@ class MarketDataManager:
             self._emit_priority_summaries_if_due()
         except Exception as exc:  # pragma: no cover — defensive
             self._logger.debug("WS enqueue failed: %s", exc)
+
+    def _raw_ingress_upstream_snapshot(self) -> dict[str, int]:
+        """Return receipt counts without taking a lock on the writer thread."""
+        counts = self._raw_ingress_count_by_day.copy()
+        return {
+            "capture_errors": self._raw_ingress_capture_errors,
+            **{"day_receipt:" + key: value for key, value in counts.items()},
+        }
+
+    def _start_raw_ingress_capture(self) -> None:
+        """Initialize the optional research tape before the WS transport starts."""
+        if not getattr(self, "_raw_ingress_enabled", False):
+            return
+        if self._raw_ingress_archive is not None:
+            return
+        try:
+            from shutil import disk_usage
+
+            from nifty_scalper_bot.config.paths import get_data_dir
+            from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+            root = get_data_dir()
+            try:
+                raw_mb = int(os.getenv("REPLAY_RAW_MAX_SESSION_MB", "512"))
+            except (TypeError, ValueError):
+                raw_mb = 512
+            try:
+                normalized_mb = int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
+            except (TypeError, ValueError):
+                normalized_mb = 1024
+            raw_mb = max(128, min(1024, raw_mb))
+            normalized_mb = max(512, min(2048, normalized_mb))
+            if disk_usage(root).free < (raw_mb + normalized_mb + 2048) * 1024**2:
+                raise OSError("raw_ingress_disk_reserve")
+            self._raw_ingress_archive = ReplayArchive(
+                root / "replay_raw_ingress",
+                capacity=4096,
+                max_session_bytes=raw_mb * 1024**2,
+                upstream_provider=self._raw_ingress_upstream_snapshot,
+            )
+            self._raw_ingress_day = None
+        except Exception as exc:  # noqa: BLE001 - research cannot block transport
+            self._raw_ingress_capture_errors += 1
+            self._logger.warning(
+                "RAW_WS_CAPTURE_UNAVAILABLE error_type=%s", type(exc).__name__
+            )
+
+    def _stop_raw_ingress_capture(self) -> None:
+        """Detach after WS shutdown, then finalize without holding ingress lock."""
+        archive = getattr(self, "_raw_ingress_archive", None)
+        if archive is None:
+            return
+        with self._raw_ingress_lock:
+            self._raw_ingress_archive = None
+            self._raw_ingress_enabled = False
+        archive.close()
+
+    def _capture_raw_ws_ingress(self, raw: Mapping[str, Any]) -> None:
+        """Capture before coalescing; never initialize storage or wait for a lock."""
+        if not getattr(self, "_raw_ingress_enabled", False):
+            return
+        try:
+            if get_market_session_state(datetime.now(timezone.utc)) not in {
+                "preopen",
+                "open",
+            }:
+                return
+            if not self._raw_ingress_lock.acquire(blocking=False):
+                self._raw_ingress_capture_errors += 1
+                return
+            try:
+                archive = self._raw_ingress_archive
+                if archive is None:
+                    self._raw_ingress_capture_errors += 1
+                    return
+                observed = datetime.now(timezone.utc)
+                day = observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+                if self._raw_ingress_day != day:
+                    archive.record(
+                        "snapshot",
+                        {"capture_stream": "raw_ws_ingress", "version": 1},
+                        observed,
+                    )
+                    self._raw_ingress_day = day
+
+                raw_token = raw.get("instrument_token") or raw.get("token")
+                if not isinstance(raw_token, (int, str)) or isinstance(raw_token, bool):
+                    raise ValueError("raw_ingress_invalid_token")
+                token = int(raw_token)
+                if token <= 0:
+                    raise ValueError("raw_ingress_invalid_token")
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+                    token
+                )
+                raw_symbol = raw.get("symbol") or mapped
+                if not raw_symbol:
+                    raise ValueError("raw_ingress_symbol_missing")
+                symbol = canonical_symbol(str(raw_symbol))
+                if mapped and canonical_symbol(str(mapped)) != symbol:
+                    raise ValueError("raw_ingress_symbol_token_mismatch")
+                generation = self._generation_for_raw_ingress(symbol, token)
+                identity = f"{day}|{symbol}|{token}|{generation}"
+                sequence = self._raw_ingress_count_by_day.get(identity, 0) + 1
+                self._raw_ingress_count_by_day[identity] = sequence
+                archive.record(
+                    "tick",
+                    {
+                        "capture_stream": "raw_ws_ingress",
+                        "receipt": {
+                            "symbol": symbol,
+                            "token": token,
+                            "generation": generation,
+                            "sequence": sequence,
+                        },
+                        "wire": dict(raw),
+                    },
+                    observed,
+                )
+            finally:
+                self._raw_ingress_lock.release()
+        except Exception:  # noqa: BLE001 - invalidate research, never the tick
+            self._raw_ingress_capture_errors += 1
+
+    def get_raw_ingress_capture_stats(self) -> dict[str, Any]:
+        """Return detached diagnostic counters without changing trading state."""
+        counts = self._raw_ingress_count_by_day.copy()
+        prefix = f"{self._raw_ingress_day}|"
+        archive = self._raw_ingress_archive
+        return {
+            "raw_ws_receipts_total": int(self._raw_ws_receipts_total),
+            "capture_errors": self._raw_ingress_capture_errors,
+            "received_by_symbol_epoch": {
+                key.removeprefix(prefix): value
+                for key, value in counts.items()
+                if key.startswith(prefix)
+            },
+            "received_by_day_symbol_epoch": counts,
+            "archive": archive.stats() if archive is not None else None,
+        }
 
     def _raw_receive_evidence(
         self, received_mono: float, generation: int | None
