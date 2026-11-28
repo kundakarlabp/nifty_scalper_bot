@@ -5,6 +5,7 @@ calculate indicator snapshots through IndicatorEngine. The named EMA9/EMA21
 contract is owned here rather than duplicated in strategy or regime callers.
 The completed-regime snapshot uses one contiguous, verified session history
 and publishes causal 30-bar structural features for transition research.
+Session VWAP slope uses the same validated as-of session anchors as VWAP.
 
 Safety: missing or insufficient underlying bar history must never be turned
 into fabricated indicator evidence; live broker execution and risk guards live
@@ -1339,47 +1340,38 @@ class IndicatorEngine:
             return None
 
     def get_session_vwap_slope(self, symbol: str, *, lookback: int = 3) -> float | None:
-        """Return percentage change in session VWAP over finalized volume bars."""
+        """Return percentage change between verified session VWAP observations."""
         try:
+            if lookback < 1:
+                return None
+            # The same immutable history observation must supply both endpoints.
+            # Reuse the existing as-of validation rather than trusting partial
+            # arrays or constructing an independent cumulative VWAP.
             with self._lock:
-                history = self._histories.get(symbol)
-            if history is None or lookback < 1:
-                return None
-            timestamps = history.get_timestamps()
-            if not timestamps:
-                return None
-            session_open, _session_close = self._session_bounds(timestamps[-1])
-            closes = history.get_closes()
-            highs = history.get_highs()
-            lows = history.get_lows()
-            volumes = history.get_volumes()
-            provisional = history.get_provisional_flags()
-            cumulative_vwaps: list[float] = []
-            cum_pv = 0.0
-            cum_vol = 0.0
-            for index, stamp in enumerate(timestamps):
-                if stamp is None or stamp < session_open:
-                    continue
-                if provisional and index < len(provisional) and provisional[index]:
-                    continue
-                if index >= len(volumes) or index >= len(closes):
-                    continue
-                volume = float(volumes[index] or 0.0)
-                if volume <= 0:
-                    continue
-                close = float(closes[index])
-                high = float(highs[index]) if index < len(highs) else close
-                low = float(lows[index]) if index < len(lows) else close
-                cum_pv += ((high + low + close) / 3.0) * volume
-                cum_vol += volume
-                cumulative_vwaps.append(cum_pv / cum_vol)
-            if len(cumulative_vwaps) <= lookback:
-                return None
-            current = cumulative_vwaps[-1]
-            reference = cumulative_vwaps[-(lookback + 1)]
-            if reference <= 0:
-                return None
-            return ((current / reference) - 1.0) * 100.0
+                rows = self.get_history(symbol, field="bars")
+                if not rows:
+                    return None
+                latest = rows[-1]["timestamp"]
+                session_open, session_close = self._session_bounds(latest)
+                stamps = sorted(
+                    {
+                        row["timestamp"]
+                        for row in rows
+                        if session_open <= row["timestamp"] < session_close
+                        and row.get("is_complete") is True
+                        and row.get("is_provisional") is not True
+                        and float(row["volume"]) > 0
+                    }
+                )
+                if len(stamps) <= lookback:
+                    return None
+                if latest - stamps[-1] > timedelta(minutes=1):
+                    return None
+                current = self.get_session_vwap_at(symbol, stamps[-1])
+                reference = self.get_session_vwap_at(symbol, stamps[-(lookback + 1)])
+                if current is None or reference is None or reference <= 0:
+                    return None
+                return ((current / reference) - 1.0) * 100.0
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 

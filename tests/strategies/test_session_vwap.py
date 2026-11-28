@@ -274,3 +274,24 @@ def test_rolling_vwap_does_not_use_only_provisional_bars():
             is_provisional=True,
         )
     assert engine.get_vwap(symbol) is None
+
+
+@pytest.mark.parametrize("minutes", [(5, 6, 7, 8, 9), (0, 1, 3, 4, 5)])
+def test_session_vwap_slope_rejects_incomplete_session_history(minutes) -> None:
+    engine = _engine_with_bars([_session_bar(i, 100.0 + i, 100) for i in minutes])
+    assert engine.get_session_vwap_slope("NFO:NIFTY2680424400CE") is None
+
+
+def test_session_vwap_slope_rejects_unfinished_intermediate_candle() -> None:
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars([_session_bar(0, 100.0, 100)])
+    for i in range(1, 6):
+        stamp, price, volume = _session_bar(i, 100.0 + i, 100)
+        engine.update_price(
+            symbol,
+            price,
+            volume=volume,
+            timestamp=stamp,
+            is_complete=i != 2,
+        )
+    assert engine.get_session_vwap_slope(symbol) is None
