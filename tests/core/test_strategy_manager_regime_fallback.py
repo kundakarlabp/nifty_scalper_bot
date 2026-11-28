@@ -462,3 +462,37 @@ def test_canonical_regime_denial_still_observes_selected_contract() -> None:
     assert context["regime_gate_allowed"] is True
     assert context["lot_size"] == 65
     assert kwargs["blocked_reason"] == "strategy_regime_ineligible"
+
+
+def test_denied_range_observation_uses_authoritative_basket_lot() -> None:
+    from types import SimpleNamespace
+
+    symbol = "NFO:NIFTY26D0125650CE"
+    observed = []
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
+    )
+    basket = {
+        "selected_ce": symbol,
+        "selected_pe": "NFO:NIFTY26D0125650PE",
+        "futures_symbol": "NFO:NIFTY26DECFUT",
+        "metadata": {
+            "source": "instrument_manager",
+            "option_lot_size_by_symbol": {symbol: 75},
+        },
+    }
+    manager._data_hub = SimpleNamespace(
+        get_active_contract_basket=lambda: basket,
+        get_option_contract_metadata=lambda _: None,
+    )
+    manager._strategies = [
+        SimpleNamespace(
+            name="RangeVWAPReclaim",
+            observe_research_excursion=lambda sym, ctx, **kw: observed.append(ctx),
+        )
+    ]
+    manager._observe_denied_range_research(symbol, manager._regime_manager)
+    assert observed[-1]["lot_size"] == 75
+    basket["metadata"]["option_lot_size_by_symbol"] = {"NFO:NIFTY26D0125650PE": 65}
+    manager._observe_denied_range_research(symbol, manager._regime_manager)
+    assert "lot_size" not in observed[-1]

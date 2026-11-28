@@ -3,6 +3,7 @@
 Responsibilities: Deduplicate setup identities; compare observed option
 ask/bid quotes and load selected, exact-token FULL-depth option books and
 futures WS price paths for the canonical session-excursion research report.
+load_excursion_quote_paths also returns causal, scope-specific contract lots.
 Optionally reuse validated chronological quote-time indexes for large sessions.
 Boundaries: No broker calls, strategy overrides, or new setup identity owner.
 Safety: Missing/rotated contracts, untradable quotes, and archive gaps are
@@ -131,8 +132,9 @@ def load_excursion_quote_paths(
 ) -> tuple[
     dict[str, list[tuple[float, float, str]]],
     dict[str, list[tuple[float, float, float, int, int, str]]],
+    dict[tuple[str, str], int],
 ]:
-    """Observe selected futures prices and exact-token FULL option books.
+    """Observe selected futures, exact-token FULL books and causal catalog lots.
 
     The ReplayArchive remains the sole capture owner. Missing token, selected
     contract, full-depth, or best-level quantity does not become a fill.
@@ -149,6 +151,7 @@ def load_excursion_quote_paths(
     )
     selected: dict[str, str] = {}
     tokens: dict[str, int] = {}
+    scope_lots: dict[tuple[str, str], int] = {}
     phase = 0
     previous_phase_key: tuple[str, ...] | None = None
     for event in iter_session(path):
@@ -166,6 +169,11 @@ def load_excursion_quote_paths(
                 for side in ("CE", "PE")
             }
             selected["FUT"] = normalize_symbol(str(basket.get("futures_symbol") or ""))
+            # Each snapshot owns its own identity evidence; never carry stale
+            # catalog rows across a restart or basket replacement.
+            tokens.clear()
+            catalog_lots: dict[str, tuple[int, int]] = {}
+            conflicting_lots: set[str] = set()
             catalog = payload.get("instruments")
             if isinstance(catalog, list):
                 for item in catalog:
@@ -177,11 +185,30 @@ def load_excursion_quote_paths(
                     token = item.get("instrument_token")
                     if type(token) is int and token > 0:
                         tokens[symbol] = token
+                        lot = item.get("lot_size")
+                        if (
+                            type(lot) is int
+                            and 0 < lot < 10000
+                            and str(item.get("name") or "").upper() == "NIFTY"
+                            and str(item.get("instrument_type") or "").upper()
+                            == symbol[-2:]
+                            and symbol in (selected["CE"], selected["PE"])
+                        ):
+                            previous_lot = catalog_lots.get(symbol)
+                            evidence = (token, lot)
+                            if previous_lot is not None and previous_lot != evidence:
+                                conflicting_lots.add(symbol)
+                            catalog_lots[symbol] = evidence
             mapping = basket.get("token_by_symbol")
             if isinstance(mapping, Mapping):
                 for raw_symbol, token in mapping.items():
                     if type(token) is int and token > 0:
                         tokens[normalize_symbol(str(raw_symbol))] = token
+            selected_lots = {
+                symbol: evidence[1]
+                for symbol, evidence in catalog_lots.items()
+                if symbol not in conflicting_lots and evidence[0] == tokens.get(symbol)
+            }
             phase_key = (
                 str(event["run_id"]),
                 selected.get("CE", ""),
@@ -191,10 +218,14 @@ def load_excursion_quote_paths(
                     str(tokens.get(selected.get(k, "")) or "")
                     for k in ("CE", "PE", "FUT")
                 ),
+                *(str(selected_lots.get(selected[k]) or "") for k in ("CE", "PE")),
             )
             if phase_key != previous_phase_key:
                 phase += 1
                 previous_phase_key = phase_key
+            scope = f"{event['run_id']}:{phase}"
+            for symbol, lot in selected_lots.items():
+                scope_lots[(scope, symbol)] = lot
             continue
         if str(payload.get("source") or "").lower() not in {"ws", "ws_full"}:
             continue
@@ -261,7 +292,7 @@ def load_excursion_quote_paths(
         rows.sort(key=lambda row: row[0])
     for rows in books.values():
         rows.sort(key=lambda row: row[0])
-    return dict(futures), dict(books)
+    return dict(futures), dict(books), scope_lots
 
 
 def observed_futures_markout(
