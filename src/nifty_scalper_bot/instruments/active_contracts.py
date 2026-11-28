@@ -1,6 +1,8 @@
 """Runtime role:
-- Parsing/canonicalization utilities for active contract diagnostics.
+- Parsing/canonicalization utilities for active contract diagnostics, including
+  exchange weekly numeric/month-code and monthly option symbols.
 - Runtime active contract selection belongs to InstrumentManager.
+- The bounded live universe can prefer OTM strikes at equal ATM distance.
 - Must not derive live futures from selected options."""
 
 from __future__ import annotations
@@ -17,6 +19,10 @@ from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
 NIFTY_FUT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$")
 NIFTY_OPT_RE = re.compile(
     r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$"
+)
+NIFTY_WEEKLY_OPT_RE = re.compile(
+    r"^NIFTY(?P<yy>\d{2})(?P<month>[1-9OND])(?P<day>\d{2})"
+    r"(?P<strike>\d{4,6})(?P<side>CE|PE)$"
 )
 MONTH_ABBR_TO_NUM = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
 IST = ZoneInfo("Asia/Kolkata")
@@ -66,8 +72,23 @@ def canonical_nifty_option_symbol(symbol: Any) -> str | None:
     if not canonical or ":" not in canonical:
         return None
     exchange, tradingsymbol = canonical.split(":", 1)
-    if exchange != "NFO" or not NIFTY_OPT_RE.fullmatch(tradingsymbol):
+    if exchange != "NFO":
         return None
+    if NIFTY_OPT_RE.fullmatch(tradingsymbol):
+        return f"NFO:{tradingsymbol}"
+    weekly = NIFTY_WEEKLY_OPT_RE.fullmatch(tradingsymbol)
+    if weekly is None:
+        return None
+    try:
+        date(
+            2000 + int(weekly["yy"]),
+            "123456789OND".index(weekly["month"]) + 1,
+            int(weekly["day"]),
+        )
+    except ValueError:
+        return None
+    # Syntax only. Actual expiry, lot, token and live eligibility still
+    # belong to broker instrument metadata and the existing execution gates.
     return f"NFO:{tradingsymbol}"
 
 
@@ -176,8 +197,13 @@ def derive_nifty_future_from_selected_options(
     months = set()
     for symbol in [s for s in symbols if s]:
         match = NIFTY_OPT_RE.fullmatch(symbol.split(":", 1)[1])
-        if match:
-            months.add(f"{match.group('yy')}{match.group('mon')}")
+        if match is None:
+            return ActiveFutureResolution(
+                None,
+                "selected_options",
+                reason="weekly_option_requires_instrument_master",
+            )
+        months.add(f"{match.group('yy')}{match.group('mon')}")
     if len(months) != 1:
         return ActiveFutureResolution(
             None,
@@ -227,10 +253,13 @@ def cap_option_universe(
     selected_pe: str,
     atm_strike: float,
     max_options: int,
+    prefer_otm: bool = False,
 ) -> list[tuple[str, int, float, str]]:
     """Args: (symbol, token, strike, side) items, selected pair, atm, cap.
     Returns: capped list always containing selected CE/PE, remaining slots
-    filled by strikes nearest to ATM alternating CE/PE. Raises: none.
+    filled by strikes nearest to ATM alternating CE/PE. When prefer_otm is
+    enabled, ties favor OTM on each side, without increasing the cap.
+    Raises: none.
 
     Single global cap for the active option universe. Applying it where the
     basket is built means DataHub, MDM, WS subscriptions, runner registration,
@@ -249,11 +278,11 @@ def cap_option_universe(
     remaining = [item for item in option_items if item[0] not in seen]
     ce_ranked = sorted(
         (i for i in remaining if i[3] == "CE"),
-        key=lambda i: abs(i[2] - atm_strike),
+        key=lambda i: (abs(i[2] - atm_strike), prefer_otm and i[2] < atm_strike),
     )
     pe_ranked = sorted(
         (i for i in remaining if i[3] == "PE"),
-        key=lambda i: abs(i[2] - atm_strike),
+        key=lambda i: (abs(i[2] - atm_strike), prefer_otm and i[2] > atm_strike),
     )
     take_ce = True
     while len(capped) < max_options and (ce_ranked or pe_ranked):

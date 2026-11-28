@@ -7,6 +7,15 @@ Key responsibilities:
     - Resolve live-mode consistently before durable bracket-state enforcement.
     - Surface position/reconciliation lifecycle blockers to the native entry gate.
     - Keep active virtual brackets supplied with fresh canonical market data.
+    - Forward the original protection tick to read-only full-lot research
+      without introducing another quote cache or stop authority.
+    - Discard prior-tick exit quotes when a new tick has no matching BBO.
+    - Preserve the prior valid quote when core rejects pre-fill or older
+      exchange-time events; clear BBO for an explicit new quote-less tick.
+    - Count optional trail assessments in existing per-bracket state to
+      distinguish missed dispatch from a legitimate no-ratchet decision.
+    - Select adaptive exclusively in LIVE when enabled; use verified tiers
+      only under an explicit adaptive opt-out.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
@@ -135,20 +144,23 @@ class BoundBracketManager(RuntimeBracketManager):
         symbol: str,
         ltp: float,
         exchange_ts: float | None,
-    ) -> None:
-        """Recover executable depth from the cached SSOT without mixing ticks."""
+    ) -> bool:
+        """Capture a quote only when the SSOT matches this protection tick."""
         source = getattr(self, "_market_data", None)
         getter = (
             getattr(source, "get_latest_tick", None) if source is not None else None
         )
         if not callable(getter):
-            return
+            return False
         try:
             cached = getter(symbol)
         except Exception:
-            return
+            return False
         if not isinstance(cached, Mapping):
-            return
+            return False
+        cached_symbol = cached.get("symbol")
+        if cached_symbol and normalize_symbol(str(cached_symbol)) != symbol:
+            return False
         try:
             cached_ltp = float(
                 cached.get("ltp")
@@ -157,23 +169,26 @@ class BoundBracketManager(RuntimeBracketManager):
                 or 0.0
             )
             current_ltp = float(ltp)
-        except (TypeError, ValueError):
-            return
+        except (TypeError, ValueError, OverflowError):
+            return False
         if (
-            cached_ltp <= 0.0
-            or current_ltp <= 0.0
+            not _profit_extension._positive(cached_ltp)
+            or not _profit_extension._positive(current_ltp)
             or abs(cached_ltp - current_ltp) > 1e-9
         ):
-            return
+            return False
+        if exchange_ts is None:
+            # LTP equality without a clock cannot identify an executable BBO.
+            return False
         if exchange_ts is not None:
             cached_ts = _core.tick_exchange_epoch(cached)
             try:
                 current_ts = float(exchange_ts)
-            except (TypeError, ValueError):
-                return
+            except (TypeError, ValueError, OverflowError):
+                return False
             if cached_ts is None or abs(float(cached_ts) - current_ts) > 0.001:
-                return
-        self._capture_exit_quote(normalize_symbol(symbol), cached)
+                return False
+        return bool(self._capture_exit_quote(symbol, cached))
 
     def on_tick(
         self,
@@ -184,17 +199,72 @@ class BoundBracketManager(RuntimeBracketManager):
         defer_submission: bool = False,
         tick: Mapping[str, Any] | None = None,
     ) -> None:
-        """Preserve executable bid/ask from the exact normalized protection tick."""
+        """Never evaluate a new protection tick using a previous tick's BBO."""
+        normalized = normalize_symbol(symbol)
+        # An old exchange event can arrive just after a broker-confirmed fill.
+        # The canonical core rejects its price; do not let that same event
+        # overwrite (or clear) the watchdog's previously valid quote first.
+        now_ts = time.time()
+        with self._lock:
+            rejected_prefill = any(
+                bracket is not None
+                and bracket.entry_confirmed
+                and bracket.remaining_quantity > 0
+                and self._is_replayed_protection_tick(bracket, exchange_ts, now_ts)
+                for entry_id in self._symbol_map.get(normalized, ())
+                if (bracket := self._brackets.get(entry_id)) is not None
+            )
+        if rejected_prefill:
+            super().on_tick(
+                symbol,
+                ltp,
+                exchange_ts,
+                defer_submission=defer_submission,
+                tick=tick,
+            )
+            return
         captured = False
         if isinstance(tick, Mapping):
-            captured = self._capture_exit_quote(normalize_symbol(symbol), tick)
+            tick_symbol = tick.get("symbol")
+            tick_ltp = tick.get("ltp") or tick.get("last_price") or tick.get("price")
+            try:
+                current_ltp = float(ltp)
+                observed_ltp = float(tick_ltp) if tick_ltp is not None else 0.0
+                same_ltp = (
+                    bool(_profit_extension._positive(current_ltp))
+                    and bool(_profit_extension._positive(observed_ltp))
+                    and abs(observed_ltp - current_ltp) <= 1e-9
+                )
+                tick_ts = _core.tick_exchange_epoch(tick)
+                same_event = exchange_ts is None or (
+                    tick_ts is not None
+                    and abs(float(tick_ts) - float(exchange_ts)) <= 0.001
+                )
+            except (TypeError, ValueError, OverflowError):
+                same_ltp = False
+                same_event = False
+            if (
+                (not tick_symbol or normalize_symbol(str(tick_symbol)) == normalized)
+                and same_ltp
+                and same_event
+            ):
+                captured = bool(self._capture_exit_quote(normalized, tick))
         if not captured:
-            self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
+            captured = self._capture_same_tick_cached_quote(
+                normalized, ltp, exchange_ts
+            )
+        if isinstance(tick, Mapping) and not captured:
+            # A depth-less/invalid explicit new tick must not reuse an older BBO.
+            # Canonical hard SL/TP still evaluates the current LTP; the
+            # broker-resident protective stop is never cancelled here.
+            with self._lock:
+                self._exit_quotes.pop(normalized, None)
         super().on_tick(
             symbol,
             ltp,
             exchange_ts,
             defer_submission=defer_submission,
+            tick=tick,
         )
 
     def _evaluate_exit_fast(
@@ -246,7 +316,7 @@ class BoundBracketManager(RuntimeBracketManager):
         return bool(super()._sync_exchange_protective_stop(bracket))
 
     def _apply_trailing_math(self, bracket: Any) -> bool:
-        """Collect canonical, market-aware and adaptive proposals before sync.
+        """Select one optional trail policy and synchronize its proposal once.
 
         Ratchets remain monotonic. Synchronize once after all proposals even if
         an optional assessment errors; never hold the bracket lock across I/O.
@@ -259,34 +329,96 @@ class BoundBracketManager(RuntimeBracketManager):
         batch = {"bracket": bracket, "requested": False}
         local.batch = batch
         try:
-            canonical_changed = bool(super()._apply_trailing_math(bracket))
             ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
-            if ltp is None:
-                return canonical_changed
-            market_changed = False
-            if not _profit_extension.adaptive_profit_lock_enabled(self):
+            # Exactly one OPTIONAL candidate can win a tick. Adaptive is
+            # first; if it produces NO ratchet, a full-lot verified version
+            # of the historical tier schedule may take over. It cannot use
+            # LTP-only prices, bypass broker protection or run a second sync.
+            adaptive_selected = _profit_extension.adaptive_profit_lock_enabled(self)
+            broker_live = bool(self._is_live_execution())
+            policy_config = getattr(bracket, "trailing_config", None)
+            selected = (
+                "adaptive_only"
+                if adaptive_selected
+                else ("verified_tiers_live" if broker_live else "legacy_paper")
+            )
+            if isinstance(policy_config, dict):
+                # One bounded integer per evaluated tick. No broker I/O,
+                # persistence write or additional policy decision.
                 try:
-                    market_changed = _profit_extension.tighten_market_aware_floor(
-                        self, bracket, ltp
+                    evaluated = int(
+                        policy_config.get("_optional_trail_eval_count") or 0
                     )
-                except Exception as exc:  # noqa: BLE001 - preserve canonical SL
+                except (TypeError, ValueError, OverflowError):
+                    evaluated = 0
+                policy_config["_optional_trail_eval_count"] = min(
+                    1000000, max(0, evaluated) + 1
+                )
+                if policy_config.get("_optional_trail_owner") != selected:
+                    policy_config["_optional_trail_owner"] = selected
+                    _profit_extension.LOGGER.info(
+                        "OPTIONAL_TRAIL_OWNER_SELECTED symbol=%s policy=%s "
+                        "activation_r=%s",
+                        getattr(bracket, "symbol", ""),
+                        selected,
+                        self._trail_activation_r(bracket),
+                    )
+
+            if adaptive_selected:
+                # A legitimate adaptive NOOP is a policy decision, never an
+                # invitation for competing tiers to tighten the same stop.
+                if ltp is None:
+                    return False
+                try:
+                    return bool(
+                        _profit_extension.tighten_adaptive_profit_lock(
+                            self, bracket, ltp
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - hard stop survives
                     _profit_extension.LOGGER.warning(
-                        "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
+                        "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
                         getattr(bracket, "symbol", ""),
                         type(exc).__name__,
                     )
+                    return False
+
+            if broker_live:
+                if ltp is None:
+                    return False
+                try:
+                    # Only an explicit adaptive opt-out may select verified
+                    # live tiers. LTP-only legacy trailing is never used.
+                    return bool(
+                        _profit_extension.tighten_verified_tier_fallback(
+                            self, bracket, ltp
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _profit_extension.LOGGER.warning(
+                        "VERIFIED_TIER_FALLBACK_SKIPPED symbol=%s error_type=%s",
+                        getattr(bracket, "symbol", ""),
+                        type(exc).__name__,
+                    )
+                    return False
+
+            # Paper/replay compatibility retains the historical tiered path.
+            # The exchange-stop owner remains unchanged in all modes.
+            canonical_changed = bool(super()._apply_trailing_math(bracket))
+            if ltp is None:
+                return canonical_changed
             try:
-                adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
+                market_changed = _profit_extension.tighten_market_aware_floor(
                     self, bracket, ltp
                 )
             except Exception as exc:  # noqa: BLE001 - preserve canonical SL
                 _profit_extension.LOGGER.warning(
-                    "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                    "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
                     getattr(bracket, "symbol", ""),
                     type(exc).__name__,
                 )
-                adaptive_changed = False
-            return canonical_changed or market_changed or adaptive_changed
+                market_changed = False
+            return canonical_changed or market_changed
         finally:
             local.batch = previous
             if batch["requested"]:

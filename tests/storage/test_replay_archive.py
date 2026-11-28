@@ -286,4 +286,3 @@ def test_raw_wire_verifier_rejects_contract_sequence_holes(tmp_path) -> None:
     archive.close()
     with pytest.raises(ValueError, match="raw_ingress_contract_epoch_sequence_gap"):
         verify_raw_ingress_session(tmp_path / "2026-11-05.jsonl")
-

@@ -6,6 +6,7 @@
 Responsibilities: PositionManager maintains pending/terminal order state,
 reconciles broker snapshots with local positions and persists recovery state.
 Key interfaces: PositionManager and broker order/position reconciliation helpers.
+Its canonical risk-circuit snapshot can verify RangeVWAP setup reservations on disk.
 Boundaries: OrderManager submits orders; BracketManager chooses protective exits;
 position bookkeeping must not create independent entry or stop decisions.
 Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
@@ -2739,6 +2740,26 @@ class PositionManager:
             self._risk_circuit_state = state
         self.save_state()
 
+    def persist_range_vwap_setup_guard(self, guard: Mapping[str, object]) -> bool:
+        """Verify a Range VWAP reservation reached the existing durable state.
+
+        PositionManager remains the only position/risk persistence owner. A
+        swallowed disk-write error must never authorize a new broker entry.
+        """
+        expected = dict(guard)
+        self.persist_risk_circuit_state(range_vwap_setup_guard=expected)
+        try:
+            stored = json.loads(self._state_path.read_text(encoding="utf-8"))
+            runtime = stored.get("_risk_runtime", {})
+            risk = runtime.get("risk_circuit", {})
+            return (
+                isinstance(risk, dict)
+                and risk.get("trading_date") == self._trading_date_ist()
+                and risk.get("range_vwap_setup_guard") == expected
+            )
+        except (OSError, TypeError, ValueError, AttributeError):
+            return False
+
     @staticmethod
     def _trading_date_ist(now: datetime | None = None) -> str:
         """Return the exchange trading date in IST for P&L baselines."""
@@ -4943,6 +4964,14 @@ class PositionManager:
         """Validate and atomically replace managed positions from broker truth."""
         try:
             snapshot = decode_position_snapshot(broker_positions)
+            # This symbol-keyed registry represents one MIS position per symbol.
+            # Do not collapse two distinct broker products into the last row
+            # until the registry itself has product-qualified position keys.
+            symbols = [row.symbol for row in snapshot.rows]
+            if len(symbols) != len(set(symbols)):
+                raise PositionSnapshotError(
+                    "multiple broker products cannot share a symbol-keyed position"
+                )
         except Exception as exc:
             with self._lock:
                 self._last_broker_position_snapshot_failure_at = time.time()

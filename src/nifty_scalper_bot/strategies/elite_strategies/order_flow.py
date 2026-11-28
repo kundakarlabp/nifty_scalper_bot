@@ -1,3 +1,15 @@
+"""NIFTY OrderFlow strategy: compute context-only depth and temporal OFI evidence.
+
+Responsibility: derive same-contract microstructure confirmation and conflict
+metadata from prepared quotes, while the canonical underlying direction and
+broker-safe entry/risk checks retain authority. Preserve legacy SHADOW holdoff
+contract and publish separate temporal reversal evidence for range research.
+Observability: _should_log_context_evidence emits one per-symbol evidence
+snapshot every five minutes, or a material state change at most once per
+minute. Numeric tick, OFI and depth churn do not cause additional INFO logs.
+Safety: logging cadence does not change context votes or signal metadata.
+"""
+
 from __future__ import annotations
 
 import os
@@ -5,6 +17,7 @@ import time
 import zlib
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.orderflow_shadow_bus import publish_orderflow_research
 from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -147,6 +160,8 @@ class OrderFlowStrategy(EliteStrategy):
         # Temporal OFI already measures persistence upstream.
         self._last_live_depth_support: dict[str, tuple[int, float]] = {}
         self._last_live_adverse_ofi: dict[str, float] = {}
+        # Observability only; never reused as signal or execution evidence.
+        self._context_log_state: dict[str, tuple[tuple[Any, ...], float]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -161,6 +176,31 @@ class OrderFlowStrategy(EliteStrategy):
             "spread_pct",
             "atr",
         }
+
+    def _should_log_context_evidence(
+        self, symbol: str, metadata: Mapping[str, Any]
+    ) -> bool:
+        """Limit routine evidence to 5 min; material changes to 1 min.
+
+        Ignore rapidly changing numeric depth/OFI measurements. The signal
+        metadata and live strategy decisions remain completely unthrottled.
+        """
+        state = (
+            metadata.get("direction_bias"),
+            metadata.get("context_quality_eligible"),
+            metadata.get("effective_context_alignment"),
+            metadata.get("effective_context_conflict"),
+            metadata.get("context_alignment_block_reason"),
+        )
+        now = time.monotonic()
+        previous = self._context_log_state.get(symbol)
+        if previous is not None:
+            prior_state, emitted_at = previous
+            interval = 60.0 if state != prior_state else 300.0
+            if now - emitted_at < interval:
+                return False
+        self._context_log_state[symbol] = (state, now)
+        return True
 
     def _evaluate_signal(
         self,
@@ -385,6 +425,7 @@ class OrderFlowStrategy(EliteStrategy):
             # reversal. Keep the existing context authority, but avoid approving
             # a live entry on the first brief positive window after opposition.
             ofi_reversal_holdoff_active = False
+            research_holdoff_active = False
             # Experimental adaptive window, OFF by default. Never discount a
             # recent reversal without completed sustained OFI AND strong depth.
             # The original 15s policy remains authoritative unless opted in.
@@ -408,17 +449,30 @@ class OrderFlowStrategy(EliteStrategy):
                 # makes enabling the experiment never shorten reversal safety
                 # beyond its documented floor.
                 ofi_reversal_holdoff_seconds = 10.0
-            if is_live and context_quality_eligible and side_aligns:
+            holdoff_evaluated = bool(
+                quote_readiness.allowed and context_fresh and depth_available
+            )
+            if holdoff_evaluated:
                 now = time.monotonic()
                 if ofi_directional and ofi_conflicts_side:
                     self._last_live_adverse_ofi[symbol] = now
                 else:
                     last_adverse = self._last_live_adverse_ofi.get(symbol)
-                    ofi_reversal_holdoff_active = bool(
+                    research_holdoff_active = bool(
                         last_adverse is not None
                         and 0.0 <= now - last_adverse < ofi_reversal_holdoff_seconds
                     )
-                    if ofi_reversal_holdoff_active:
+                    # Preserve published non-live OrderFlow alignment.
+                    # Research independently observes recent opposing flow.
+                    ofi_reversal_holdoff_active = bool(
+                        is_live and research_holdoff_active
+                    )
+                    if (
+                        ofi_reversal_holdoff_active
+                        and is_live
+                        and context_quality_eligible
+                        and side_aligns
+                    ):
                         context_alignment_source = None
             alignment_candidate_source = context_alignment_source
             # A single order-book imbalance plus the last tick can flip on
@@ -580,6 +634,8 @@ class OrderFlowStrategy(EliteStrategy):
                 "effective_context_alignment": effective_context_alignment,
                 "context_alignment_block_reason": context_alignment_block_reason,
                 "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
+                "range_research_holdoff_active": research_holdoff_active,
+                "ofi_reversal_holdoff_evaluated": holdoff_evaluated,
                 "ofi_reversal_holdoff_seconds": ofi_reversal_holdoff_seconds,
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",
@@ -612,58 +668,74 @@ class OrderFlowStrategy(EliteStrategy):
                 metadata=metadata,
             )
             _stamp_quote_update_identity(signal.metadata, indicators)
-            LOGGER.info(
-                "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "
-                "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
-                "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f "
-                "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s "
-                "ofi_reversal_holdoff=%s ofi_3s_norm=%s "
-                "ofi_updates_3s=%s ofi_3s_span=%s "
-                "ofi_sustained=%s block_reason=%s",
-                symbol,
-                side,
-                context_quality_eligible,
-                effective_context_alignment,
-                effective_context_conflict,
-                context_alignment_source,
-                ofi_ready,
-                ofi_value,
-                depth_imbalance,
-                strong_depth_conflicts_side,
-                spread_pct,
-                context_age_seconds,
-                ofi_updates,
-                ofi_unavailable_reason,
-                quote_readiness.quote_update_version,
-                ofi_reversal_holdoff_active,
-                ofi_3s_value,
-                ofi_3s_updates,
-                round(ofi_3s_span, 3),
-                ofi_sustained_confirmation,
-                context_alignment_block_reason,
-                extra={
-                    "event": "ORDERFLOW_CONTEXT_EVIDENCE",
-                    "symbol": symbol,
-                    "side": side,
-                    "context_quality_eligible": context_quality_eligible,
-                    "effective_context_alignment": effective_context_alignment,
-                    "effective_context_conflict": effective_context_conflict,
-                    "context_alignment_source": context_alignment_source,
-                    "context_alignment_block_reason": context_alignment_block_reason,
-                    "ofi_ready": ofi_ready,
-                    "ofi_1s_normalized": ofi_value,
-                    "ofi_update_count_1s": ofi_updates,
-                    "ofi_3s_span_seconds": ofi_3s_span,
-                    "ofi_3s_normalized": ofi_3s_value,
-                    "ofi_update_count_3s": ofi_3s_updates,
-                    "ofi_3s_complete": indicators.get("ofi_3s_complete") is True,
-                    "ofi_sustained_confirmation": ofi_sustained_confirmation,
-                    "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
-                    "ofi_unavailable_reason": ofi_unavailable_reason,
-                    "depth_imbalance": round(depth_imbalance, 4),
-                    "strong_depth_conflicts_side": strong_depth_conflicts_side,
-                },
-            )
+            # The strategy already computed these values. Publish a bounded,
+            # read-only shadow sample at *every evaluation*, independent of
+            # the source-throttled INFO log. It has no voting/exit authority.
+            try:
+                publish_orderflow_research(
+                    symbol,
+                    ofi_3s_norm=ofi_3s_value,
+                    quote_age_seconds=context_age_seconds,
+                    ofi_updates_3s=ofi_3s_updates,
+                    ofi_span_seconds=ofi_3s_span,
+                )
+            except Exception:
+                LOGGER.debug("ORDERFLOW_SHADOW_PUBLISH_UNAVAILABLE", exc_info=True)
+            if self._should_log_context_evidence(symbol, signal.metadata):
+                LOGGER.info(
+                    "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "
+                    "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
+                    "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f "
+                    "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s "
+                    "ofi_reversal_holdoff=%s ofi_3s_norm=%s "
+                    "ofi_updates_3s=%s ofi_3s_span=%s "
+                    "ofi_sustained=%s block_reason=%s",
+                    symbol,
+                    side,
+                    context_quality_eligible,
+                    effective_context_alignment,
+                    effective_context_conflict,
+                    context_alignment_source,
+                    ofi_ready,
+                    ofi_value,
+                    depth_imbalance,
+                    strong_depth_conflicts_side,
+                    spread_pct,
+                    context_age_seconds,
+                    ofi_updates,
+                    ofi_unavailable_reason,
+                    quote_readiness.quote_update_version,
+                    ofi_reversal_holdoff_active,
+                    ofi_3s_value,
+                    ofi_3s_updates,
+                    round(ofi_3s_span, 3),
+                    ofi_sustained_confirmation,
+                    context_alignment_block_reason,
+                    extra={
+                        "event": "ORDERFLOW_CONTEXT_EVIDENCE",
+                        "symbol": symbol,
+                        "side": side,
+                        "context_quality_eligible": context_quality_eligible,
+                        "effective_context_alignment": effective_context_alignment,
+                        "effective_context_conflict": effective_context_conflict,
+                        "context_alignment_source": context_alignment_source,
+                        "context_alignment_block_reason": (
+                            context_alignment_block_reason
+                        ),
+                        "ofi_ready": ofi_ready,
+                        "ofi_1s_normalized": ofi_value,
+                        "ofi_update_count_1s": ofi_updates,
+                        "ofi_3s_span_seconds": ofi_3s_span,
+                        "ofi_3s_normalized": ofi_3s_value,
+                        "ofi_update_count_3s": ofi_3s_updates,
+                        "ofi_3s_complete": indicators.get("ofi_3s_complete") is True,
+                        "ofi_sustained_confirmation": ofi_sustained_confirmation,
+                        "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
+                        "ofi_unavailable_reason": ofi_unavailable_reason,
+                        "depth_imbalance": round(depth_imbalance, 4),
+                        "strong_depth_conflicts_side": strong_depth_conflicts_side,
+                    },
+                )
             return signal
         except Exception as exc:
             LOGGER.error(

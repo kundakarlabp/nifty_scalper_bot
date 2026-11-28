@@ -91,7 +91,10 @@ class _OrderManager:
         self.place_calls.append(dict(kwargs))
         order_id = f"rescue-{self._next_id}"
         self._next_id += 1
-        self._broker.statuses[order_id] = "OPEN"
+        # A resting broker SL is TRIGGER PENDING, not the triggered OPEN limit.
+        self._broker.statuses[order_id] = (
+            "TRIGGER PENDING" if kwargs.get("order_type") == "SL" else "OPEN"
+        )
         self._broker.quantities[order_id] = int(kwargs["quantity"])
         if (
             kwargs.get("order_type") == "SL"
@@ -240,6 +243,41 @@ def test_stale_open_protective_exit_is_cancelled_then_replaced_once() -> None:
         now=time.time(),
     )
     assert len(order_manager.place_calls) == 1
+
+
+def test_live_rescue_requires_product_identity_before_replacement(monkeypatch):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    # A symbol-only position cannot authorize a LIVE rescue order.
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
+
+    manager._submit_rescue_exit(bracket, qty=65, prior_order_id="old-exit")
+
+    assert order_manager.place_calls == []
+    assert bracket.exit_order_id == "old-exit"
+    assert bracket.exit_pending is True
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+    assert "rescue_position_unavailable" in bracket.last_exit_error
+
+
+def test_live_rescue_matches_exact_product_despite_opposing_position(monkeypatch):
+    manager, order_manager, broker = _manager()
+    bracket = _make_stale_exit(manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    broker.positions = [
+        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+        {"symbol": SYMBOL, "quantity": -65, "product": "NRML"},
+    ]
+
+    manager._submit_rescue_exit(bracket, qty=65, prior_order_id="old-exit")
+
+    assert len(order_manager.place_calls) == 1
+    rescue = order_manager.place_calls[0]
+    assert rescue["quantity"] == 65
+    assert rescue["side"] == "SELL"
+    assert rescue["product"] == "MIS"
+    assert bracket.exit_order_id == "rescue-1"
 
 
 def test_cancel_unconfirmed_escalates_once_and_state_remains_latched() -> None:
@@ -511,7 +549,7 @@ def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) ->
     broker.statuses["rescue-1"] = "CANCELLED"
     outcome = manager._retire_exchange_protective_stop(bracket, reason="TP1")
     assert outcome == "cancelled"
-    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35, "product": "MIS"}]
     target = SimpleNamespace(name="TP1", quantity=30, executed=False)
 
     assert manager._resume_after_partial_target(
@@ -1181,7 +1219,9 @@ def test_flat_reconcile_never_clears_unproven_exchange_stop(
 
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
     assert manager.get_bracket("entry-1") is bracket
-    assert broker.cancel_calls == ["stop-unresolved"]
+    assert broker.cancel_calls == (
+        ["stop-unresolved"] if mismatch == "broker_reports_open" else []
+    )
 
 
 def test_actual_fill_resynchronizes_trailing_watermarks() -> None:
@@ -1359,7 +1399,9 @@ def test_flat_fill_latency_defers_quietly_and_rescue_skips(monkeypatch, tmp_path
         # Broker flat, order status lagging: force the authoritative flat view
         # and the strict-live reconcile path (the branch production runs).
         status["flat"] = True
-        monkeypatch.setattr(type(bm), "_position_flat_for_symbol", lambda self, s: True)
+        monkeypatch.setattr(
+            type(bm), "_position_flat_for_symbol", lambda self, s, **_kw: True
+        )
         records: list = []
 
         class _Cap(logging.Handler):
@@ -1876,8 +1918,153 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
 
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
     assert manager.get_bracket("entry-1") is bracket
-    assert status_calls == ["old-stop"]
+    assert status_calls == (
+        ["old-stop", "old-stop"] if unsafe == "book_contains_stop" else ["old-stop"]
+    )
+    assert broker.cancel_calls == (
+        ["old-stop"] if unsafe == "book_contains_stop" else []
+    )
+
+
+def test_unknown_broker_stop_status_never_cancels_exchange_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+
+    def unavailable(*_args: Any) -> None:
+        raise RuntimeError("broker readback outage")
+
+    monkeypatch.setattr(broker, "get_order_status", unavailable)
+    monkeypatch.setattr(broker, "get_orders", unavailable, raising=False)
+    assert (
+        manager._retire_exchange_protective_stop(bracket, reason="PROFIT_TARGET")
+        == "unresolved"
+    )
     assert broker.cancel_calls == []
+    assert bracket.exchange_stop_order_id == stop_id
+    assert bracket.exchange_stop_degraded_reason is not None
+    assert manager.has_unresolved_exit()
+
+
+def test_confirming_stop_modify_observes_unverified_state_until_broker_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, _broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    bracket.sl_trigger_price = 145.0
+    seen: list[str | None] = []
+
+    def readback(_bracket: Any) -> bool:
+        seen.append(bracket.exchange_stop_degraded_reason)
+        return False
+
+    monkeypatch.setattr(manager, "_confirm_exchange_protective_stop", readback)
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+    assert seen == ["broker_stop_modify_unverified"]
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_modify_unverified"
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+
+
+def test_prebroker_exit_rejection_rearms_stop_and_backoff_preserves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65, "product": "MIS"}]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    original_stop = bracket.exchange_stop_order_id
+    assert original_stop is not None
+
+    def current_orders() -> list[dict[str, Any]]:
+        return [
+            {
+                "order_id": order_id,
+                "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+                "status": status,
+                "product": "MIS",
+                "transaction_type": "SELL",
+            }
+            for order_id, status in broker.statuses.items()
+            if order_id.startswith("rescue-")
+        ]
+
+    monkeypatch.setattr(broker, "get_orders", current_orders, raising=False)
+
+    def prebroker_reject(**_kwargs: Any) -> SimpleNamespace:
+        order_manager._last_order_decision = {"broker_attempted": False}
+        return SimpleNamespace(
+            accepted=False,
+            order_id=None,
+            retryable=True,
+            error_type="local_guard",
+            error_message="prebroker rejection",
+            status="REJECTED",
+            broker_payload=None,
+        )
+
+    monkeypatch.setattr(manager, "submit_exit_order", prebroker_reject)
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+    assert original_stop in broker.cancel_calls
+    assert bracket.exchange_stop_order_id is not None
+    assert bracket.exchange_stop_order_id != original_stop
+    assert bracket.exchange_stop_degraded_reason is None
+    cancel_count = len(broker.cancel_calls)
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+    assert len(broker.cancel_calls) == cancel_count
+
+
+def test_rearmed_stop_fill_during_exit_retry_backoff_is_reconciled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    bracket.exit_state = BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
+    bracket.next_exit_attempt_at = time.time() + 60.0
+    broker.statuses[stop_id] = "COMPLETE"
+    broker.positions = []
+
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": "PROFIT_TARGET"},
+        now=time.time(),
+    )
+
+    assert bracket.exit_order_id == stop_id
+    assert broker.cancel_calls == []
+    assert len(order_manager.place_calls) == 1
 
 
 def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification(
@@ -2005,3 +2192,209 @@ def test_unsettled_broker_trigger_readback_blocks_competing_ratchets(
         record["broker_confirmed"]
         for record in bracket.trailing_config["trail_history"]
     )
+
+
+def test_failed_stop_modify_reconciles_broker_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed client response can still represent an in-flight broker amend."""
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    bracket.last_ltp = 160.0
+    bracket.sl_trigger_price = 145.0
+
+    original_modify = order_manager.modify_order
+    attempts: list[str] = []
+
+    def uncertain_modify(order_id: str, **changes: Any) -> bool:
+        attempts.append(str(order_id))
+        if len(attempts) == 1:
+            return False  # Broker acceptance was not demonstrated either way.
+        return original_modify(order_id, **changes)
+
+    monkeypatch.setattr(order_manager, "modify_order", uncertain_modify)
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason == "modify_failed"
+    assert attempts == [stop_id]
+
+    # Pending orderbook evidence must NOT authorize a competing modify.
+    broker.statuses[stop_id] = "MODIFY PENDING"
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert attempts == [stop_id]
+    assert bracket.exchange_stop_degraded_reason is not None
+
+    # Only a fully verified old broker stop may be amended again.
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+    assert manager._sync_exchange_protective_stop(bracket)
+    assert attempts == [stop_id, stop_id]
+    assert bracket.exchange_stop_trigger_price == pytest.approx(145.0)
+    assert bracket.exchange_stop_degraded_reason is None
+
+
+def test_escalation_market_exit_uses_broker_residual_after_partial_fill() -> None:
+    """After cancellation, 35 held contracts must never generate a 65 SELL."""
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "partial_exit_then_cancel")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["order_type"] == "MARKET"
+    assert order_manager.place_calls[0]["quantity"] == 35
+
+
+@pytest.mark.parametrize("position_quantity", [-30, None])
+def test_escalation_never_sells_if_position_direction_or_snapshot_unknown(
+    position_quantity: int | None,
+) -> None:
+    """An opposite position or missing position proof must fail closed."""
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    if position_quantity is None:
+        broker.positions = None
+    else:
+        broker.positions = [{"symbol": SYMBOL, "quantity": position_quantity}]
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "unproven_residual")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+
+
+def test_stale_rescue_does_not_close_filled_order_with_broker_residual() -> None:
+    """Rescue must use canonical fill reconciliation, not COMPLETE alone."""
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+
+    def filled_during_cancel(order_id: str, **_kwargs: Any) -> bool:
+        broker.cancel_calls.append(str(order_id))
+        broker.statuses[str(order_id)] = "COMPLETE"
+        return True
+
+    broker.cancel_order = filled_during_cancel
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.remaining_quantity > 0
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+    assert order_manager.place_calls == []
+
+
+def test_stale_rescue_replacement_uses_signed_residual_after_cancel() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["quantity"] == 35
+    assert bracket.remaining_quantity == 35
+
+
+@pytest.mark.parametrize("broker_quantity", [-30, None])
+def test_stale_rescue_never_sells_opposite_or_unknown_broker_position(
+    broker_quantity: int | None,
+) -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = (
+        None
+        if broker_quantity is None
+        else [{"symbol": SYMBOL, "quantity": broker_quantity}]
+    )
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+
+
+def test_stale_rescue_broker_status_error_does_not_lock_exit_in_progress(
+    monkeypatch,
+) -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+
+    def fail_status(_order_id: str) -> str:
+        raise RuntimeError("temporary broker status outage")
+
+    monkeypatch.setattr(manager, "_wait_for_cancel_or_fill", fail_status)
+    # The independent escalation readback must also be unavailable.
+    # If it authoritatively returns CANCELLED, a residual-sized replacement
+    # is permitted and this is no longer an unconfirmed-cancel scenario.
+    monkeypatch.setattr(manager, "_get_broker_order_status", fail_status)
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+    assert bracket.exit_in_progress is False
+    assert bracket.exit_pending is True
+    assert order_manager.place_calls == []
+
+
+def test_flat_broker_does_not_close_while_old_exit_cancel_unconfirmed() -> None:
+    """A flat snapshot cannot retire an unresolved active reducing order."""
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.pending_exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    broker.positions = []
+    manager._exit_fill_confirmation_grace_seconds = 0.0
+
+    manager._rescue_stale_exit_order(
+        bracket, order_id="old-exit", qty=65, status="OPEN"
+    )
+
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.exit_order_id == "old-exit"
+    assert bracket.position_flat_confirmed is False
+    assert order_manager.place_calls == []

@@ -5,10 +5,15 @@
 
 Responsibilities:
 - LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
-- Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Reconcile confirmed fills, exit state and product-qualified LIVE broker-flat
+  evidence before rearming.
 - Apply cumulative entry VWAP revisions to the existing ledger entry identity,
   then update the active bracket without a second entry activation.
 - Keep trading ledger persistence distinct from the live protective mechanism.
+- Attribute broker-realized net P&L separately from observed full-lot option
+  bid peaks; quote-to-fill gaps are research proxies, never missed fills.
+- Preserve the optional-trailing owner, evaluation count and bounded skip
+  reasons at confirmed closure without granting them trading authority.
 
 Boundaries: BoundBracket/core remain authoritative for protective broker actions.
 Safety: Ledger failure cannot suppress SL/TP exits; uncertain fills block new entries.
@@ -26,6 +31,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.orderflow_shadow_bus import read_orderflow_research
 from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
@@ -37,6 +43,10 @@ from nifty_scalper_bot.execution.fill_ledger import (
     FillValidationError,
 )
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.execution.trade_quality_shadow import (
+    compare_profit_retention,
+    evaluate_adverse_flow_shadow,
+)
 
 
 class _LedgerReleaseStore:
@@ -838,7 +848,98 @@ class LedgerBracketManager(CanonicalBracketManager):
                 else float(resolved_exit) - broker_stop_trigger
             )
 
+        # Retain causal executable observations, without mistaking a quote at
+        # close for a broker fill/arrival quote. No quote is manufactured when
+        # the cache was stale or the on-tick handler only had LTP.
+        research_config = getattr(bracket, "trailing_config", {}) or {}
+        raw_quality_path = research_config.get("_research_executable_path", [])
+        quality_path = raw_quality_path if isinstance(raw_quality_path, list) else []
+        skip_reasons = research_config.get("_adaptive_skip_reasons")
+        if not isinstance(skip_reasons, dict):
+            skip_reasons = {}
+        bid_path = [
+            obs for obs in quality_path
+            if isinstance(obs, Mapping) and obs.get("source") == "bid"
+        ]
+        final_quote = bid_path[-1] if bid_path else None
+        quote_at = _finite(final_quote.get("ts")) if final_quote else None
+        quote_near_exit = bool(
+            quote_at is not None and 0 <= closed_at - quote_at <= 3.0
+        )
+        observed_exit_quote = (
+            {
+                "source": "last_verified_cached_quote_before_close",
+                "bid": final_quote.get("bid"),
+                "ask": final_quote.get("ask"),
+                "quote_at_epoch": quote_at,
+                "age_at_close_ms": round((closed_at - quote_at) * 1000.0, 2),
+                "sampled_quote_age_ms": final_quote.get("quote_age_ms"),
+                "not_a_broker_execution_arrival_quote": True,
+            }
+            if final_quote and quote_near_exit
+            else None
+        )
+        shadow = {"ready": False, "reason": "missing_verified_executable_path"}
+        if (
+            side == "BUY"
+            and initial_risk > 0
+            and entry > 0
+            and quantity > 0
+            and effective_costs is not None
+        ):
+            with suppress(Exception):
+                shadow = compare_profit_retention(
+                    quality_path,
+                    entry=entry,
+                    initial_stop=initial_sl,
+                    quantity=quantity,
+                    round_trip_cost=float(effective_costs.get("total") or 0.0),
+                    samples_truncated=bool(
+                        research_config.get("_research_executable_path_truncated")
+                    ),
+                    entry_at=opened_at,
+                    exit_at=closed_at,
+                    realized_net_pnl=net_pnl,
+                    cost_source=cost_source,
+                )
+        # The original temporal OFI series comes from the already-running
+        # strategy evaluation, not a broker poll or a fabricated quote.
+        flow_observations = read_orderflow_research(
+            str(bracket.symbol), since=opened_at, until=closed_at
+        )
+        for observation in flow_observations:
+            timestamp = float(observation["ts"])
+            causal_bid = next(
+                (
+                    candidate.get("bid")
+                    for candidate in reversed(bid_path)
+                    if (
+                        float(candidate.get("ts") or 0) <= timestamp
+                        and timestamp - float(candidate.get("ts") or 0) <= 2.0
+                    )
+                ),
+                None,
+            )
+            observation["exit_bid"] = causal_bid
+        contract_side = str(provenance.get("contract_side") or "").upper()
+        if contract_side not in {"CE", "PE"}:
+            option_symbol = str(bracket.symbol or "").upper()
+            contract_side = (
+                "CE" if option_symbol.endswith("CE")
+                else "PE" if option_symbol.endswith("PE")
+                else ""
+            )
+        flow_shadow = evaluate_adverse_flow_shadow(
+            flow_observations,
+            contract_side=contract_side,
+            max_window_seconds=15.0,
+        )
+
         execution_quality = {
+            "exit_observed_cached_quote": observed_exit_quote,
+            "exit_quote_evidence_source": (
+                "cached_bid_observation" if observed_exit_quote else "unavailable"
+            ),
             "exchange_stop_trigger_price": broker_stop_trigger,
             "stop_trigger_fill_deviation_points": (
                 round(stop_fill_deviation, 4)
@@ -971,6 +1072,81 @@ class LedgerBracketManager(CanonicalBracketManager):
             },
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
+            "trade_quality_shadow": shadow,
+            # This is an audit of optional policy *decisions*, not evidence
+            # of broker stop acceptance or of a full-lot missed fill.
+            "optional_trailing_evidence": {
+                "owner": research_config.get("_optional_trail_owner"),
+                "evaluations": research_config.get("_optional_trail_eval_count"),
+                "skip_reason_counts": dict(skip_reasons),
+                "last_skip_reason": research_config.get("_adaptive_last_skip_reason"),
+                "last_skip_bid": _finite(
+                    research_config.get("_adaptive_last_skip_bid")
+                ),
+                "last_skip_at_epoch": _finite(
+                    research_config.get("_adaptive_last_skip_at")
+                ),
+                "adaptive_has_ratcheted": (
+                    research_config.get("_adaptive_profit_has_ratcheted") is True
+                ),
+                "highest_adaptive_qualified_bid": _finite(
+                    research_config.get("_adaptive_profit_executable_high")
+                ),
+                "missing_skip_reason_does_not_prove_success": True,
+                "skip_traces_require_recent_cached_bid_above_0p6r": True,
+            },
+            "adverse_orderflow_shadow": {
+                **flow_shadow,
+                "sample_count": len(flow_observations),
+                "source": "existing_orderflow_3s_causal_research",
+                "not_live_exit_authority": True,
+            },
+            "research_orderflow_path": [
+                {
+                    "ts": item["ts"],
+                    "ofi_3s_norm": item["ofi_3s_norm"],
+                    "fresh": item["fresh"],
+                    "exit_bid": item.get("exit_bid"),
+                }
+                for item in flow_observations
+            ],
+            "research_quote_path": {
+                "source": "sampled_cached_option_bid_no_broker_poll",
+                "complete": not bool(
+                    research_config.get("_research_executable_path_truncated")
+                ),
+                "quote_samples": len(quality_path),
+                "verified_bid_samples": len(bid_path),
+                "full_lot_bid_samples": sum(
+                    1 for item in bid_path
+                    if item.get("full_lot_bid_proven") is True
+                ),
+                "top_bid_without_full_lot_proof": sum(
+                    1 for item in bid_path
+                    if item.get("full_lot_bid_proven") is not True
+                ),
+                "best_bid_not_a_full_lot_fill": True,
+                "first_sample_epoch": (
+                    quality_path[0].get("ts") if quality_path else None
+                ),
+                "last_sample_epoch": (
+                    quality_path[-1].get("ts") if quality_path else None
+                ),
+                # Preserve the compact source path for later chronology checks.
+                # This is a sampled bid path, not tick-complete orderbook data.
+                "samples": [
+                    [
+                        item.get("ts"), item.get("bid"), item.get("ask"),
+                        item.get("source"), item.get("virtual_stop"),
+                        item.get("exchange_stop"),
+                    ]
+                    for item in quality_path
+                    if isinstance(item, Mapping)
+                ],
+            },
+            "entry_market_quality_evidence": provenance.get(
+                "smc_entry_extension_audit"
+            ),
             "execution_quality": execution_quality,
             "exit_reason": str(
                 getattr(bracket, "exit_reason", None) or bracket.close_source or ""
@@ -1238,7 +1414,10 @@ class LedgerBracketManager(CanonicalBracketManager):
                 return False
 
             if bracket.exit_state == _core.BracketExitLifecycle.CLOSED.value:
-                if not self._safe_position_flat(bracket.symbol):
+                if not self._safe_position_flat(
+                    bracket.symbol,
+                    product=bracket.product if self._is_live_execution() else None,
+                ):
                     return False
                 if self._fill_ledger is None:
                     return False

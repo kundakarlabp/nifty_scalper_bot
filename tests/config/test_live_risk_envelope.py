@@ -241,3 +241,21 @@ def test_unset_risk_settings_use_single_5pct_policy(monkeypatch) -> None:
     assert risk.daily_loss_pct == pytest.approx(5.0)
     assert risk.daily_pnl_cap_pct == pytest.approx(5.0)
     assert risk.per_trade_risk_pct == pytest.approx(5.0)
+
+
+def test_live_daily_absolute_ceiling_does_not_grow_with_cash(monkeypatch) -> None:
+    """The existing ₹773 operator ceiling remains active above that equity."""
+    monkeypatch.delenv("RISK__MAX_DAY_LOSS", raising=False)
+    monkeypatch.delenv("RISK_MAX_DAY_LOSS", raising=False)
+    settings = _build_risk_settings()
+    assert settings.max_daily_loss_absolute == pytest.approx(773.0)
+    effective_cap = min(
+        20_000.0 * settings.daily_loss_pct / 100.0, settings.max_daily_loss_absolute
+    )
+    assert effective_cap == pytest.approx(773.0)
+
+
+def test_live_absolute_ceiling_respects_stricter_operator_override(monkeypatch) -> None:
+    monkeypatch.delenv("RISK__MAX_DAY_LOSS", raising=False)
+    monkeypatch.setenv("RISK_MAX_DAY_LOSS", "500")
+    assert _build_risk_settings().max_daily_loss_absolute == pytest.approx(500.0)

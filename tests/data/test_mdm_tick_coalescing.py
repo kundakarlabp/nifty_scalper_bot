@@ -2197,6 +2197,7 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
 
     mdm._replay_archive = _Archive()
     monkeypatch.setenv("REPLAY_CAPTURE_ENABLED", "true")
+    monkeypatch.setattr(mdm_module, "get_market_session_state", lambda _now: "open")
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick"]
 
@@ -2204,6 +2205,11 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
         raise AssertionError("identical basket must not be reserialized")
 
     monkeypatch.setattr(mdm_module, "to_json_safe", _unexpected_serialize)
+    mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
+    assert events == ["snapshot", "tick", "tick"]
+
+    # Off-session observations must not append to the just-closed tape.
+    monkeypatch.setattr(mdm_module, "get_market_session_state", lambda _now: "closed")
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick", "tick"]
 
@@ -2407,3 +2413,184 @@ def test_ws_recovery_missing_required_subscription_is_not_false_success(monkeypa
     assert result["ok"] is False
     assert result["missing_current_generation_ticks"] == [selected_ce]
     assert result["state"] == "waiting_for_first_ticks"
+
+
+def test_datahub_protects_held_option_across_atm_basket_rotation() -> None:
+    """Held 25700 CE remains required after the selected ATM rolls to 25750."""
+    from nifty_scalper_bot.data.data_hub import DataHub
+
+    mdm = MarketDataManager(kite=None)
+    hub = object.__new__(DataHub)
+    hub._mdm = mdm
+    held = "NFO:NIFTY26NOV25700CE"
+    next_atm = "NFO:NIFTY26NOV25750CE"
+    mdm._active_contract_basket = {"selected_ce": held}
+    hub.set_active_bracket_symbols([held])
+    assert held in mdm._required_live_symbols()
+
+    mdm._active_contract_basket = {"selected_ce": next_atm}
+    assert {held, next_atm} <= mdm._required_live_symbols()
+    hub.set_active_bracket_symbols([])
+    assert held not in mdm._required_live_symbols()
+
+
+def test_reconcile_active_basket_never_unsubscribes_live_bracket_token() -> None:
+    """Broker-held 25700 CE remains subscribed when ATM selects 25750 CE."""
+    mdm = MarketDataManager(kite=None)
+    held = "NFO:NIFTY26NOV25700CE"
+    new_atm = "NFO:NIFTY26NOV25750CE"
+    held_token, new_token = 1001, 1002
+    for sym, token in ((held, held_token), (new_atm, new_token)):
+        mdm._token_by_symbol[sym] = token
+        mdm._symbol_to_token[sym] = token
+        mdm._symbol_by_token[token] = sym
+    mdm._desired_tokens = {held_token}
+
+    class RecordingWS:
+        def __init__(self):
+            self.tokens = {held_token}
+            self.calls = []
+
+        def tokens_snapshot(self):
+            return set(self.tokens)
+
+        def set_tokens(self, tokens):
+            self.tokens = set(tokens)
+            self.calls.append(set(tokens))
+            return True
+
+    ws = RecordingWS()
+    mdm._ws = ws
+    mdm.set_active_bracket_symbols([held])
+    result = mdm.reconcile_active_subscriptions({new_token})
+    assert result["protected_tokens_retained"] == 1
+    assert ws.calls[-1] == {held_token, new_token}
+    assert mdm._desired_tokens == {held_token, new_token}
+
+    # A real, broker-confirmed closure releases the protection owner.
+    mdm.set_active_bracket_symbols([])
+    second = mdm.reconcile_active_subscriptions({new_token})
+    assert second["protected_tokens_retained"] == 0
+    assert ws.calls[-1] == {new_token}
+    assert held_token not in mdm._desired_tokens
+
+
+def test_open_position_also_survives_basket_subscription_replacement() -> None:
+    mdm = MarketDataManager(kite=None)
+    held = "NFO:NIFTY26NOV25700CE"
+    mdm._token_by_symbol[held] = 1001
+    mdm._symbol_to_token[held] = 1001
+    mdm._symbol_by_token[1001] = held
+    mdm.set_open_position_symbols([held])
+    result = mdm.reconcile_active_subscriptions({1002})
+    assert result["protected_tokens_retained"] == 1
+    assert mdm._desired_tokens == {1001, 1002}
+
+
+def test_fast_arrival_rejects_retired_option_before_cache_publication() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    cached = {"symbol": symbol, "ltp": 105.0, "source_timestamp_valid": True}
+    mdm._tick_cache[symbol] = dict(cached)
+    mdm._latest_ticks[symbol] = dict(cached)
+    mdm._last_tick_time[symbol] = 123.0
+    mdm._desired_tokens.discard(1)
+
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=90.0,
+        raw_tick={"instrument_token": 1, "last_price": 90.0},
+    )
+
+    actual = mdm.get_latest_tick(symbol)
+    assert actual is not None
+    assert actual["ltp"] == cached["ltp"]
+    assert actual["source_timestamp_valid"] is True
+    assert mdm._last_tick_time[symbol] == 123.0
+    assert mdm.current_live_token(symbol) == 1
+
+
+def test_fast_arrival_rejects_stale_symbol_token_mapping() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    mdm._symbol_to_token[symbol] = 2
+    mdm._token_by_symbol[symbol] = 2
+
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=90.0,
+        raw_tick={"instrument_token": 1, "last_price": 90.0},
+    )
+
+    assert mdm.get_latest_tick(symbol) is None
+    assert mdm.current_live_token(symbol) == 2
+
+
+def test_fast_arrival_cannot_invent_exchange_time_or_downgrade_verified_book() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = mapping[1]
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=100.0,
+        raw_tick={"instrument_token": 1, "last_price": 100.0},
+    )
+    provisional = mdm.get_latest_tick(symbol)
+    assert provisional is not None
+    assert provisional["source_timestamp_valid"] is False
+    assert provisional["timestamp_source"] == "received_at_fallback"
+    # The read facade may further downgrade an unverified receipt to synthetic.
+    assert provisional["timestamp_quality"] in {"unknown", "synthetic"}
+
+    verified = {
+        "symbol": symbol,
+        "ltp": 105.0,
+        "source_timestamp_valid": True,
+        "timestamp_source": "exchange_timestamp",
+    }
+    mdm._tick_cache[symbol] = dict(verified)
+    mdm._latest_ticks[symbol] = dict(verified)
+    original_receipt = mdm._last_tick_time[symbol]
+    mdm._record_ws_arrival_fast(
+        symbol=symbol,
+        token=1,
+        ltp=99.0,
+        raw_tick={"instrument_token": 1, "last_price": 99.0},
+    )
+
+    actual = mdm.get_latest_tick(symbol)
+    assert actual is not None
+    assert actual["ltp"] == verified["ltp"]
+    assert actual["source_timestamp_valid"] is True
+    assert mdm._last_tick_time[symbol] == original_receipt
+
+
+@pytest.mark.asyncio
+async def test_bounded_worker_batch_avoids_per_tick_dispatch(monkeypatch):
+    mdm = _make_mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm.set_open_position_symbols([symbol])
+    monkeypatch.setattr(mdm, "_tick_drain_budget_s", 1.0)
+    monkeypatch.setattr(mdm, "_tick_drain_invocation_max_ticks", 3)
+    seen: list[int] = []
+    monkeypatch.setattr(
+        mdm, "_process_queued_tick", lambda raw: seen.append(raw["last_price"])
+    )
+    mdm.set_event_loop(asyncio.get_running_loop())
+    for i in range(9):
+        mdm._enqueue_tick_threadsafe(
+            {"instrument_token": 1, "last_price": i, "timestamp": i}
+        )
+    await mdm.drain_pending_ticks(timeout=3.0)
+
+    assert seen == list(range(9))
+    stats = mdm.get_tick_pressure_stats()
+    assert stats["tick_latency_percentiles"]["worker_dispatch_wait"]["samples"] == 3
+    assert stats["unexplained_loss"] == 0
+    assert stats["max_active_drains"] == 1
+    await _stop_mdm(mdm)

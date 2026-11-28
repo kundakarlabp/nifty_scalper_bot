@@ -1,5 +1,7 @@
 """Read-only, causal exit-overlay research on captured exchange quote observations.
 
+Responsibilities: Compare target, ratchet and 10/15/20-minute time-stop
+hypotheses on verified observed-bid paths, never after the actual exit.
 The current live entry and protective-exit code are never imported or modified.
 These single-position overlays are NOT broker-fill parity: marketable sizes,
 latency, queue priority and differing transaction taxes remain unverified.
@@ -10,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -23,6 +25,9 @@ _POLICIES = (
     "lock_40pct",
     "lock_50pct",
     "lock_60pct",
+    "time_stop_10m",
+    "time_stop_15m",
+    "time_stop_20m",
 )
 
 
@@ -151,6 +156,38 @@ def compare_trade(
     risk = entry - initial_sl
     for policy in _POLICIES:
         is_target = policy.startswith("target_")
+        is_timer = policy.startswith("time_stop_")
+        if is_timer:
+            minute_limit = int(policy.split("_")[2][:-1])
+            deadline = entry_at + timedelta(minutes=minute_limit)
+            candidate = next(((at, bid) for at, bid in bids if at >= deadline), None)
+            if exit_at <= deadline or candidate is None:
+                result["outcomes"][policy] = {
+                    "status": "UNRESOLVED",
+                    "reason": "time_stop_outside_actual_observed_position",
+                }
+                continue
+            at, bid = candidate
+            if (at - deadline).total_seconds() > max_quote_gap_seconds:
+                result["outcomes"][policy] = {
+                    "status": "UNRESOLVED",
+                    "reason": "time_stop_quote_arrived_too_late",
+                }
+                continue
+            if any(price <= initial_sl for ts, price in bids if ts < deadline):
+                result["outcomes"][policy] = {
+                    "status": "UNRESOLVED",
+                    "reason": "protective_stop_may_precede_time_stop",
+                }
+                continue
+            exit_price = bid - slippage_points
+            result["outcomes"][policy] = {
+                "status": "MODELED_TIME_STOP",
+                "at": at.isoformat(),
+                "exit_price": round(exit_price, 2),
+                "net": round((exit_price - entry) * qty - costs, 2),
+            }
+            continue
         target_r = float(policy.split("_")[1][:-1]) if is_target else None
         lock_pct = int(policy.split("_")[1][:-3]) / 100.0 if not is_target else None
         target = entry + risk * target_r if target_r is not None else None
@@ -253,7 +290,12 @@ def run_exit_comparison(
             r["outcomes"][policy]
             for r in results
             if r["outcomes"][policy]["status"]
-            in {"MODELED_TARGET", "MODELED_STOP", "UNCHANGED_ACTUAL"}
+            in {
+                "MODELED_TARGET",
+                "MODELED_STOP",
+                "MODELED_TIME_STOP",
+                "UNCHANGED_ACTUAL",
+            }
         ]
         unresolved = len(results) - len(resolved)
         scenarios[policy] = {
@@ -280,6 +322,7 @@ def run_exit_comparison(
             "exchange queue/fill unverified",
             "fixed actual transaction costs, not re-priced",
             "no trading beyond actual observed exit",
+            "time stops longer than observed actual holding are unresolved",
             "requires complete captured bid depth and lot quantity",
             "single-position comparisons do not replay subsequent entries",
             "tier-1 and tier-2 rules are quote-level approximations; "

@@ -17,7 +17,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.margin_engine import estimate_fallback_cash_required
-from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.risk.cost_model import (
+    estimate_protective_stop_limit_loss,
+    estimate_round_trip_cost,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,11 +48,14 @@ class MinimumLotAffordability:
     plan_stop_distance: float | None = None
     plan_cost_inclusive_risk: float | None = None
     plan_risk_affordable: bool | None = None
+    plan_stop_limit_cost_inclusive_risk: float | None = None
     capacity_blocker: str | None = None
     max_daily_loss: float | None = None
     current_day_loss: float | None = None
     completed_trade_costs_today: float | None = None
     day_loss_source: str | None = None
+    cash_shortfall: float | None = None
+    plan_risk_shortfall: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -364,6 +370,7 @@ def evaluate_minimum_lot_affordability(
     plan_stop_distance: float | None = None
     plan_cost_inclusive_risk: float | None = None
     plan_risk_affordable: bool | None = None
+    plan_stop_limit_cost_inclusive_risk: float | None = None
     if plan_entry is not None and plan_stop is not None and plan_entry > plan_stop:
         plan_stop_distance = plan_entry - plan_stop
         # Mirror OrderManager's protected BUY price and distance reanchoring so
@@ -385,9 +392,20 @@ def evaluate_minimum_lot_affordability(
             half_spread=cost_model_half_spread,
         ).total
         plan_cost_inclusive_risk = plan_stop_distance * lot_size + stop_cost
-        if effective_one_lot_risk_budget is not None:
+        if protected_stop > 0.0:
+            plan_stop_limit_cost_inclusive_risk = estimate_protective_stop_limit_loss(
+                entry_price=protected_entry,
+                stop_price=protected_stop,
+                quantity=lot_size,
+                half_spread=cost_model_half_spread,
+            )
+        if (
+            effective_one_lot_risk_budget is not None
+            and plan_stop_limit_cost_inclusive_risk is not None
+        ):
             plan_risk_affordable = bool(
-                plan_cost_inclusive_risk <= effective_one_lot_risk_budget + 1e-9
+                max(plan_cost_inclusive_risk, plan_stop_limit_cost_inclusive_risk)
+                <= effective_one_lot_risk_budget + 1e-9
             )
 
     if not cash_affordable:
@@ -415,6 +433,22 @@ def evaluate_minimum_lot_affordability(
         reason = "affordable"
         capacity_blocker = None
 
+    # Quantify why a genuine one-lot option is infeasible, without changing
+    # the stop, contract-selection policy, risk ceiling or broker admission.
+    # A missing authoritative budget remains unknown, never a zero shortfall.
+    cash_shortfall = max(0.0, required - executable_capacity)
+    plan_risk_shortfall = (
+        max(
+            0.0,
+            max(plan_cost_inclusive_risk, plan_stop_limit_cost_inclusive_risk)
+            - effective_one_lot_risk_budget,
+        )
+        if plan_cost_inclusive_risk is not None
+        and plan_stop_limit_cost_inclusive_risk is not None
+        and effective_one_lot_risk_budget is not None
+        else None
+    )
+
     return MinimumLotAffordability(
         normalized_symbol,
         affordable,
@@ -439,11 +473,14 @@ def evaluate_minimum_lot_affordability(
         plan_stop_distance=plan_stop_distance,
         plan_cost_inclusive_risk=plan_cost_inclusive_risk,
         plan_risk_affordable=plan_risk_affordable,
+        plan_stop_limit_cost_inclusive_risk=plan_stop_limit_cost_inclusive_risk,
         capacity_blocker=capacity_blocker,
         max_daily_loss=max_daily_loss,
         current_day_loss=current_day_loss,
         completed_trade_costs_today=completed_trade_costs_today,
         day_loss_source=day_loss_source,
+        cash_shortfall=cash_shortfall,
+        plan_risk_shortfall=plan_risk_shortfall,
     )
 
 

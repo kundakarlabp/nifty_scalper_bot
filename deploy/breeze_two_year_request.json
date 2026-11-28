@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "request_id": "breeze-two-year-20261109-initial-bounded-collection",
+  "target_first": "2024-11-06",
+  "target_stop_exclusive": "2026-11-06",
+  "max_requests_per_window": 400,
+  "interval": "1minute",
+  "scope": "NIFTY index, all dated NIFTY futures expiries from published EOD identities, opening-nearest CE/PE pair in two nearest option expiries per session",
+  "expected_limitations": "Not a full intraday option chain; not quotes/depth/Greeks; partial or invalid dates must remain missing and quarantined",
+  "notes": "Read-only research. 25 nonoverlapping windows. Serialized at max-parallel 1 to respect provider quota. Encrypted GitHub artifacts only."
+}

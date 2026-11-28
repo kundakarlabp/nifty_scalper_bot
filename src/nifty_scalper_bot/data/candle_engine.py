@@ -2,7 +2,8 @@
 
 Responsibilities: CandleEngine ingests normalized ticks, merges history/backfill,
 validates OHLC and timestamps, and detects/repairs bar gaps and conflicts.
-Key interfaces: CandleEngine, sanitize, validate_dataframe, import_candle_history.
+Key interfaces: CandleEngine, sanitize, validate_dataframe, import_candle_history,
+get_history_correction_revision (monotonic, only real REST overlap corrections).
 Boundaries: MarketDataManager owns feed subscriptions and historical fetch policy;
 DataHub only reads bars; do not create a parallel trading-bar authority.
 Safety: Never use an incomplete, future-dated or conflicting bar as confirmed.
@@ -172,6 +173,7 @@ class CandleEngine:
     _history_import_idempotent_total: int = field(default=0, init=False)
     _history_import_conflict_total: int = field(default=0, init=False)
     _history_import_reconciled_total: int = field(default=0, init=False)
+    _history_correction_revision: int = field(default=0, init=False)
     _history_import_failure_total: int = field(default=0, init=False)
     _finalized_minute_tick_reject_total: int = field(default=0, init=False)
     _history_current_reconcile_total: int = field(default=0, init=False)
@@ -209,6 +211,7 @@ class CandleEngine:
         self._history_import_idempotent_total = 0
         self._history_import_conflict_total = 0
         self._history_import_reconciled_total = 0
+        self._history_correction_revision = 0
         self._history_import_failure_total = 0
         self._finalized_minute_tick_reject_total = 0
         self._history_current_reconcile_total = 0
@@ -275,6 +278,7 @@ class CandleEngine:
                 ),
                 "history_import_conflict_total": self._history_import_conflict_total,
                 "history_import_reconciled_total": self._history_import_reconciled_total,
+                "history_correction_revision": self._history_correction_revision,
                 "history_import_failure_total": self._history_import_failure_total,
                 "finalized_minute_tick_reject_total": (
                     self._finalized_minute_tick_reject_total
@@ -408,6 +412,11 @@ class CandleEngine:
                 },
             )
             return True
+
+    def get_history_correction_revision(self) -> int:
+        """Monotonic version of genuine completed REST/WS OHLCV corrections."""
+        with self._lock:
+            return self._history_correction_revision
 
     def get_completed_bars(self) -> list[dict[str, Any]]:
         """Return defensive copies of canonical finalized OHLCV bars."""
@@ -567,6 +576,7 @@ class CandleEngine:
             bounded = candidate[-int(self.max_bars) :]
             if reconciled:
                 self._history_import_reconciled_total += reconciled
+                self._history_correction_revision += 1
                 LOGGER.info(
                     "HISTORY_OVERLAP_RECONCILED",
                     extra={

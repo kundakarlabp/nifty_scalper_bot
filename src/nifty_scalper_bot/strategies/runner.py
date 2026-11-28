@@ -10,19 +10,30 @@ Runtime role:
   callback path; reuses the already-bound canonical CandleEngine per symbol.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
-- Maintains active history counts and uses shared direction-context resolution.
+- Maintains active history counts and uses shared direction-context resolution;
+  authoritative spot/futures snapshots cannot be overridden by old option bias.
+- Exposes inspect_recent_canonical_history for a bounded, read-only OHLCV
+  check of latest completed MDM, runner and indicator candles after reseeding;
+  count-based readiness is not misreported as full content parity.
 - Reads MDM-finalized candles for LIVE indicator history (no coalesced-tick OHLCV);
   untrusted cumulative observations remain excluded.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
-- Persists bounded, read-only candidate cash/risk rejection evidence in the
-  existing trade-decision journal without adding a second risk authority.
-- Checks independently parsed original/replacement expiries using the pure
-  _strict_replacement_expiry_block_reason helper before a strict substitution.
+- ENGINE_SUMMARY reports actual interval option-evaluation regime vetoes
+  from StrategyManager, not an unwritten local counter.
+- Persists bounded, read-only candidate cash/risk and replacement-contract
+  rejection evidence in the existing trade-decision journal without adding a
+  second risk authority.
+- Checks independent original/replacement expiry, strike, side, premium,
+  and basket eligibility before affordability and again before final order routing.
+- Evaluates one separately quoted, completed-bar ITM candidate when the selected
+  option is below the execution premium floor; the candidate's own strategy
+  vote remains pinned to that contract, without transplanting an ATM thesis.
 - Rejects changed-contract premium plans whose materialized stop widens beyond
   the selected candidate or lacks finite, same-contract entry/exit geometry.
 - Pins each live candidate decision to one active basket generation and reports
   the last terminal execution rejection without relaxing quote or risk checks.
+- Rechecks the canonical regime gate immediately before live entry submission.
 - Gap repair imports observed cached bars only; never invents missing
   futures/spot minutes from a prior close.
 
@@ -100,6 +111,7 @@ from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.config.strategy_taxonomy import normalize_strategy_name
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
     active_contract_selection_from_basket,
@@ -111,7 +123,7 @@ from nifty_scalper_bot.core.history_roles import (
     resolve_symbol_history_role,
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
-from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.core.strategy_manager import StrategyManager, _context_snapshot_fresh
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -127,6 +139,10 @@ from nifty_scalper_bot.data.pipeline import (
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
+from nifty_scalper_bot.core.strategy_vote_policy import (
+    verified_range_vwap_final_order_risk,
+    verified_range_vwap_reversal,
+)
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
@@ -1269,6 +1285,7 @@ class StrategyRunner:
         self._candidate_total_count = 0
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
+        self._last_regime_hard_block_count = 0
         self._capital_block_counter = 0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
@@ -2408,21 +2425,33 @@ class StrategyRunner:
         except Exception:
             indicator_tail = {}
 
-        def _diverges(other: Mapping[datetime, tuple[float, ...]]) -> bool:
-            return any(
-                minute in other
-                and any(
-                    not math.isclose(left, right, rel_tol=0.0, abs_tol=0.000001)
-                    for left, right in zip(ohlcv, other[minute])
-                )
-                for minute, ohlcv in canonical_tail.items()
-            )
+        def _first_drift(
+            other: Mapping[datetime, tuple[float, ...]]
+        ) -> tuple[datetime, str, float, float] | None:
+            for minute, values in canonical_tail.items():
+                observed = other.get(minute)
+                if observed is None:
+                    continue
+                for field, expected, actual in zip(
+                    ("open", "high", "low", "close", "volume"), values, observed
+                ):
+                    if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.000001):
+                        return minute, field, expected, actual
+            return None
 
-        content_diverged = _diverges(runner_tail) or _diverges(indicator_tail)
-        if content_diverged:
+        drift = _first_drift(runner_tail)
+        projection = "runner"
+        if drift is None:
+            drift = _first_drift(indicator_tail)
+            projection = "indicator"
+        content_diverged = drift is not None
+        if drift is not None:
+            minute, field, expected, actual = drift
             self._logger.warning(
-                "RUNNER_CANONICAL_OHLCV_DIVERGENCE symbol=%s role=%s action=reseed",
-                normalized, role,
+                "RUNNER_CANONICAL_OHLCV_DIVERGENCE symbol=%s role=%s "
+                "action=reseed projection=%s field=%s minute=%s "
+                "canonical=%s observed=%s",
+                normalized, role, projection, field, minute, expected, actual,
             )
         indicator_count = indicator_before
         source_ready = source_count >= required_count
@@ -2731,27 +2760,71 @@ class StrategyRunner:
                         or indicator_last < mdm_last
                     )
                 )
+                # A REST overlap can amend an already-finalized futures minute
+                # without changing history length or its latest timestamp.
+                # The CandleEngine correction revision exposes that event without
+                # re-comparing all 400 bars on every live tick.
+                revision_seen = getattr(self, "_context_correction_revision_seen", None)
+                if not isinstance(revision_seen, dict):
+                    revision_seen = {}
+                    self._context_correction_revision_seen = revision_seen
+                engine = getattr(self, "_candle_engines", {}).get(normalized)
+                revision_getter = getattr(engine, "get_history_correction_revision", None)
+                correction_revision = (
+                    int(revision_getter()) if callable(revision_getter) else None
+                )
+                correction_changed = bool(
+                    correction_revision is not None
+                    and correction_revision != revision_seen.get(normalized, 0)
+                )
                 runner_depth_target = min(source_count, _runner_history_cap())
                 needs_sync = bool(
-                    indicator_count < minimum
+                    correction_changed
+                    or indicator_count < minimum
                     or runner_count < minimum
                     or source_count > indicator_count
                     or runner_count < runner_depth_target
                     or stale_projection
                 )
                 after = indicator_count
-                if needs_sync:
+                if correction_changed:
+                    result = self.sync_history_from_mdm(
+                        normalized,
+                        required_bars=minimum,
+                        reason=source,
+                        role=role,
+                        request_if_short=source_count < minimum,
+                    )
+                    after = result.indicator_bars
+                    if result.success:
+                        revision_seen[normalized] = correction_revision
+                elif needs_sync:
                     after = self._sync_history_from_mdm_cache(
                         normalized,
                         required_bars=minimum,
                         source=source,
                         request_if_short=source_count < minimum,
                     )
+                    if correction_revision is not None and after >= minimum:
+                        revision_seen[normalized] = correction_revision
+                elif correction_revision is not None:
+                    revision_seen[normalized] = correction_revision
 
                 if source_count < target:
                     now = time.monotonic()
                     last_request = float(request_state.get(normalized, 0.0) or 0.0)
-                    if now - last_request >= _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS:
+                    # The 400-bar ORB target is optional structural context,
+                    # not a reason to fetch historical REST every 30 seconds
+                    # once the minimum strategy context is already ready.
+                    interval = (
+                        600.0
+                        if source_count >= minimum
+                        else _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS
+                    )
+                    # The first structural attempt must be immediate, even
+                    # on a freshly booted host where monotonic() < 600 s.
+                    # Backoff applies only after an actual scheduled request.
+                    if normalized not in request_state or now - last_request >= interval:
                         if self._schedule_runtime_history_ensure(
                             normalized,
                             role=role,
@@ -4761,6 +4834,116 @@ class StrategyRunner:
         self._execution_reject_cooldown_ts[reject_key] = now_epoch
         return reject_reason
 
+    def _candidate_replacement_contract_guard(
+        self,
+        *,
+        original_symbol: str,
+        selected_symbol: str,
+        original_trade_price: float,
+        candidate_trade_price: float,
+    ) -> tuple[str | None, dict[str, object]]:
+        """Apply the same static contract restrictions before and after ranking.
+
+        The final readiness and order-preflight checks remain mandatory and
+        are never replaced by this static eligibility check.
+        """
+        original_symbol = normalize_symbol(original_symbol)
+        selected_symbol = normalize_symbol(selected_symbol)
+        allow_replace = _env_flag("ALLOW_CANDIDATE_REPLACEMENT", default=True)
+        strict_replace = _env_flag("STRICT_CANDIDATE_REPLACEMENT", default=True)
+        max_strike_dist = float(
+            os.getenv(
+                "MAX_REPLACEMENT_STRIKE_DISTANCE",
+                os.getenv("CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50"),
+            )
+            or "50"
+        )
+        max_premium_pct = float(
+            os.getenv(
+                "MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT",
+                os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35"),
+            )
+            or "35"
+        )
+        policy: dict[str, object] = {
+            "allow_candidate_replacement": allow_replace,
+            "strict_candidate_replacement": strict_replace,
+            "max_replacement_strike_distance": max_strike_dist,
+            "max_replacement_premium_deviation_pct": max_premium_pct,
+        }
+        if original_symbol == selected_symbol:
+            return None, policy
+        if not allow_replace:
+            return "config_disabled", policy
+
+        orig_side = self._contract_side_from_symbol(original_symbol)
+        new_side = self._contract_side_from_symbol(selected_symbol)
+        if orig_side not in {"CE", "PE"} or new_side not in {"CE", "PE"}:
+            return "side_unverified", policy
+        if orig_side != new_side:
+            return "side_mismatch", policy
+
+        def expiry_key(symbol: str) -> str | None:
+            normalized = normalize_symbol(symbol).split(":", 1)[-1]
+            side = self._contract_side_from_symbol(normalized)
+            strike = self._extract_strike_from_symbol(normalized)
+            if side in {"CE", "PE"} and strike is not None:
+                suffix = f"{int(strike)}{side}"
+                if normalized.endswith(suffix):
+                    return normalized[: -len(suffix)]
+            match = re.search(
+                r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
+                normalized,
+            )
+            return match.group(1) if match else None
+
+        expiry_reason = _strict_replacement_expiry_block_reason(
+            expiry_key(original_symbol),
+            expiry_key(selected_symbol),
+            strict=strict_replace,
+        )
+        if expiry_reason is not None:
+            return expiry_reason, policy
+
+        orig_strike = self._extract_strike_from_symbol(original_symbol)
+        new_strike = self._extract_strike_from_symbol(selected_symbol)
+        if orig_strike is None or new_strike is None:
+            return "strike_unverified", policy
+        if abs(float(new_strike) - float(orig_strike)) > max_strike_dist:
+            return "strike_jump", policy
+        # A cheaper adjacent contract is not inherently lower quality.
+        # Its own executable quote, stop geometry, net R:R and cost-inclusive
+        # one-lot risk are independently checked by the candidate selector,
+        # affordability gate and final broker preflight. Keep the premium
+        # deviation guard for more expensive replacements.
+        if (
+            original_trade_price > 0.0
+            and candidate_trade_price > original_trade_price
+            and (candidate_trade_price - original_trade_price)
+            / original_trade_price
+            * 100.0
+            > max_premium_pct
+        ):
+            return "premium_jump", policy
+
+        active_symbols = {
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_option_symbols", set()) or set())
+        }
+        active_symbols.update(
+            normalize_symbol(str(item))
+            for item in (getattr(self, "_active_basket_all_symbols", set()) or set())
+        )
+        active_symbols.update(
+            normalize_symbol(str(item))
+            for item in (
+                getattr(self, "_active_basket_token_by_symbol", {}) or {}
+            ).keys()
+        )
+        if active_symbols and selected_symbol not in active_symbols:
+            return "not_in_active_basket", policy
+        return None, policy
+
     def _select_capital_eligible_candidate(
         self,
         *,
@@ -4822,6 +5005,47 @@ class StrategyRunner:
 
         for ranked in ordered_candidates:
             ranked_symbol = normalize_symbol(str(ranked.symbol))
+            if is_live_mode and preferred and ranked_symbol != preferred:
+                replacement_blocker, replacement_policy = (
+                    self._candidate_replacement_contract_guard(
+                        original_symbol=preferred,
+                        selected_symbol=ranked_symbol,
+                        original_trade_price=float(preferred_entry_price or 0.0),
+                        candidate_trade_price=float(
+                            getattr(ranked, "entry_price", 0.0) or 0.0
+                        ),
+                    )
+                )
+                if replacement_blocker is not None:
+                    decisions[ranked_symbol] = {
+                        "symbol": ranked_symbol,
+                        "original_symbol": preferred,
+                        "reason": "replacement_not_permitted",
+                        "replacement_blocker": replacement_blocker,
+                        "original_trade_price": float(preferred_entry_price or 0.0),
+                        "candidate_trade_price": float(
+                            getattr(ranked, "entry_price", 0.0) or 0.0
+                        ),
+                        "execution_min_option_premium": getattr(
+                            getattr(self, "_trade_candidate_selector", None),
+                            "min_option_premium",
+                            None,
+                        ),
+                        "trace_id": trace_id,
+                        **replacement_policy,
+                    }
+                    self._logger.info(
+                        "CANDIDATE_REPLACEMENT_PREFILTER_BLOCKED original_symbol=%s selected_symbol=%s reason=%s trace_id=%s",
+                        preferred,
+                        ranked_symbol,
+                        replacement_blocker,
+                        trace_id,
+                        extra={
+                            "event": "CANDIDATE_REPLACEMENT_PREFILTER_BLOCKED",
+                            **decisions[ranked_symbol],
+                        },
+                    )
+                    continue
             ready_before = self._is_symbol_execution_ready(ranked_symbol)
             ready_after = bool(
                 ready_before
@@ -5276,6 +5500,13 @@ class StrategyRunner:
             "confirmation_contract",
             "confirming_trigger_strategies",
             "context_confirmation_strategies",
+            "context_confirmation_evidence",
+            "vwap_reference_source",
+            "vwap_reference_evidence",
+            "vwap_signal_bar_evidence",
+            "setup_invalidation_premium",
+            "setup_target_premium",
+            "vwap_structural_invalidation",
             "underlying_direction_bias",
             "underlying_direction_confidence",
             "context_age_seconds",
@@ -5332,8 +5563,21 @@ class StrategyRunner:
                             "required",
                             "executable_capacity",
                             "plan_cost_inclusive_risk",
+                            "plan_stop_limit_cost_inclusive_risk",
+                            "cash_shortfall",
+                            "plan_risk_shortfall",
                             "effective_one_lot_risk_budget",
                             "remaining_daily_risk_budget",
+                            # Preserve the actual replacement rejection in the
+                            # existing journal, rather than only the generic
+                            # "replacement_not_permitted" summary.
+                            "replacement_blocker",
+                            "original_symbol",
+                            "original_trade_price",
+                            "candidate_trade_price",
+                            "execution_min_option_premium",
+                            "max_replacement_premium_deviation_pct",
+                            "max_replacement_strike_distance",
                         )
                         if key in decision
                     }
@@ -6153,7 +6397,18 @@ class StrategyRunner:
             # The live builder owns the current minute.
             if end_ts > datetime.now(timezone.utc):
                 return
-            self._ingest_bar(symbol, bar, is_backfill=True)
+            # This callback receives both REST hydration and MDM's *finalized*
+            # WebSocket/clock-flush candles. Historically all of them were
+            # marked as backfill, so indicators advanced but LIVE candle versions
+            # stayed at zero all session and the entry runner remained HYDRATION.
+            # Only these MDM canonical close markers may advance live provenance;
+            # REST/other historical rows remain non-live, and the completed-
+            # minute/monotonicity checks above and in _ingest_bar still apply.
+            is_canonical_live_close = str(data.get("source") or "").strip().lower() in {
+                "ws_candle",
+                "clock_flush_candle",
+            }
+            self._ingest_bar(symbol, bar, is_backfill=not is_canonical_live_close)
 
             # 4. Force Registration
             with self._lock:
@@ -6290,7 +6545,9 @@ class StrategyRunner:
             if indicator_count >= target_min_bars:
                 self._set_symbol_hydration_state(normalized_symbol, SymbolState.READY)
                 self._seed_pipeline_store(normalized_symbol)
-                self._seed_candle_engine_from_history(normalized_symbol)
+                # Keep the canonical registry mirror, not a reverse history import.
+                if hasattr(self, "_candle_engines"):
+                    self._mirror_authoritative_candle_engine(normalized_symbol)
             else:
                 self._set_symbol_hydration_state(
                     normalized_symbol, SymbolState.DEGRADED
@@ -8399,6 +8656,25 @@ class StrategyRunner:
                     level=logging.WARNING,
                 )
             if now - self._last_summary_log >= 60.0:
+                # StrategyManager owns canonical regime vetoes. Read only its
+                # cumulative count and report the interval delta; strategy
+                # subtype ineligibility is a distinct no-vote metric.
+                counter_getter = getattr(
+                    self._strategy_manager, "get_regime_hard_block_count", None
+                )
+                if callable(counter_getter):
+                    try:
+                        current = max(0, int(counter_getter()))
+                        previous = self._last_regime_hard_block_count
+                        self._regime_block_counter = (
+                            current - previous if current >= previous else current
+                        )
+                        self._last_regime_hard_block_count = current
+                    except Exception:  # noqa: BLE001 - telemetry cannot interrupt exits
+                        self._logger.warning(
+                            "ENGINE_REGIME_COUNTER_UNAVAILABLE",
+                            extra={"event": "ENGINE_REGIME_COUNTER_UNAVAILABLE"},
+                        )
                 self._logger.info(
                     "ENGINE_SUMMARY evals=%d evals_semantics=legacy_activity "
                     "runner_ticks=%d phase9_evals=%d candidate_generated=%d "
@@ -8420,6 +8696,7 @@ class StrategyRunner:
                         "candidate_generated": self._candidate_counter,
                         "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
+                        "regime_blocks_semantics": "strategy_manager_option_eval_vetoes_per_interval",
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
                     },
@@ -9814,12 +10091,27 @@ class StrategyRunner:
             verbose_all = str(
                 os.getenv("RUNNER_EVAL_LOG_INFO", "false") or "false"
             ).strip().lower() in {"1", "true", "yes", "on"}
+            # Surface one selected-option pre-gate reason per minute in
+            # routine archives, without enabling noisy all-symbol DEBUG logs.
+            selected_gate_info = bool(
+                not allowed
+                and stage == "phase9"
+                and symbol
+                in {
+                    getattr(self, "_active_selected_ce", None),
+                    getattr(self, "_active_selected_pe", None),
+                }
+                and self._should_log_throttled(
+                    f"selected_phase9_gate_info:{symbol}:{reason_str}", 60.0
+                )
+            )
             log_level = (
                 logging.INFO
                 if (
                     verbose_all
                     or reason_str in _info_reasons
                     or stage == "signal_forward"
+                    or selected_gate_info
                 )
                 else logging.DEBUG
             )
@@ -10981,30 +11273,46 @@ class StrategyRunner:
                 )
             except (TypeError, ValueError):
                 ts = 0.0
-            age = max(0.0, now - ts) if ts > 0 else max_age + 1.0
+            raw_market_ms = _extract_float(payload, "last_tick_ts_ms")
+            if raw_market_ms is not None and raw_market_ms > 10_000_000_000:
+                ts = raw_market_ms / 1000.0
+            age = now - ts if ts > 0 else max_age + 1.0
             bias = str(
                 payload.get("underlying_direction_bias")
                 or payload.get("direction_bias")
                 or ""
             ).upper()
-            return payload, bool(ts > 0 and age <= max_age), bias, age
+            return payload, _context_snapshot_fresh(payload, max_age_seconds=max_age, now_ts=now), bias, age
 
         spot_ctx, spot_fresh, spot_bias, spot_age = _ctx_state("spot_context")
         fut_ctx, fut_fresh, fut_bias, fut_age = _ctx_state("futures_context")
+        active_future = getattr(self, "_active_futures_symbol", None)
+        if active_future and fut_ctx and normalize_symbol(str(fut_ctx.get("symbol") or "")) != normalize_symbol(str(active_future)):
+            fut_fresh = False
         output: dict[str, Any] = {}
-        if spot_ctx:
-            output["spot_context"] = spot_ctx
-            output["spot_fresh"] = spot_fresh
-        if fut_ctx:
-            output["futures_context"] = fut_ctx
-            output["futures_fresh"] = fut_fresh
-        if spot_ctx or fut_ctx:
+        if spot_ctx or fut_ctx or os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE":
+            # Overwrite both roles together; a missing or stale role must not
+            # leave previous indicator-context values available as live inputs.
+            output.update(
+                spot_context=spot_ctx if spot_fresh else {},
+                futures_context=fut_ctx if fut_fresh else {},
+                spot_fresh=spot_fresh,
+                futures_fresh=fut_fresh,
+                spot_ltp=spot_ctx.get("ltp") if spot_fresh else None,
+                spot_vwap=spot_ctx.get("vwap") if spot_fresh else None,
+                futures_ltp=fut_ctx.get("ltp") if fut_fresh else None,
+                futures_vwap=fut_ctx.get("vwap") if fut_fresh and fut_ctx.get("vwap_source") == "active_future_quote_vwap" else None,
+                futures_vwap_slope=fut_ctx.get("vwap_slope") if fut_fresh else None,
+                futures_volume_ratio=fut_ctx.get("futures_volume_ratio") if fut_fresh else None,
+            )
             # Clear any earlier option/runtime directional conclusion when the
             # current authoritative snapshots cannot resolve a direction.
             output.update(
                 direction_bias=None,
                 underlying_direction_bias=None,
                 underlying_direction_confidence=None,
+                direction_confidence=None,
+                context_age_seconds=None,
                 context_fresh=spot_fresh or fut_fresh,
             )
         if (
@@ -11029,6 +11337,7 @@ class StrategyRunner:
         output["underlying_direction_confidence"] = selected_ctx.get(
             "underlying_direction_confidence"
         )
+        output["direction_confidence"] = output["underlying_direction_confidence"]
         output["context_age_seconds"] = selected_age
         output["context_fresh"] = True
         output["direction_context_source"] = selected_ctx.get(
@@ -11371,6 +11680,106 @@ class StrategyRunner:
         except Exception:
             return 0
 
+    def inspect_recent_canonical_history(
+        self, symbol: str, *, last_n: int = 5
+    ) -> dict[str, Any]:
+        """Read-only completed-candle OHLCV parity across canonical/runner/indicator.
+
+        A sufficient bar count is not evidence that the prices and volumes agree.
+        Reuse the canonical MDM cache and existing timestamp normalization; never
+        fetch broker history, mutate an OHLC value, or infer a missing candle.
+        """
+        count = max(1, min(10, int(last_n)))
+        normalized = self._normalize_symbol(symbol)
+        window = max(12, 2 * count)
+        try:
+            canonical_rows = self._get_mdm_bars(normalized, window) or []
+            runner_rows = list((self._symbol_history.get(normalized) or [])[-window:])
+            indicator_rows = list(
+                self._indicator_engine.get_history(
+                    normalized, count=window, field="bars"
+                ) or []
+            )
+        except Exception as exc:
+            return {
+                "status": "unavailable",
+                "reason": type(exc).__name__,
+                "checked_bars": 0,
+                "first_mismatch": None,
+            }
+
+        def fingerprint(rows: Sequence[Any]) -> dict[datetime, tuple[float, ...]]:
+            observed: dict[datetime, tuple[float, ...]] = {}
+            for row in rows:
+                minute = self._history_row_timestamp(row)
+                if minute is None:
+                    continue
+                values = [
+                    row.get(field) if isinstance(row, Mapping)
+                    else getattr(row, field, None)
+                    for field in ("open", "high", "low", "close", "volume")
+                ]
+                try:
+                    numeric = tuple(float(value) for value in values)
+                except (TypeError, ValueError):
+                    continue
+                if all(math.isfinite(value) for value in numeric):
+                    observed[minute] = numeric
+            return observed
+
+        canonical = fingerprint(canonical_rows)
+        runner = fingerprint(runner_rows)
+        indicator = fingerprint(indicator_rows)
+        minutes = sorted(canonical)[-count:]
+        if len(minutes) < count:
+            return {
+                "status": "unavailable",
+                "reason": "insufficient_canonical_completed_bars",
+                "checked_bars": len(minutes),
+                "first_mismatch": None,
+            }
+
+        first_mismatch: dict[str, Any] | None = None
+        mismatch_count = 0
+        for projection_name, projection in (("runner", runner), ("indicator", indicator)):
+            for minute in minutes:
+                expected = canonical[minute]
+                actual = projection.get(minute)
+                if actual is None:
+                    issue = {
+                        "projection": projection_name,
+                        "minute": minute.isoformat(),
+                        "field": "missing_completed_candle",
+                    }
+                else:
+                    issue = None
+                    for field, canonical_value, observed_value in zip(
+                        ("open", "high", "low", "close", "volume"), expected, actual
+                    ):
+                        if not math.isclose(
+                            canonical_value, observed_value,
+                            rel_tol=0.0, abs_tol=0.000001
+                        ):
+                            issue = {
+                                "projection": projection_name,
+                                "minute": minute.isoformat(),
+                                "field": field,
+                                "canonical": canonical_value,
+                                "observed": observed_value,
+                            }
+                            break
+                if issue is not None:
+                    mismatch_count += 1
+                    if first_mismatch is None:
+                        first_mismatch = issue
+        return {
+            "status": "match" if mismatch_count == 0 else "mismatch",
+            "checked_bars": len(minutes),
+            "mismatch_count": mismatch_count,
+            "first_mismatch": first_mismatch,
+            "canonical_last_minute": minutes[-1].isoformat(),
+        }
+
     def history_tail_timestamps(
         self, symbol: str, *, limit: int = 12
     ) -> dict[str, list[Any]]:
@@ -11440,7 +11849,13 @@ class StrategyRunner:
                 "intrabar_eval_env_disabled"
             )
             return None
-        if self._data_phase.get(symbol) != "LIVE":
+        # A selected option can have a current-generation WS quote and warm
+        # history before its first *locally completed* live candle. Keep the
+        # candle provenance unchanged, but do not starve same-bar evaluation.
+        if self._data_phase.get(symbol) != "LIVE" and not (
+            self._is_selected_option_symbol(symbol)
+            and self._is_option_symbol_tick_fresh(symbol)
+        ):
             self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
                 "intrabar_eval_non_live_phase"
             )
@@ -12093,7 +12508,8 @@ class StrategyRunner:
             "reason": reason,
             **dict(details),
         }
-        self._logger.info(
+        logger = self._logger.debug if reason == "same_bar_periodic_eval_throttled" else self._logger.info
+        logger(
             "RUNNER_EVAL_PREGATE_SKIPPED symbol=%s reason=%s bar_key=%s same_bar_elapsed_s=%s same_bar_interval_s=%s quote_update_version=%s",
             payload["symbol"],
             reason,
@@ -13184,60 +13600,80 @@ class StrategyRunner:
             except (TypeError, ValueError):
                 return default
 
-        spot_snapshot = indicators_ctx.get("spot_snapshot")
-        futures_snapshot = indicators_ctx.get("futures_snapshot")
-        spot_bars = _safe_int(
-            indicators_ctx.get("spot_bars")
-            or indicators_ctx.get("context_bar_count")
-            or indicators_ctx.get("underlying_context_bar_count")
+        spot_context = indicators_ctx.get("spot_context")
+        futures_context = indicators_ctx.get("futures_context")
+        spot_context = spot_context if isinstance(spot_context, Mapping) else {}
+        futures_context = (
+            futures_context if isinstance(futures_context, Mapping) else {}
         )
-        futures_bars = _safe_int(
-            indicators_ctx.get("futures_bars")
-            or indicators_ctx.get("futures_context_bar_count")
+        spot_snapshot = indicators_ctx.get("spot_snapshot") or spot_context
+        futures_snapshot = indicators_ctx.get("futures_snapshot") or futures_context
+        spot_bars_raw = indicators_ctx.get("spot_bars")
+        if spot_bars_raw is None:
+            spot_bars_raw = spot_context.get("history_bars")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("context_bar_count")
+        if spot_bars_raw is None:
+            spot_bars_raw = indicators_ctx.get("underlying_context_bar_count")
+        futures_bars_raw = indicators_ctx.get("futures_bars")
+        if futures_bars_raw is None:
+            futures_bars_raw = futures_context.get("history_bars")
+        if futures_bars_raw is None:
+            futures_bars_raw = indicators_ctx.get("futures_context_bar_count")
+        # Absent diagnostic counts are unknown, not evidence of zero bars.
+        spot_bars = _safe_int(spot_bars_raw) if spot_bars_raw is not None else None
+        futures_bars = (
+            _safe_int(futures_bars_raw) if futures_bars_raw is not None else None
         )
-        spot_fresh = not bool(
-            indicators_ctx.get("spot_stale")
-            or indicators_ctx.get("stale_context")
-            or indicators_ctx.get("context_stale")
+        spot_price = (
+            indicators_ctx.get("spot_ltp")
+            or indicators_ctx.get("spot_price")
+            or indicators_ctx.get("range_spot_ltp")
+            or spot_context.get("ltp")
         )
-        fut_fresh = not bool(
-            indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+        futures_price = (
+            indicators_ctx.get("futures_ltp")
+            or indicators_ctx.get("futures_price")
+            or futures_context.get("ltp")
         )
-        spot_vwap = indicators_ctx.get(
-            "spot_vwap",
-            indicators_ctx.get("vwap", indicators_ctx.get("underlying_vwap")),
-        )
+        spot_fresh = indicators_ctx.get("spot_fresh")
+        if not isinstance(spot_fresh, bool):
+            spot_fresh = bool(spot_snapshot or spot_price) and not bool(
+                indicators_ctx.get("spot_stale")
+                or indicators_ctx.get("stale_context")
+                or indicators_ctx.get("context_stale")
+            )
+        fut_fresh = indicators_ctx.get("futures_fresh")
+        if not isinstance(fut_fresh, bool):
+            fut_fresh = bool(futures_snapshot or futures_price) and not bool(
+                indicators_ctx.get("futures_stale") or indicators_ctx.get("fut_stale")
+            )
+        # An option's own vwap/slope/volume is not NIFTY spot/futures
+        # evidence. Report only named underlying fields or their snapshots.
+        spot_vwap = indicators_ctx.get("spot_vwap")
+        if spot_vwap is None:
+            spot_vwap = spot_context.get("vwap")
         futures_vwap = indicators_ctx.get("futures_vwap")
-        futures_vwap_slope = indicators_ctx.get(
-            "futures_vwap_slope",
-            indicators_ctx.get(
-                "vwap_slope", indicators_ctx.get("underlying_vwap_slope")
-            ),
-        )
-        futures_volume_ratio = indicators_ctx.get(
-            "futures_volume_ratio",
-            indicators_ctx.get(
-                "volume_ratio", indicators_ctx.get("underlying_volume_ratio")
-            ),
-        )
+        if futures_vwap is None:
+            futures_vwap = futures_context.get("vwap")
+        futures_vwap_slope = indicators_ctx.get("futures_vwap_slope")
+        if futures_vwap_slope is None:
+            futures_vwap_slope = futures_context.get("vwap_slope")
+        futures_volume_ratio = indicators_ctx.get("futures_volume_ratio")
+        if futures_volume_ratio is None:
+            futures_volume_ratio = futures_context.get("futures_volume_ratio")
         regime_available = bool(
             indicators_ctx.get("regime_snapshot")
             or indicators_ctx.get("regime")
             or indicators_ctx.get("market_regime")
+            or spot_context.get("regime")
+            or futures_context.get("regime")
         )
         required_bars = _safe_int(getattr(self, "_context_required_bars", 0))
 
-        if not bool(
-            spot_snapshot
-            or indicators_ctx.get("spot_ltp")
-            or indicators_ctx.get("spot_price")
-        ):
+        if not bool(spot_snapshot or spot_price):
             reason = "missing_spot_snapshot"
-        elif not bool(
-            futures_snapshot
-            or indicators_ctx.get("futures_ltp")
-            or indicators_ctx.get("futures_price")
-        ):
+        elif not bool(futures_snapshot or futures_price):
             reason = "missing_futures_snapshot"
         elif (
             not spot_fresh
@@ -13249,9 +13685,15 @@ class StrategyRunner:
         ):
             reason = "stale_context"
         elif bool(indicators_ctx.get("insufficient_context_bars")) or (
-            required_bars > 0 and spot_bars < required_bars
+            required_bars > 0 and spot_bars is not None and spot_bars < required_bars
         ):
             reason = "insufficient_context_bars"
+        elif indicators_ctx.get("direction_resolution_reason") not in (
+            None,
+            "",
+            "unavailable",
+        ):
+            reason = str(indicators_ctx["direction_resolution_reason"])
         elif spot_vwap is None and futures_vwap is None:
             reason = "missing_vwap"
         elif futures_vwap_slope is None:
@@ -13261,9 +13703,11 @@ class StrategyRunner:
         elif not regime_available:
             reason = "missing_regime_snapshot"
         else:
-            reason = "unknown"
+            reason = "underlying_direction_unresolved"
         return reason, {
             "reason_detail": reason,
+            "spot_direction_reasons": spot_context.get("direction_context_reasons"),
+            "futures_direction_reasons": futures_context.get("direction_context_reasons"),
             "spot_fresh": spot_fresh,
             "fut_fresh": fut_fresh,
             "spot_bars": spot_bars,
@@ -13376,6 +13820,100 @@ class StrategyRunner:
             return "tradable_option"
         return "unknown"
 
+    def _independent_premium_fallback_eligible(self, symbol: str) -> bool:
+        """Allow own-contract evaluation only for a fresh nearest-ITM alternative."""
+        policy = resolve_entry_policy()
+        if (
+            not policy.is_live
+            or _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
+            or not _env_flag("INDEPENDENT_ITM_PREMIUM_FALLBACK_ENABLED", True)
+        ):
+            return False
+        candidate = normalize_symbol(str(symbol or ""))
+        side = self._contract_side_from_symbol(candidate)
+        selected = normalize_symbol(
+            str(
+                getattr(
+                    self,
+                    "_active_selected_ce" if side == "CE" else "_active_selected_pe",
+                    "",
+                )
+                or ""
+            )
+        )
+        if side not in {"CE", "PE"} or not selected or candidate == selected:
+            return False
+        active = getattr(self, "_active_option_symbols", set()) or set()
+        tokens = getattr(self, "_active_basket_token_by_symbol", {}) or {}
+        whitelist = getattr(self, "_eval_option_whitelist", None)
+        if (
+            candidate not in active
+            or not tokens.get(candidate)
+            or not tokens.get(selected)
+            or (whitelist and candidate not in whitelist)
+        ):
+            return False
+        original_strike = self._extract_strike_from_symbol(selected)
+        candidate_strike = self._extract_strike_from_symbol(candidate)
+        if original_strike is None or candidate_strike is None:
+            return False
+        if candidate_strike != original_strike + (50 if side == "PE" else -50):
+            return False
+        # Reuse the existing same-side, expiry, strike and basket restrictions.
+        # The premium-jump test is only for transplanting a different contract's
+        # signal; this alternative must instead earn its own strategy vote.
+        blocker, _ = self._candidate_replacement_contract_guard(
+            original_symbol=selected,
+            selected_symbol=candidate,
+            original_trade_price=0.0,
+            candidate_trade_price=0.0,
+        )
+        if blocker is not None:
+            return False
+        if self._history_count_for_symbol(candidate) < self._required_bars_for_symbol(
+            candidate
+        ):
+            return False
+        last_bar = (getattr(self, "_last_bar_ts", {}) or {}).get(candidate)
+        if not isinstance(last_bar, datetime) or last_bar.tzinfo is None:
+            return False
+        bar_age_s = (datetime.now(timezone.utc) - last_bar).total_seconds()
+        if not 0.0 <= bar_age_s <= 120.0:
+            return False
+        floor = policy.execution_min_premium
+        ceiling = policy.max_premium
+        max_age_ms = float(app_settings.ORDER_MAX_QUOTE_AGE_MS)
+        max_spread_pct = float(os.getenv("SPREAD_MAX_PCT", "12.5") or "12.5")
+        for quote_symbol in (selected, candidate):
+            quote = self._get_cached_quote_for_live_entry(quote_symbol)
+            if not isinstance(quote, Mapping):
+                return False
+            # Reuse the execution quote authority: Zerodha FULL depth may have
+            # top-of-book prices without top-level bid/ask fields. Invalid time,
+            # crossed quotes, non-tradability and excessive spread fail closed.
+            quote_proof = evaluate_execution_quote(
+                quote_symbol,
+                quote,
+                live_mode=True,
+                max_tick_age_ms=max_age_ms,
+                max_spread_pct=max_spread_pct,
+                require_depth=False,
+                min_real_ticks_last_60s=0,
+            )
+            if not quote_proof.allowed:
+                return False
+            try:
+                ltp = float(quote.get("ltp") or quote.get("last_price") or 0.0)
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(ltp) or ltp <= 0:
+                return False
+            if quote_symbol == selected and ltp >= floor:
+                return False
+            if quote_symbol == candidate and not (floor <= ltp <= ceiling):
+                return False
+        return True
+
     def _roles_for_symbol(self, symbol: str) -> set[str]:
         normalized = normalize_symbol(str(symbol or ""))
         role = self._symbol_role_for_runner(normalized)
@@ -13386,6 +13924,10 @@ class StrategyRunner:
             roles.add("option_context")
         if self._is_selected_option_symbol(normalized):
             roles.add("selected_option")
+            roles.add("trigger_candidate")
+        elif role == "tradable_option" and self._independent_premium_fallback_eligible(
+            normalized
+        ):
             roles.add("trigger_candidate")
         try:
             pm = getattr(self, "_position_manager", None)
@@ -15179,7 +15721,12 @@ class StrategyRunner:
             if signal is None and self._required_candles:
                 should_evaluate = False
                 phase = self._data_phase.get(symbol, "HYDRATION")
-                if phase != "LIVE":
+                if phase != "LIVE" and not (
+                    # Activation was already proven fresh, hydrated and
+                    # subscribed above; it is a live quote, not polling fallback.
+                    route == EntryEvaluationRoute.OPTION_CANDIDATE
+                    and self._is_selected_option_symbol(symbol)
+                ):
                     fallback_enabled = bool(
                         getattr(self, "_fallback_enabled", False)
                         or getattr(self, "_allow_polling_fallback", True)
@@ -15342,23 +15889,14 @@ class StrategyRunner:
                     if not self._strategy_evaluation_allowed(symbol, trace_id):
                         return
                     if self._is_tradable_symbol(symbol):
-                        selected_only_bias = str(
-                            (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("underlying_direction_bias")
-                            or (getattr(self, "_runtime_indicators", {}) or {})
-                            .get(symbol, {})
-                            .get("direction_bias")
-                            or ""
-                        ).upper()
+                        # This early gate concerns contract membership only.
+                        # Direction is resolved below from current underlying
+                        # snapshots, never from a previous option evaluation.
                         (
                             selected_only_ok,
                             selected_only_reason,
                             selected_only_details,
-                        ) = self._live_entry_candidate_eligibility(
-                            symbol,
-                            direction_bias=selected_only_bias,
-                        )
+                        ) = self._live_entry_candidate_eligibility(symbol)
                         if (
                             _env_flag("LIVE_ENTRY_SELECTED_ONLY", False)
                             and not selected_only_ok
@@ -15385,7 +15923,6 @@ class StrategyRunner:
                                 },
                             )
                             return
-                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     log_throttled(
                         self._logger,
                         f"strategy_evaluation_triggered:{symbol}",
@@ -15743,6 +16280,11 @@ class StrategyRunner:
                                             },
                                         )
                                     return
+                    # Only an admitted option evaluation needs both underlying
+                    # snapshots refreshed. Same-bar/quote vetoes already returned;
+                    # the completed-context generation retry remains unchanged.
+                    if _is_option_pregate:
+                        self._refresh_underlying_context_snapshots(trace_id=trace_id)
                     self._mark_symbol_eval_allowed(
                         symbol,
                         bar_key=(
@@ -15808,13 +16350,34 @@ class StrategyRunner:
                         context_ctx = self._underlying_context_from_strategy_manager()
                         if context_ctx:
                             runtime_ctx.update(context_ctx)
+                        live_direction_mode = (
+                            str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
+                            == "LIVE"
+                        )
+                        if live_direction_mode and not context_ctx:
+                            # No authoritative snapshots: evict any prior
+                            # indicator direction before live arbitration.
+                            runtime_ctx.update(
+                                direction_bias=None,
+                                underlying_direction_bias=None,
+                                underlying_direction_confidence=None,
+                                context_fresh=False,
+                            )
                         existing_bias = (
                             runtime_ctx.get("direction_bias")
                             or runtime_ctx.get("underlying_direction_bias")
-                            or indicators_ctx.get("direction_bias")
-                            or indicators_ctx.get("underlying_direction_bias")
-                            or getattr(self, "_latest_direction_bias", None)
                         )
+                        # In LIVE mode only the current, timestamp-checked
+                        # spot/futures snapshots may authorize direction.
+                        # An older option indicator or prior runner bias can
+                        # otherwise resurrect a CE/PE vote after the current
+                        # authorities turn neutral or disagree.
+                        if not existing_bias and not live_direction_mode:
+                            existing_bias = (
+                                indicators_ctx.get("direction_bias")
+                                or indicators_ctx.get("underlying_direction_bias")
+                                or getattr(self, "_latest_direction_bias", None)
+                            )
                         if str(existing_bias or "").upper() in {"CE", "PE"}:
                             runtime_ctx["direction_bias"] = str(existing_bias).upper()
                             runtime_ctx["underlying_direction_bias"] = str(
@@ -16100,11 +16663,16 @@ class StrategyRunner:
                         }
                         self._last_direction_context = runtime_indicators[symbol]
                         spot_fresh, fut_fresh, context_fresh = resolve_entry_context_freshness(indicators_ctx)
-                        live_mode = (
-                            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW")
-                            .strip()
-                            .upper()
-                            == "LIVE"
+                        live_mode = live_direction_mode
+                        reversal_capability = getattr(
+                            self._strategy_manager,
+                            "can_evaluate_verified_reversal",
+                            None,
+                        )
+                        reversal_probe_enabled = bool(
+                            live_mode
+                            and callable(reversal_capability)
+                            and reversal_capability()
                         )
                         if live_mode and (
                             resolved_bias not in {"CE", "PE"} or not context_fresh
@@ -16136,7 +16704,12 @@ class StrategyRunner:
                                 self._last_direction_context = runtime_indicators[
                                     symbol
                                 ]
-                            else:
+                            elif not (
+                                reversal_probe_enabled
+                                and spot_fresh
+                                and fut_fresh
+                                and context_fresh
+                            ):
                                 # Fresh price updates do not imply a conclusive
                                 # structural direction. Report the actual cause
                                 # without weakening the required direction gate.
@@ -16224,6 +16797,22 @@ class StrategyRunner:
                                     trace_id=trace_id,
                                 )
                                 return
+                        if (
+                            reversal_probe_enabled
+                            and spot_fresh
+                            and fut_fresh
+                            and context_fresh
+                            and resolved_bias not in {"CE", "PE"}
+                        ):
+                            log_throttled(
+                                self._logger,
+                                f"reversal_eval_probe:{symbol}",
+                                "REVERSAL_EVAL_PROBE symbol=%s reason=direction_unresolved "
+                                "scope=verified_range_vwap_only orders_not_preapproved=True",
+                                symbol,
+                                interval_sec=30.0,
+                                level=logging.INFO,
+                            )
                         if getattr(self, "_orchestrator", None) is not None and hasattr(
                             self._orchestrator, "reconcile_direction_bias"
                         ):
@@ -16246,7 +16835,12 @@ class StrategyRunner:
                             opposite = (
                                 resolved_bias == "PE" and upper_sym.endswith("CE")
                             ) or (resolved_bias == "CE" and upper_sym.endswith("PE"))
-                            if opposite:
+                            if opposite and not (
+                                reversal_probe_enabled
+                                and spot_fresh
+                                and fut_fresh
+                                and context_fresh
+                            ):
                                 self._logger.debug(
                                     "TRIGGER_EVAL_SKIPPED symbol=%s reason=opposite_side_trigger_suppressed underlying_bias=%s confidence=%.2f",
                                     symbol,
@@ -16273,6 +16867,116 @@ class StrategyRunner:
                             price,
                             trace_id=trace_id,
                         )
+                        if (
+                            signal is not None
+                            and route == EntryEvaluationRoute.OPTION_CANDIDATE
+                            and not self._is_selected_option_symbol(symbol)
+                        ):
+                            # A nearby option cannot inherit the selected
+                            # option's setup or remain authorized after a
+                            # quote/pair rotation during its evaluation.
+                            if (
+                                normalize_symbol(str(signal.symbol)) != normalize_symbol(symbol)
+                                or not self._independent_premium_fallback_eligible(symbol)
+                            ):
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="independent_premium_fallback_changed",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                                signal = None
+                            else:
+                                side = self._contract_side_from_symbol(symbol)
+                                selected_origin = (
+                                    self._active_selected_ce
+                                    if side == "CE"
+                                    else self._active_selected_pe
+                                )
+                                signal = dataclasses.replace(
+                                    signal,
+                                    metadata={
+                                        **dict(signal.metadata or {}),
+                                        "_independent_premium_fallback": True,
+                                        "_independent_premium_selected_origin": selected_origin,
+                                    },
+                                )
+                        # A probe is only permission to evaluate. Never pass an
+                        # opposite/unknown-direction order unless the combiner
+                        # attested the dedicated futures/option-flow reversal.
+                        option_side = (
+                            "CE" if symbol.upper().endswith("CE") else
+                            "PE" if symbol.upper().endswith("PE") else None
+                        )
+                        if (
+                            signal is not None
+                            and reversal_probe_enabled
+                            and option_side is not None
+                            and (
+                                resolved_bias not in {"CE", "PE"}
+                                or resolved_bias != option_side
+                            )
+                        ):
+                            direction_contract = (
+                                (getattr(signal, "metadata", {}) or {}).get(
+                                    "direction_contract"
+                                ) or {}
+                            )
+                            if direction_contract.get("reversal_exemption") is not True:
+                                self._emit_runner_eval_decision(
+                                    symbol=symbol,
+                                    stage="phase9",
+                                    reason="reversal_contract_missing_after_probe",
+                                    allowed=False,
+                                    trace_id=trace_id,
+                                )
+                                signal = None
+                        if signal is None and symbol_role == "tradable_option":
+                            decision_getter = getattr(
+                                self._strategy_manager,
+                                "get_last_no_signal_decision",
+                                None,
+                            )
+                            decision = (
+                                decision_getter(symbol)
+                                if callable(decision_getter) else None
+                            )
+                            if decision is not None:
+                                log_throttled(
+                                    self._logger,
+                                    f"strategy_blocker_trace:{symbol}",
+                                    "STRATEGY_BLOCKER_TRACE symbol=%s stage=%s "
+                                    "reason=%s final_block=%s strategy_reasons=%s "
+                                    "no_vote_reasons=%s reversal_probe=%s",
+                                    symbol,
+                                    getattr(decision, "blocked_at", None),
+                                    getattr(decision, "reason", None),
+                                    getattr(decision, "final_block_reason", None),
+                                    getattr(decision, "strategy_reasons", None),
+                                    getattr(decision, "no_vote_reason_counts", None),
+                                    reversal_probe_enabled,
+                                    interval_sec=30.0,
+                                    level=logging.INFO,
+                                )
+                        # Count successful StrategyManager calls separately from
+                        # entry-worker completions (which can return at a pre-gate).
+                        if (
+                            route == EntryEvaluationRoute.OPTION_CANDIDATE
+                            and self._is_selected_option_symbol(symbol)
+                        ):
+                            self._selected_strategy_manager_eval_count = (
+                                int(
+                                    getattr(
+                                        self, "_selected_strategy_manager_eval_count", 0
+                                    )
+                                    or 0
+                                )
+                                + 1
+                            )
+                            self._last_selected_strategy_manager_eval_ts = (
+                                time.monotonic()
+                            )
                         if (
                             signal is not None
                             and route == EntryEvaluationRoute.UNDERLYING
@@ -17180,7 +17884,14 @@ class StrategyRunner:
         )
         final_md["bracket_anchor_mode"] = (
             "absolute_level"
-            if final_md["option_trade_plan_source"] == "explicit_premium_stop"
+            if (
+                metadata.get("bracket_anchor_mode") == "absolute_level"
+                and (
+                    metadata.get("range_option_flow_verified") is True
+                    or metadata.get("vwap_structural_invalidation") is True
+                )
+            )
+            or final_md["option_trade_plan_source"] == "explicit_premium_stop"
             else "distance"
         )
         self._logger.info(
@@ -18721,12 +19432,40 @@ class StrategyRunner:
                             if option_side == "CE"
                             else candidate_contract_generation.selected_pe
                         )
-                        if normalize_symbol(signal.symbol) != selected_live:
+                        if metadata.get("_independent_premium_fallback") is True:
+                            # This signal was independently evaluated on the
+                            # candidate's own completed candles and quotes.
+                            # Never remap that thesis to the selected ATM leg.
+                            valid_own_signal = (
+                                normalize_symbol(
+                                    str(metadata.get("_independent_premium_selected_origin") or "")
+                                )
+                                == selected_live
+                                and self._independent_premium_fallback_eligible(signal.symbol)
+                            )
+                            ranked_candidates = [
+                                item
+                                for item in ranked_candidates
+                                if valid_own_signal
+                                and normalize_symbol(item.symbol)
+                                == normalize_symbol(signal.symbol)
+                            ]
+                        elif normalize_symbol(signal.symbol) != selected_live:
                             # A rotated setup must requalify on the current selection.
                             ranked_candidates = [
                                 item for item in ranked_candidates
                                 if normalize_symbol(item.symbol) == selected_live
                             ]
+                    if metadata.get("vwap_structural_invalidation") is True:
+                        # Absolute option-price levels belong to their own
+                        # qualified contract. Other strikes require their own
+                        # independent strategy evaluation.
+                        ranked_candidates = [
+                            item
+                            for item in ranked_candidates
+                            if normalize_symbol(item.symbol)
+                            == normalize_symbol(signal.symbol)
+                        ]
                     candidate, candidate_capacity_decisions = (
                         self._select_capital_eligible_candidate(
                             ranked_candidates=ranked_candidates,
@@ -18864,112 +19603,16 @@ class StrategyRunner:
                 original_trade_price = float(trade_price or 0.0)
                 replacement_blocked_reason: str | None = None
                 if selected_symbol != original_symbol:
-                    allow_replace = _env_flag(
-                        "ALLOW_CANDIDATE_REPLACEMENT", default=True
-                    )
-                    strict_replace = _env_flag(
-                        "STRICT_CANDIDATE_REPLACEMENT", default=True
-                    )
-                    max_strike_dist = float(
-                        os.getenv(
-                            "MAX_REPLACEMENT_STRIKE_DISTANCE",
-                            os.getenv(
-                                "CANDIDATE_REPLACEMENT_MAX_STRIKE_DISTANCE", "50"
+                    replacement_blocked_reason, replacement_policy = (
+                        self._candidate_replacement_contract_guard(
+                            original_symbol=original_symbol,
+                            selected_symbol=selected_symbol,
+                            original_trade_price=original_trade_price,
+                            candidate_trade_price=float(
+                                getattr(candidate, "entry_price", 0.0) or 0.0
                             ),
                         )
-                        or "50"
                     )
-                    max_premium_pct = float(
-                        os.getenv(
-                            "MAX_REPLACEMENT_PREMIUM_DEVIATION_PCT",
-                            os.getenv("CANDIDATE_REPLACEMENT_MAX_PREMIUM_PCT", "35"),
-                        )
-                        or "35"
-                    )
-                    replacement_blocked_reason = (
-                        "config_disabled" if not allow_replace else None
-                    )
-
-                    orig_side = self._contract_side_from_symbol(original_symbol)
-                    new_side = self._contract_side_from_symbol(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and orig_side in {"CE", "PE"}
-                        and new_side in {"CE", "PE"}
-                        and orig_side != new_side
-                    ):
-                        replacement_blocked_reason = "side_mismatch"
-
-                    def _expiry_key(sym: str) -> str | None:
-                        normalized = normalize_symbol(sym).split(":", 1)[-1]
-                        side = self._contract_side_from_symbol(normalized)
-                        strike = self._extract_strike_from_symbol(normalized)
-                        if side in {"CE", "PE"} and strike is not None:
-                            strike_text = str(int(strike))
-                            suffix = f"{strike_text}{side}"
-                            if normalized.endswith(suffix):
-                                return normalized[: -len(suffix)]
-                        match = re.search(
-                            r"NIFTY(\d{1,2}[A-Z]{3})\d{4,5}(CE|PE)$",
-                            normalized,
-                        )
-                        return match.group(1) if match else None
-
-                    orig_expiry = _expiry_key(original_symbol)
-                    new_expiry = _expiry_key(selected_symbol)
-                    if replacement_blocked_reason is None:
-                        replacement_blocked_reason = (
-                            _strict_replacement_expiry_block_reason(
-                                orig_expiry,
-                                new_expiry,
-                                strict=strict_replace,
-                            )
-                        )
-                    orig_strike = self._extract_strike_from_symbol(original_symbol)
-                    new_strike = self._extract_strike_from_symbol(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and orig_strike is not None
-                        and new_strike is not None
-                        and abs(float(new_strike) - float(orig_strike))
-                        > max_strike_dist
-                    ):
-                        replacement_blocked_reason = "strike_jump"
-                    new_premium = float(getattr(candidate, "entry_price", 0.0) or 0.0)
-                    if (
-                        replacement_blocked_reason is None
-                        and original_trade_price > 0.0
-                        and new_premium > 0.0
-                        and abs(new_premium - original_trade_price)
-                        / original_trade_price
-                        * 100.0
-                        > max_premium_pct
-                    ):
-                        replacement_blocked_reason = "premium_jump"
-                    active_symbols = {
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_option_symbols", set()) or set()
-                        )
-                    }
-                    active_symbols.update(
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_basket_all_symbols", set()) or set()
-                        )
-                    )
-                    active_symbols.update(
-                        normalize_symbol(str(item))
-                        for item in (
-                            getattr(self, "_active_basket_token_by_symbol", {}) or {}
-                        ).keys()
-                    )
-                    if (
-                        replacement_blocked_reason is None
-                        and active_symbols
-                        and selected_symbol not in active_symbols
-                    ):
-                        replacement_blocked_reason = "not_in_active_basket"
                     if replacement_blocked_reason is None:
                         replacement_readiness = (
                             self._ensure_symbol_execution_ready_result(
@@ -18992,10 +19635,7 @@ class StrategyRunner:
                                 "original_symbol": original_symbol,
                                 "selected_symbol": selected_symbol,
                                 "reason": replacement_blocked_reason,
-                                "allow_candidate_replacement": allow_replace,
-                                "strict_candidate_replacement": strict_replace,
-                                "max_replacement_strike_distance": max_strike_dist,
-                                "max_replacement_premium_deviation_pct": max_premium_pct,
+                                **replacement_policy,
                             },
                         )
                         selected_symbol = original_symbol
@@ -19003,6 +19643,37 @@ class StrategyRunner:
                         metadata["_runner_approved_replacement_symbol"] = (
                             selected_symbol
                         )
+                elif metadata.get("_independent_premium_fallback") is True:
+                    # An independently qualified ITM signal is not a transfer
+                    # of the selected ATM contract's thesis. OrderManager still
+                    # needs the existing explicit basket-alternative permit to
+                    # accept its token; grant it only after rechecking origin,
+                    # current selection, and the live own-contract entry gate.
+                    current_selected = ""
+                    if candidate_contract_generation is not None:
+                        current_selected = normalize_symbol(
+                            str(
+                                candidate_contract_generation.selected_ce
+                                if option_side == "CE"
+                                else candidate_contract_generation.selected_pe
+                            )
+                        )
+                    if (
+                        not current_selected
+                        or current_selected == selected_symbol
+                        or normalize_symbol(
+                            str(metadata.get("_independent_premium_selected_origin") or "")
+                        )
+                        != current_selected
+                        or not self._independent_premium_fallback_eligible(
+                            selected_symbol
+                        )
+                    ):
+                        return _reject_after_dedup(
+                            reason="independent_premium_fallback_changed",
+                            details={"candidate_symbol": selected_symbol},
+                        )
+                    metadata["_runner_approved_replacement_symbol"] = selected_symbol
 
                 # The final order symbol, candidate, quote snapshot and premium plan
                 # are one atomic decision. A rejected replacement must never leak
@@ -19417,7 +20088,18 @@ class StrategyRunner:
             if contract_side not in {"CE", "PE"} or contract_direction not in {"CE", "PE"}:
                 contract_failures.append("direction_contract_incomplete")
             elif contract_side != contract_direction or current_side != contract_direction:
-                contract_failures.append("countertrend_direction_mismatch")
+                # No blanket countertrend admission. A manager-stamped exception
+                # must independently pass the same structural reversal contract.
+                if not (
+                    direction_contract.get("reversal_exemption") is True
+                    and current_side == contract_side
+                    and verified_range_vwap_reversal(
+                        metadata,
+                        strategy=signal_strategy,
+                        side=current_side,
+                    )
+                ):
+                    contract_failures.append("countertrend_direction_mismatch")
             if str(direction_contract.get("underlying_state") or "").upper() == "TRANSITION":
                 contract_failures.append("underlying_direction_transition")
 
@@ -19699,6 +20381,22 @@ class StrategyRunner:
                 or signal.metadata.get("strategy")
                 or "runner"
             )
+            if normalize_strategy_name(strategy_name) == "range_vwap_reclaim":
+                if not verified_range_vwap_final_order_risk(
+                    dict(signal.metadata or {}),
+                    strategy=strategy_name,
+                    symbol=normalize_symbol(signal.symbol),
+                    final_symbol=normalize_symbol(trade_symbol or base_symbol),
+                    broker_quantity=int(qty),
+                    broker_lot_size=int(lot_size),
+                    entry_price=float(price or 0.0),
+                    ask_price=float(selected_snapshot.get("ask") or 0.0),
+                    stop_price=float(stop_loss or 0.0),
+                    target_price=float(take_profit or 0.0),
+                ):
+                    return _reject_after_dedup(
+                        reason="range_vwap_final_order_cash_risk_or_contract_mismatch",
+                    )
             failure_cd_prefix = f"{base_symbol}|{signal.action}|{strategy_name}|"
             failure_cd_until = max(
                 (
@@ -20038,6 +20736,11 @@ class StrategyRunner:
                         or strategy_name
                     ),
                     "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
+                    "range_option_hold_minutes": metadata.get("range_option_hold_minutes"),
+                    "range_futures_contract": metadata.get("range_futures_contract"),
+                    "range_futures_side": metadata.get("range_futures_side"),
+                    "range_futures_target": metadata.get("range_futures_target"),
+                    "range_futures_invalidation": metadata.get("range_futures_invalidation"),
                     "signal_id": signal.deterministic_id,
                     "trace_id": trace_id,
                     "strategy_profile_version": getattr(self, "_build_info", {}).get(
@@ -20067,6 +20770,12 @@ class StrategyRunner:
                     ),
                     "context_confirmation_evidence": metadata.get(
                         "context_confirmation_evidence"
+                    ),
+                    "vwap_reference_evidence": metadata.get(
+                        "vwap_reference_evidence"
+                    ),
+                    "vwap_signal_bar_evidence": metadata.get(
+                        "vwap_signal_bar_evidence"
                     ),
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),
@@ -20111,6 +20820,38 @@ class StrategyRunner:
                             "candidate_basket_version": candidate_contract_generation.basket_version,
                             "current_basket_version": before_submit_generation.basket_version,
                             "order_symbol": order_symbol,
+                        },
+                    )
+            # A queued candidate may outlive its original market regime.
+            # Reuse the same manager gate, not a second classifier or risk owner.
+            regime_manager = getattr(
+                getattr(self, "_strategy_manager", None), "_regime_manager", None
+            )
+            if is_live_mode and (
+                str(execution_mode).upper() == "LIVE" or regime_manager is not None
+            ):
+                gate_reasons = ()
+                try:
+                    regime_allowed = regime_manager is not None and regime_manager.can_trade(
+                        context={"component": "runner_before_submit", "symbol": order_symbol},
+                        record_decision=False,
+                        expected_regime=metadata.get("regime_effective") or "UNKNOWN",
+                        expected_completed_bar_timestamp=metadata.get(
+                            "regime_completed_bar_timestamp"
+                        ),
+                    )
+                    if regime_manager is not None:
+                        gate_reasons = tuple(regime_manager.get_filter_reasons())
+                except Exception as exc:
+                    self._logger.error("Final regime revalidation failed: %s", exc)
+                    regime_allowed = False
+                if not regime_allowed:
+                    return _reject_after_dedup(
+                        reason="regime_changed_or_unavailable_before_submit",
+                        details={
+                            "stage": "before_submit",
+                            "broker_attempted": False,
+                            "gate_reasons": gate_reasons,
                         },
                     )
             submit_result_fn = getattr(

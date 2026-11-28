@@ -220,3 +220,100 @@ records, with no explicit per-row expiry. The existing public-data preparation
 path already filters session times and declares unverified roll/timestamp
 assumptions. It is older continuous-futures research, not a backfill for missing
 2021–2026 identified futures minutes.
+
+
+## ICICI Breeze named-contract minute archive (read-only research)
+
+The optional scripts/archive_breeze_history.py importer collects one specified
+completed trading day of NIFTY CE/PE one-minute bars using Breeze historical
+V2. This research-only source never becomes a live execution broker; it makes
+at most two history requests, well below the documented 1,000-candle limit per
+request. The official breeze-connect==1.0.69 package is installed only for
+this importer, not added to production dependencies.
+
+- Supply BREEZE_API_KEY, BREEZE_API_SECRET and BREEZE_SESSION_TOKEN via the
+  environment. Neither the values nor any derived session tokens are printed
+  or committed. GitHub Actions secrets are not automatically installed on the
+  production server, nor does their presence establish valid authentication.
+- The separate Breeze research authentication smoke workflow runs on a
+  matching main-branch push or manual dispatch. It authenticates and checks
+  the broker-documented February 2025 NIFTY option pair for nonempty bars,
+  without publishing any historical-data artifact or placing an order.
+  A GitHub-hosted runner has different egress from the registered static IP;
+  failed remote authentication must be checked at approved egress.
+- Contract expiry and strike must be externally verified point-in-time
+  identities; the importer does not infer ATM or construct Zerodha tokens.
+  It validates each provider response's exchange, underlying, expiry,
+  strike, side and completed-session timestamps.
+- Explicit --timestamp-convention bar_start/bar_end is required. Provider
+  rows and normalized bar-start candles are sealed separately with SHA256
+  and an explicit gap list; changed existing data fails instead of being
+  silently overwritten. Missing candles are never interpolated.
+- Imported observations are RESEARCH_CANDIDATE only, with
+  promotion_eligible=false. They do not prove point-in-time basket
+  selection, historical lot size, underlying/futures parity, quote/depth
+  quality, executable fills, or live-equivalent replay.
+
+On an authorized archival host, with credentials set privately in the
+environment and an actual exchange-verified historical strike and expiry:
+
+~~~bash
+python -m pip install 'breeze-connect==1.0.69'
+python scripts/archive_breeze_history.py --auth-only
+python scripts/archive_breeze_history.py \
+  --day 2026-11-04 --expiry YYYY-MM-DD --strike STRIKE \
+  --timestamp-convention bar_start --outdir /private/research/breeze
+~~~
+
+Replace placeholder expiry and strike, and confirm timestamp convention with
+independent reference bars before research use. Avoid distributing proprietary
+broker-derived data through a public GitHub Actions artifact.
+
+Provider docs: https://github.com/Idirect-Tech/Breeze-Python-SDK
+and https://api.icicidirect.com/breezeapi/documents/index.html.
+
+### Private historical acquisition before strategy testing
+
+`scripts/archive_breeze_bulk.py` uses the same sealed-bar importer for the NIFTY
+index, every dated future expiry found in a published NSE daily report, and a
+bounded initial option universe: the opening-nearest paired strike in the two
+nearest published option expiries. All NIFTY EOD derivative rows are retained,
+including further expiries/strikes not yet acquired intraday. Same-day EOD
+identities authorize acquisition only; they never establish historical trading
+eligibility or lot availability before that day's close.
+
+The frozen target is 6 November 2024 through 5 November 2026 inclusive. Begin with
+a one-day index/futures/options pilot, then expand the explicit request in
+`deploy/breeze_collection_request.json`. Requests are limited to 4,400 per run,
+spaced at least 1.1 seconds apart, with a 90-minute acquisition deadline and
+3-GiB minimum free-disk floor. Five consecutive provider errors stop collection.
+Account-wide quota use by other jobs must also be considered. The collector
+never claims the selected option subset is all historical intraday strikes.
+
+Dated identities come from original NSE F&O reports in the existing pinned
+public mirror; missing dates use the corresponding official NSE archive URL.
+Unavailable reports, empty bars, validation failures, source digests and partial
+coverage are recorded. Missing weekdays are not asserted to be holidays. Weekend
+sessions absent from the pinned source remain outside the initial enumeration.
+Special-session times, timestamp convention and volume units need independent
+corroboration. Invalid market-data arrays are retained in private quarantine;
+they never become normalized research candles.
+
+The main-only `Breeze private history archive` workflow authenticates with the
+already authorized Actions secrets. It does not access or deploy production.
+Only AES-256-GCM CMS ciphertext is uploaded to GitHub's temporary artifacts;
+raw broker data, SDK logs and credentials are excluded. The recipient file is
+a public transport certificate. Its private key remains outside the repository
+and runner. After download, authenticate/decrypt locally, verify `SHA256SUMS`,
+and upload the exact archive plus coverage to the existing private Drive folder.
+Verify Drive metadata/checksums before claiming a permanent backup. The temporary
+transport certificate is not a permanent scheduling or credential solution.
+
+`collection_complete` fails closed on unavailable sources, empty contract-days,
+provider/validation failures or an exhausted budget. `plan_walk_completed` only
+means the requested initial enumeration finished. Neither flag proves complete
+exchange history, a full quote tape, point-in-time basket eligibility, execution
+fidelity or backtest readiness. Historical bid/ask/depth are never manufactured
+from OHLCV, and technical indicators must be derived separately from validated
+bars with explicit calculation and warm-up conventions.
+

@@ -617,6 +617,39 @@ class ORBProStrategy(EliteStrategy):
         )
         context_fresh = indicators.get("context_fresh") is not False
         if not setup_pass or not context_fresh:
+            failed_requirements = self.last_structural_failure_reasons
+            if not context_fresh:
+                failed_requirements += ("underlying_context_stale",)
+            # Explain the first actual breakout/retest rejection with the
+            # completed futures evidence. Do not change the admission gate.
+            LOGGER.info(
+                "ORB_STRUCTURAL_EVIDENCE_REJECTED symbol=%s side=%s underlying=%s "
+                "bar_ts=%s failed_requirements=%s volume_ratio=%.4f "
+                "penetration_atr=%.4f opening_range_atr=%.4f "
+                "range_atr_bounds=(%.4f,%.4f) futures_vwap_slope=%s",
+                symbol,
+                side,
+                snapshot["symbol"],
+                snapshot["current_ts"].isoformat(),
+                failed_requirements,
+                breakout_volume_ratio,
+                breakout_penetration_atr,
+                opening_range_atr,
+                balanced_min,
+                balanced_max,
+                indicators.get("futures_vwap_slope"),
+                extra={
+                    "event": "ORB_STRUCTURAL_EVIDENCE_REJECTED",
+                    "symbol": symbol,
+                    "side": side,
+                    "underlying": snapshot["symbol"],
+                    "failed_requirements": failed_requirements,
+                    "volume_ratio": breakout_volume_ratio,
+                    "penetration_atr": breakout_penetration_atr,
+                    "opening_range_atr": opening_range_atr,
+                    "futures_vwap_slope": indicators.get("futures_vwap_slope"),
+                },
+            )
             self._no_vote(
                 "orb_structural_contract_not_passed"
                 if not setup_pass

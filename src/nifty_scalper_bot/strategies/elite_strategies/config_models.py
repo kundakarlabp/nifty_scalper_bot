@@ -1,6 +1,9 @@
-"""
-Configuration dataclasses for elite strategy package.
-Production-Grade: Full implementation with validation, slots, and self-healing logic.
+"""Purpose: Define and validate elite strategy configuration interfaces.
+
+Responsibilities: Maintain inherited dataclass configs and the aggregate
+EliteStrategiesSettings registry. RangeVWAPReclaimStrategyConfig carries
+prespecified, unvalidated research thresholds; they do not authorize trades.
+Safety: Existing SMC, VWAPPro, ORB and broker-risk configurations are unchanged.
 """
 
 from __future__ import annotations
@@ -52,6 +55,50 @@ class VWAPProStrategyConfig(EliteStrategyConfig):
 
     ema_period: int = 50
     proximity_pct: float = 0.15
+
+
+@dataclass(slots=True)
+class RangeVWAPReclaimStrategyConfig(EliteStrategyConfig):
+    """Prespecified uncalibrated thresholds for guarded research/live pilot."""
+
+    min_history_bars: int = 40
+    band_atr_multiple: float = 0.80
+    band_sigma_multiple: float = 1.10
+    max_vwap_slope_bps_per_min: float = 1.20
+    max_directional_efficiency: float = 0.35
+    max_range_width_atr: float = 6.0
+    min_reclaim_volume_ratio: float = 0.85
+    min_remaining_center_gap_atr: float = 0.75
+    max_secondary_center_deviation_atr: float = 1.00
+    # A bounded, higher-quality failed-breakout exception is permitted only
+    # within the existing guarded Range VWAP pilot. Not a generic relaxation.
+    enable_conditional_center_tolerance: bool = True
+    max_conditional_center_deviation_atr: float = 1.25
+    min_failed_breakout_reentry_atr: float = 0.15
+    max_failed_breakout_recent_tr_ratio: float = 1.50
+    min_conditional_option_ofi_3s: float = 0.20
+    min_conditional_net_reward_risk: float = 1.75
+    max_exchange_vwap_disagreement_atr: float = 0.50
+    min_band_reentry_atr: float = 0.10
+    min_reclaim_body_fraction: float = 0.30
+    min_regime_completed_bars: int = 2
+    max_option_spread_pct: float = 0.40
+    slippage_stress_bps: float = 25.0
+    # Preserve legacy target setting as a *maximum* research ceiling, not
+    # an assumed reachable option target (now futures/delta derived).
+    gross_target_r: float = 2.5
+    min_net_reward_risk: float = 1.5
+    max_trade_cash_risk: float = 773.0
+    min_abs_option_delta: float = 0.25
+    max_abs_option_delta: float = 0.85
+    target_delta_haircut: float = 0.80  # Retained for old config serialization.
+    assumed_hold_minutes: float = 15.0
+    unknown_theta_haircut_pct: float = 1.0
+    unknown_iv_haircut_pct: float = 1.0
+    adverse_iv_change_points: float = 1.0
+    adverse_basis_change_atr: float = 0.10
+    minimum_days_to_expiry: int = 1
+    max_near_atm_distance_points: float = 50.0
 
 
 @dataclass(slots=True)
@@ -134,6 +181,9 @@ class EliteStrategiesSettings:
 
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
+    range_vwap: RangeVWAPReclaimStrategyConfig = field(
+        default_factory=RangeVWAPReclaimStrategyConfig
+    )
     oi_max_pain: OIMaxPainStrategyConfig = field(
         default_factory=OIMaxPainStrategyConfig
     )
@@ -167,6 +217,7 @@ __all__ = [
     "EliteStrategyConfig",
     "SMCStrategyConfig",
     "VWAPProStrategyConfig",
+    "RangeVWAPReclaimStrategyConfig",
     "OIMaxPainStrategyConfig",
     "GammaScalpingStrategyConfig",
     "TuesdayGammaBuyerStrategyConfig",

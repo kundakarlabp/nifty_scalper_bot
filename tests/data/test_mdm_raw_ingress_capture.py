@@ -14,15 +14,16 @@ from nifty_scalper_bot.storage.replay_archive import verify_raw_ingress_session
 
 def _capture_owner():
     mdm = MarketDataManager.__new__(MarketDataManager)
-    mdm._replay_capture_lock = threading.RLock()
+    mdm._raw_ingress_lock = threading.Lock()
+    mdm._raw_ingress_enabled = True
     mdm._raw_ingress_archive = None
-    mdm._raw_ingress_sequence = {}
     mdm._raw_ingress_count_by_day = {}
     mdm._raw_ingress_capture_errors = 0
-    mdm._raw_ingress_init_retry_at = 0.0
+    mdm._raw_ingress_day = None
+    mdm._symbol_by_token = {}
+    mdm._token_to_symbol = {}
     mdm._raw_ws_receipts_total = 0
     mdm._logger = logging.getLogger("test_raw_wire")
-    mdm._resolve_tick_symbol_for_priority = lambda _raw: "NFO:NIFTYOPT"
     mdm._generation_for_raw_ingress = lambda *_a: 5
     return mdm
 
@@ -44,7 +45,10 @@ def test_raw_wire_capture_preserves_original_nested_depth_and_epoch(
     import shutil
 
     mdm = _capture_owner()
-    monkeypatch.setenv("REPLAY_RAW_INGRESS_ENABLED", "true")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_session_state",
+        lambda _now: "open",
+    )
     monkeypatch.setenv("REPLAY_RAW_MAX_SESSION_MB", "128")
     monkeypatch.setattr(config_paths, "get_data_dir", lambda: tmp_path)
     monkeypatch.setattr(
@@ -52,6 +56,7 @@ def test_raw_wire_capture_preserves_original_nested_depth_and_epoch(
         "disk_usage",
         lambda _path: SimpleNamespace(free=100 * 1024**3),
     )
+    mdm._start_raw_ingress_capture()
     wire = {
         "symbol": "NFO:NIFTYOPT",
         "instrument_token": 7,
@@ -82,3 +87,24 @@ def test_raw_wire_capture_preserves_original_nested_depth_and_epoch(
     captured = load_session(tmp_path / "replay_raw_ingress" / f"{day}.jsonl")
     assert captured[1]["payload"]["wire"]["depth"]["buy"][0]["price"] == 120.2
     assert captured[2]["payload"]["wire"]["depth"]["buy"][0]["price"] == 9999
+
+
+def test_raw_capture_uninitialized_or_contended_never_opens_storage(monkeypatch):
+    mdm = _capture_owner()
+    monkeypatch.setattr(
+        "nifty_scalper_bot.data.market_data_manager.get_market_session_state",
+        lambda _now: "open",
+    )
+
+    def forbidden():
+        raise AssertionError("disk initialization on tick path")
+
+    monkeypatch.setattr(config_paths, "get_data_dir", forbidden)
+    mdm._capture_raw_ws_ingress({"instrument_token": 7})
+    assert mdm._raw_ingress_capture_errors == 1
+    with mdm._raw_ingress_lock:
+        mdm._capture_raw_ws_ingress({"instrument_token": 7})
+    assert mdm._raw_ingress_capture_errors == 2
+    mdm._raw_ingress_enabled = False
+    mdm._capture_raw_ws_ingress({"instrument_token": 7})
+    assert mdm._raw_ingress_capture_errors == 2

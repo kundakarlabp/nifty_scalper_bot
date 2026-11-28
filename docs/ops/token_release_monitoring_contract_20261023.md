@@ -37,9 +37,8 @@ with open positions or active orders.
 - AUTO mode intentionally loads only the small control app outside 08:55–15:40
   IST; it has no /health/trading. Lightweight runtime heartbeat detects /livez
   with quiet=true and reports status=quiet, not a dead engine.
-- AppDeploy gateway HTTP 402 affected unrelated apps; it is NOT a bot release
-  failure. Keep read-only logs and heartbeat in private Supabase instead. Do
-  not redeploy AppDeploy solely to read logs.
+- Read-only runtime logs and heartbeat are stored in private Supabase.
+  Monitoring transport errors are not evidence of failed broker-safe releases.
 
 ## Inspectable read-only checkpoints
 

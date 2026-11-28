@@ -32,6 +32,28 @@ def _plan(*, quantity: int = 130, provenance=None) -> TradePlan:
     )
 
 
+def test_bracket_anchor_provenance_is_owned_by_runtime_without_facade_patch() -> None:
+    plan = _plan(quantity=65)
+    plan.bracket_anchor_mode = "absolute_level"
+
+    _enrich_trade_plan_exit_provenance(plan)
+    _enrich_trade_plan_exit_provenance(plan)
+
+    assert plan.trade_provenance["bracket_anchor_mode"] == "absolute_level"
+    assert _enrich_trade_plan_exit_provenance.__module__ == runtime_module.__name__
+
+
+def test_nonentry_plan_preserves_bracket_anchor_without_adding_tp1() -> None:
+    plan = _plan(quantity=65)
+    plan.intent = "EXIT"
+    plan.bracket_anchor_mode = "absolute_level"
+
+    _enrich_trade_plan_exit_provenance(plan)
+
+    assert plan.trade_provenance["bracket_anchor_mode"] == "absolute_level"
+    assert "tp1_status" not in plan.trade_provenance
+
+
 def test_multilot_plan_gets_lot_aligned_tp1() -> None:
     plan = _plan(quantity=130)
 

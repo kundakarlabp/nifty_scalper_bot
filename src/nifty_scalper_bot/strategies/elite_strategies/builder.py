@@ -1,4 +1,9 @@
-"""Factory and canonical catalog for elite strategy construction."""
+"""Purpose: Construct the canonical elite strategy runtime catalog.
+
+Responsibilities: Bind enabled configurations to authoritative trigger/context
+roles and opt-in research extensions without proliferating parallel builders.
+Safety: RangeVWAPReclaim needs explicit LIVE pilot authorization to trigger.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,10 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
-from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    canonical_strategy_role,
+    range_vwap_live_enabled,
+)
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
@@ -24,6 +32,9 @@ from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import (
 from nifty_scalper_bot.strategies.elite_strategies.oi_max_pain import OIMaxPainStrategy
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
+from nifty_scalper_bot.strategies.elite_strategies.range_vwap_reclaim import (
+    RangeVWAPReclaimStrategy,
+)
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )
@@ -49,12 +60,20 @@ STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     ),
     "cpr": ("cpr_breakout", CPRBreakoutStrategy, "CPR Trend Breakout"),
     "order_flow": ("order_flow", OrderFlowStrategy, "Order Flow Imbalance"),
+    # Must follow OrderFlow: it consumes same-evaluation, same-quote proof,
+    # never the preceding evaluation or an absent=False holdoff default.
+    "range_vwap": (
+        "range_vwap_reclaim",
+        RangeVWAPReclaimStrategy,
+        "Range VWAP Reclaim Research",
+    ),
     "bb_squeeze": ("bb_squeeze", BBSqueezeStrategy, "BB Volatility Squeeze"),
     "rsi_div": ("rsi_divergence", RSIDivergenceStrategy, "RSI Divergence"),
     "orb": ("orb_pro", ORBProStrategy, "Opening Range Breakout"),
 }
 
 _EXPERIMENTAL_CONTEXT_FLAGS = {
+    "range_vwap": "ENABLE_RANGE_VWAP_RESEARCH",
     "bb_squeeze": "ENABLE_BB_SQUEEZE_CONTEXT",
     "cpr": "ENABLE_CPR_EXPERIMENTAL",
     "rsi_div": "ENABLE_RSI_DIVERGENCE_EXPERIMENTAL",
@@ -67,6 +86,8 @@ _POLICY_ENV_PREFIXES = (
     "VWAP_",
     "SMC_",
     "ORDERFLOW_",
+    "RANGE_VWAP_",
+    "ENABLE_RANGE_VWAP_",
     "ENABLE_OI_",
     "ENABLE_BB_",
     "ENABLE_CPR_",
@@ -143,6 +164,8 @@ def _strategy_runtime_role(
     """Return canonical runtime role for a strategy field, or None when inactive."""
     if field_name == "oi_max_pain" and not _env_true("ENABLE_OI_CONTEXT_PROVIDER"):
         return None
+    if field_name == "range_vwap" and range_vwap_live_enabled():
+        return "trigger" if strategy_mode == "directional_scalp" else None
 
     experimental_flag = _EXPERIMENTAL_CONTEXT_FLAGS.get(field_name)
     if experimental_flag and not _env_true(experimental_flag):

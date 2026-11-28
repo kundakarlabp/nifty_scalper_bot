@@ -4,6 +4,7 @@ import pytest
 
 from nifty_scalper_bot.backtesting.volatility_research import (
     CondorAssessment,
+    DirectionalDebitSpreadAssessment,
     LongStraddleAssessment,
     screen_volatility_portfolio_budget,
 )
@@ -98,3 +99,42 @@ def test_live_mode_cannot_authorize_portfolio_from_research_screen(
     monkeypatch.setenv("EXECUTION_MODE", mode)
     with pytest.raises(ValueError, match="volatility_research_requires_shadow_process"):
         case(condor)
+
+
+def test_debit_spread_needs_exit_stress_plus_two_leg_entry_costs():
+    assessment = DirectionalDebitSpreadAssessment(
+        structure="BULL_CALL_SPREAD",
+        debit_per_unit=5.0,
+        width_points=100,
+        expiry_breakeven=24005.0,
+        gross_max_profit_rupees=6175.0,
+        gross_max_loss_rupees=325.0,
+        entry_fees_rupees=55.0,
+        spread_entry_cash_required_rupees=380.0,
+        long_option_entry_cash_required_rupees=1500.0,
+    )
+    allowed = case(
+        assessment,
+        broker_required_margin=1500.0,
+        broker_free_margin=5000.0,
+        remaining_trade_risk=1000.0,
+        remaining_daily_risk=1000.0,
+        exit_settlement_fee_reserve=100.0,
+        stressed_slippage_reserve=300.0,
+    )
+    assert allowed.research_budget_fits is True
+    assert allowed.planning_loss_reserve_rupees == pytest.approx(780.0)
+    assert allowed.live_eligible is False
+    assert allowed.net_loss_bound_certified is False
+
+    rejected = case(
+        assessment,
+        broker_required_margin=1500.0,
+        broker_free_margin=5000.0,
+        remaining_trade_risk=773.30,
+        remaining_daily_risk=1000.0,
+        exit_settlement_fee_reserve=100.0,
+        stressed_slippage_reserve=300.0,
+    )
+    assert rejected.research_budget_fits is False
+    assert rejected.reason == "research_risk_budget_insufficient"

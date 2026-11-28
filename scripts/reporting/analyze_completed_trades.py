@@ -1,7 +1,12 @@
 """Analyze canonical completed trades without modifying live strategy parameters.
 
-Safety: Selection diagnostics require complete finite R-multiple coverage;
-missing outcomes never silently disappear from a validated Sharpe sample.
+Responsibilities: Isolate canonical Range VWAP trade outcomes, observed
+paired bid/ask execution-quality coverage, pre-entry volatility/payoff
+cohorts and 10/25/50-bps stress scenarios.
+Safety: No missing premium/quantity, broker-cost identity or independent-trade
+sample may be inferred as zero loss. Calibration is read-only and cannot
+automatically promote any parameter. Sensitivities are not fill-path replays;
+selection diagnostics require complete finite R-multiple coverage.
 """
 
 from __future__ import annotations
@@ -10,8 +15,10 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +54,10 @@ from nifty_scalper_bot.backtesting.broker_tradebook_reconciliation import (  # n
 from nifty_scalper_bot.backtesting.ledger_integrity import (  # noqa: E402
     summarize_ledger_integrity,
 )
+from nifty_scalper_bot.config.strategy_taxonomy import (  # noqa: E402
+    normalize_strategy_name,
+)
+from nifty_scalper_bot.utils.market_hours import IST  # noqa: E402
 from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
     load_candidate_decision_rows,
     load_trade_ledger_rows as load_canonical_trade_ledger_rows,
@@ -76,11 +87,22 @@ def build_analysis(
     walk_forward_min_train: int = 20,
     walk_forward_test_trades: int = 10,
     walk_forward_min_folds: int = 2,
+    strategy: str | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable evidence report from canonical ledger rows."""
 
+    selected_rows = (
+        [
+            row
+            for row in rows
+            if normalize_strategy_name(str(row.get("strategy") or ""))
+            == normalize_strategy_name(strategy)
+        ]
+        if strategy
+        else rows
+    )
     trades = canonicalize_completed_trades(
-        rows,
+        selected_rows,
         allow_estimated_costs=allow_estimated_costs,
     )
     overall = summarize_completed_trades(trades)
@@ -143,6 +165,8 @@ def build_analysis(
     return {
         "dataset": {
             "canonical_completed_trades": len(trades),
+            "strategy_filter": normalize_strategy_name(strategy) if strategy else None,
+            "input_closed_trade_rows": len(selected_rows),
             "first_closed_at": trades[0].closed_at if trades else None,
             "last_closed_at": trades[-1].closed_at if trades else None,
         },
@@ -231,6 +255,274 @@ def build_analysis(
     }
 
 
+def range_vwap_slippage_stress(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Extra per-side fill slippage stress; never an executable counterfactual."""
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    evidence = {
+        "policy": "extra_slippage_per_side_on_observed_fills",
+        "executable_quote_path_verified": False,
+        "option_profitability_proven": False,
+        "minimum_trades_for_parameter_promotion_met": False,
+    }
+    if not trades:
+        return {
+            **evidence,
+            "ready": False,
+            "reason": "no_verified_closed_range_trades",
+            "scenarios": [],
+        }
+    raw = {
+        str(row["trade_id"]): row
+        for row in selected
+        if str(row.get("state") or row.get("status") or "").upper() == "CLOSED"
+        and row.get("ledger_complete") in (True, 1, "true", "1")
+    }
+    premiums: dict[str, float] = {}
+    for trade in trades:
+        row = raw[trade.trade_id]
+        try:
+            entry = float(row["entry_price"])
+            exit_price = float(row["exit_price"])
+            quantity = float(row["quantity"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_quantity_missing",
+                "scenarios": [],
+            }
+        if (
+            not all(math.isfinite(v) and v > 0 for v in (entry, exit_price, quantity))
+            or not quantity.is_integer()
+            or trade.cost_source != "broker_virtual_contract_note"
+        ):
+            return {
+                **evidence,
+                "ready": False,
+                "reason": "premium_or_broker_cost_unverified",
+                "scenarios": [],
+            }
+        premiums[trade.trade_id] = (entry + exit_price) * quantity
+
+    scenarios = []
+    for bps in (10, 25, 50):
+        stressed = [
+            replace(
+                trade,
+                gross_pnl=trade.gross_pnl - premiums[trade.trade_id] * bps / 10000.0,
+                net_pnl=trade.net_pnl - premiums[trade.trade_id] * bps / 10000.0,
+            )
+            for trade in trades
+        ]
+        summary = summarize_completed_trades(stressed)
+        scenarios.append(
+            {
+                "extra_slippage_bps_each_side": bps,
+                "net_pnl": summary.net_pnl,
+                "net_expectancy": summary.expectancy,
+                "profit_factor": summary.profit_factor,
+                "max_drawdown": summary.max_drawdown,
+            }
+        )
+    return {
+        **evidence,
+        "ready": True,
+        "reason": "descriptive_stress_only_not_fill_replay",
+        "completed_trades": len(trades),
+        "scenarios": scenarios,
+    }
+
+
+def range_vwap_execution_calibration(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Read observed paired option fills; never adjust live risk from samples."""
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    pairs: list[tuple[float, float]] = []
+    dates: set[str] = set()
+    for trade in trades:
+        q = trade.execution_quality
+        try:
+            entry = float(q["entry_slippage_bps"])
+            exit_slip = float(q["exit_slippage_bps"])
+            entry_ask = float(q["entry_quote_ask"])
+            exit_bid = float(q["exit_quote_bid"])
+            exit_age_ms = float(q["exit_quote_age_ms"])
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if (
+            trade.cost_source != "broker_virtual_contract_note"
+            or q.get("exit_quote_evidence_source") != "cached_bid_observation"
+            or not all(
+                math.isfinite(value)
+                for value in (entry, exit_slip, entry_ask, exit_bid, exit_age_ms)
+            )
+            or min(entry_ask, exit_bid) <= 0
+            or not 0 <= exit_age_ms <= 2000
+        ):
+            continue
+        pairs.append((entry, exit_slip))
+        dates.add(datetime.fromtimestamp(trade.closed_at, IST).date().isoformat())
+
+    def percentile(values: list[float], pct: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * pct
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        return round(
+            ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower),
+            3,
+        )
+
+    entry_adverse = [max(0.0, pair[0]) for pair in pairs]
+    exit_adverse = [max(0.0, pair[1]) for pair in pairs]
+    complete = len(trades)
+    coverage = len(pairs) / complete if complete else 0.0
+    ready = len(pairs) >= 30 and len(dates) >= 10 and coverage >= 0.9
+    return {
+        "ready_for_research_calibration": ready,
+        "live_parameter_change_allowed": False,
+        "completed_range_trades": complete,
+        "paired_measured_quote_fill_trades": len(pairs),
+        "paired_coverage_fraction": round(coverage, 4),
+        "independent_trading_sessions": len(dates),
+        "minimum_required": {
+            "paired_trades": 30,
+            "sessions": 10,
+            "paired_fraction": 0.9,
+        },
+        "entry_adverse_slippage_median_bps": (
+            round(median(entry_adverse), 3) if entry_adverse else None
+        ),
+        "exit_adverse_slippage_median_bps": (
+            round(median(exit_adverse), 3) if exit_adverse else None
+        ),
+        "entry_adverse_slippage_p95_bps": percentile(entry_adverse, 0.95),
+        "exit_adverse_slippage_p95_bps": percentile(exit_adverse, 0.95),
+        "reason": (
+            "sample_only_not_live_fill_or_regime_parity"
+            if ready
+            else "insufficient_paired_verified_quotes_or_sessions"
+        ),
+    }
+
+
+def range_vwap_transition_economics(
+    rows: list[dict[str, Any]], *, allow_estimated_costs: bool = False
+) -> dict[str, Any]:
+    """Compare causal entry volatility and modeled target with realized option P&L.
+
+    This is a selected-trade diagnostic, NOT proof of reversals or a
+    counterfactual assessment of vetoed/missed candidates.
+    """
+    selected = [
+        row
+        for row in rows
+        if normalize_strategy_name(str(row.get("strategy") or ""))
+        == "range_vwap_reclaim"
+    ]
+    trades = canonicalize_completed_trades(
+        selected, allow_estimated_costs=allow_estimated_costs
+    )
+    cohorts: dict[str, list[tuple[Any, float, bool]]] = {}
+    for trade in trades:
+        structure = trade.outcome.get("range_structure")
+        economics = trade.outcome.get("option_cost_risk")
+        if (
+            trade.cost_source != "broker_virtual_contract_note"
+            or not isinstance(structure, dict)
+            or not isinstance(economics, dict)
+        ):
+            continue
+        try:
+            vol_ratio = float(structure["prior_5m_to_14m_true_range_ratio"])
+            short_eff = float(structure["prior_5m_directional_efficiency"])
+            long_eff = float(structure["directional_efficiency"])
+            target_reward = float(economics["target_net_reward_after_costs"])
+            cash_risk = float(economics["worst_stop_loss_including_costs"])
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if not (
+            all(
+                math.isfinite(v)
+                for v in (vol_ratio, short_eff, long_eff, target_reward, cash_risk)
+            )
+            and vol_ratio >= 0
+            and 0 <= short_eff <= 1
+            and 0 <= long_eff <= 1
+            and target_reward > 0
+            and 0 < cash_risk <= 773
+        ):
+            continue
+        label = (
+            "recent_true_range_expansion"
+            if vol_ratio > 1.0
+            else "recent_true_range_not_expanding"
+        )
+        cohorts.setdefault(label, []).append(
+            (trade, target_reward, short_eff > long_eff)
+        )
+
+    results = []
+    for label, observations in sorted(cohorts.items()):
+        sample = [trade for trade, _, _ in observations]
+        summary = summarize_completed_trades(sample)
+        sessions = {
+            datetime.fromtimestamp(t.closed_at, IST).date().isoformat() for t in sample
+        }
+        results.append(
+            {
+                "preentry_volatility_cohort": label,
+                "completed_trades": len(sample),
+                "independent_sessions": len(sessions),
+                "recent_directional_pressure_rising_fraction": round(
+                    sum(rising for _, _, rising in observations) / len(sample), 4
+                ),
+                "modeled_target_net_reward_mean": round(
+                    sum(reward for _, reward, _ in observations) / len(sample), 2
+                ),
+                "realized_net_expectancy": summary.expectancy,
+                "realized_win_rate": summary.win_rate,
+                "realized_net_pnl": summary.net_pnl,
+                "research_sample_sufficient": (
+                    len(sample) >= 20 and len(sessions) >= 10
+                ),
+            }
+        )
+    return {
+        "completed_range_trades": len(trades),
+        "trades_with_causal_volatility_and_economic_provenance": sum(
+            len(items) for items in cohorts.values()
+        ),
+        "cohorts": results,
+        "live_filter_or_parameter_promotion_allowed": False,
+        "interpretation": (
+            "descriptive_selected_trades_only; modeled_target_is_not_expectancy;"
+            " no_assessment_of_blocked_setup_profitability"
+        ),
+    }
+
+
 def load_candidate_returns(path: Path) -> dict[str, list[float]]:
     """Load aligned candidate post-cost return/R series from JSON."""
 
@@ -292,6 +584,11 @@ def build_candidate_validation(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trades-db", type=Path, required=True)
+    parser.add_argument(
+        "--strategy",
+        help="Optional canonical strategy (e.g. range_vwap_reclaim). Other "
+        "strategies are excluded from the completed-trade analysis.",
+    )
     parser.add_argument(
         "--broker-trades-csv",
         type=Path,
@@ -359,6 +656,26 @@ def main(argv: list[str] | None = None) -> int:
             walk_forward_min_train=args.walk_forward_min_train,
             walk_forward_test_trades=args.walk_forward_test_trades,
             walk_forward_min_folds=args.walk_forward_min_folds,
+            strategy=args.strategy,
+        )
+        if normalize_strategy_name(args.strategy) == "range_vwap_reclaim":
+            report["range_vwap_slippage_stress"] = range_vwap_slippage_stress(
+                rows,
+                allow_estimated_costs=args.allow_estimated_costs,
+            )
+            report["range_vwap_execution_calibration"] = (
+                range_vwap_execution_calibration(
+                    rows, allow_estimated_costs=args.allow_estimated_costs
+                )
+            )
+            report["range_vwap_transition_economics"] = range_vwap_transition_economics(
+                rows, allow_estimated_costs=args.allow_estimated_costs
+            )
+        report["selected_strategy_note"] = (
+            "Closed-trade metrics and candidate decisions are strategy-filtered; "
+            "historical journal integrity and broker reconciliation are global."
+            if args.strategy
+            else None
         )
         report["ledger_integrity"] = summarize_ledger_integrity(all_ledger_rows)
         report["broker_tradebook_reconciliation"] = (
@@ -375,6 +692,13 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         candidate_decisions = load_candidate_decision_rows(args.trades_db)
+        if args.strategy:
+            candidate_decisions = [
+                row
+                for row in candidate_decisions
+                if normalize_strategy_name(str(row.get("strategy") or ""))
+                == normalize_strategy_name(args.strategy)
+            ]
         decision_funnel = summarize_candidate_decisions(candidate_decisions)
         report["candidate_decision_funnel"] = asdict(decision_funnel)
         setup_opportunities = canonicalize_setup_opportunities(candidate_decisions)

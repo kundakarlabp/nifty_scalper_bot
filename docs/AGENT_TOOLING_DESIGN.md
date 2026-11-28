@@ -94,7 +94,7 @@ The connected GitHub application already supports authorized repository reads an
 - `scripts/architecture_lint.py` enforces mechanically provable ownership boundaries.
 - `scripts/agent_task.py merge-check` rejects stale validated base/head combinations before merge.
 - `scripts/agent_failure_learn.py` classifies repeated CI failures without mutating repository memory.
-- `.github/workflows/failure-memory-candidates.yml` surfaces learning candidates after failed CI.
+- Failed CI logs can be classified with the existing `scripts/agent_failure_learn.py` when needed, without a separate workflow for every CI completion.
 
 These tools turn recurring reasoning into deterministic repository feedback.
 

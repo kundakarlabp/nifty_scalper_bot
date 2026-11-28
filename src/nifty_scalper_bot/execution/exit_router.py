@@ -1,12 +1,12 @@
-"""Purpose: Route broker exit attempts under session and product rules.
+"""Purpose: Route a single broker-safe exit without uncertain resubmission.
 
 Responsibilities:
-- plan_and_send_exit applies time cutoff and available fallback paths.
-- ExitAttempt and ExitResult capture each attempted route and result.
-- Broker rejection parsing supports explicit failure reporting.
-
+- plan_and_send_exit preserves the held broker product and market session.
+- ExitAttempt and ExitResult describe the one attempted broker submission.
+- Broker rejection parsing preserves actionable failure diagnostics.
 Boundaries: The caller owns position truth and reconciles filled exits.
-Safety: An exit acknowledgement alone does not prove a flat position.
+Safety: Timeout or rejection never authorizes another reducing order;
+AMO is not an immediate flatten after the exchange has closed.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def plan_and_send_exit(
     eod_flatten_start: str = "15:24:30",
     retry_max: int = 3,
 ) -> ExitResult:
-    """Route exit order with market/AMO fallbacks.
+    """Route one reducing order, with no unsafe auto-retry or product change.
 
     Args:
         symbol: Tradable symbol for the exit.
@@ -75,7 +75,7 @@ def plan_and_send_exit(
         refresh_quote: Optional quote refresh callable.
         mis_cutoff: MIS cutoff time in ``HH:MM[:SS]`` format.
         eod_flatten_start: Time when forced exits begin.
-        retry_max: Maximum retry attempts.
+        retry_max: Legacy compatibility bound; exits attempt only once.
 
     Returns:
         ExitResult: Structured outcome with attempts.
@@ -106,82 +106,78 @@ def plan_and_send_exit(
     mis_cutoff_time = _parse_time_token(mis_cutoff)
     eod_time = _parse_time_token(eod_flatten_start)
     reason = BrokerReject.UNKNOWN
+    if now_time >= _dt.time(hour=15, minute=30):
+        logger.error(
+            "EXIT_ROUTER_MARKET_CLOSED symbol=%s product=%s "
+            "reason=no_immediate_flatten",
+            symbol,
+            product,
+        )
+        return ExitResult(False, None, BrokerReject.MARKET_CLOSED, attempts)
 
-    for attempt in range(1, max(retry_max, 1) + 1):
-        planned_product = product or "MIS"
-        validity = "IOC"
-        variety = "regular"
-        note = "market"
-        amo = False
-        route_time = now_time
-        if route_time >= mis_cutoff_time:
-            planned_product = "NRML"
-        if route_time >= _dt.time(hour=15, minute=30):
-            amo = True
-            variety = "amo"
-            validity = "DAY"
-            planned_product = "NRML"
-            note = "post_close"
-        elif route_time >= eod_time:
-            planned_product = "NRML"
-            note = "eod_flatten"
-        attempt_meta = ExitAttempt(
-            attempt=attempt,
-            product=planned_product,
-            validity=validity,
-            variety=variety,
-            is_amo=amo,
-            note=note,
-        )
-        attempts.append(attempt_meta)
+    attempt = 1  # retry_max is retained for API compatibility, not resubmission.
+    planned_product = product or "MIS"
+    validity = "IOC"
+    variety = "regular"
+    amo = False
+    note = "market"
+    if now_time >= mis_cutoff_time and planned_product == "MIS":
+        note = "mis_cutoff_reduction"
+    elif now_time >= eod_time:
+        note = "eod_reduction"
+    attempt_meta = ExitAttempt(
+        attempt=attempt,
+        product=planned_product,
+        validity=validity,
+        variety=variety,
+        is_amo=amo,
+        note=note,
+    )
+    attempts.append(attempt_meta)
+    logger.info(
+        "Condition met: exit_plan attempt=%s product=%s validity=%s variety=%s",
+        attempt,
+        planned_product,
+        validity,
+        variety,
+        extra={
+            "event": "plan_and_send_exit_attempt",
+            "symbol": symbol,
+            "attempt": attempt,
+            "product": planned_product,
+            "validity": validity,
+            "variety": variety,
+            "amo": amo,
+        },
+    )
+    ok, order_id, error_text = submit(planned_product, validity, variety)
+    if ok and order_id:
         logger.info(
-            "Condition met: exit_plan attempt=%s product=%s validity=%s variety=%s",
-            attempt,
-            planned_product,
-            validity,
-            variety,
+            "Condition met: exit_ok order_id=%s",
+            order_id,
             extra={
-                "event": "plan_and_send_exit_attempt",
+                "event": "plan_and_send_exit_success",
                 "symbol": symbol,
                 "attempt": attempt,
-                "product": planned_product,
-                "validity": validity,
-                "variety": variety,
-                "amo": amo,
+                "order_id": order_id,
             },
         )
-        ok, order_id, error_text = submit(planned_product, validity, variety)
-        if ok:
-            logger.info(
-                "Condition met: exit_ok order_id=%s",
-                order_id,
-                extra={
-                    "event": "plan_and_send_exit_success",
-                    "symbol": symbol,
-                    "attempt": attempt,
-                    "order_id": order_id,
-                },
-            )
-            return ExitResult(True, order_id, BrokerReject.UNKNOWN, attempts)
-        reason = parse_broker_error(error_text)
-        logger.warning(
-            "exit_retry reason=%s attempt=%s",
-            reason.value,
-            attempt,
-            extra={
-                "event": "plan_and_send_exit_retry",
-                "symbol": symbol,
-                "attempt": attempt,
-                "reason": reason.value,
-                "error": error_text,
-            },
-        )
-        if reason is BrokerReject.MARKET_CLOSED:
-            now_time = _dt.time(hour=15, minute=30)
-        elif reason is BrokerReject.MIS_CUTOFF:
-            now_time = max(now_time, mis_cutoff_time)
-        elif reason is BrokerReject.THROTTLED:
-            continue
+        return ExitResult(True, order_id, BrokerReject.UNKNOWN, attempts)
+    reason = parse_broker_error(error_text)
+    logger.warning(
+        "exit_retry reason=%s attempt=%s",
+        reason.value,
+        attempt,
+        extra={
+            "event": "plan_and_send_exit_retry",
+            "symbol": symbol,
+            "attempt": attempt,
+            "reason": reason.value,
+            "error": error_text,
+        },
+    )
+    # Neither a timeout nor a broker rejection proves the first order
+    # was absent. Canonical reconciliation must precede any replacement.
     logger.error(
         "Failure in plan_and_send_exit: attempts_exhausted",
         extra={

@@ -534,6 +534,9 @@ def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch,
         enabled=False,
         execution_mode="LIVE",
         futures_vwap_slope=near_neutral,
+        current_price=104.1,
+        bid=104.0,
+        ask=104.2,
     )
     assert signal is not None
     assert signal.metadata["live_neutral_slope_enabled"] is True
@@ -544,6 +547,23 @@ def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch,
     assert signal.metadata["trend_momentum_completed_option_rvol"] >= 1.5
     assert signal.metadata["futures_slope_alignment"] is False
     assert "live_neutral_futures_slope" in signal.metadata["setup_reasons"]
+    assert signal.metadata["vwap_structural_invalidation"] is True
+    assert signal.stop_loss == pytest.approx(97.95)
+    assert signal.metadata["bracket_anchor_mode"] == "absolute_level"
+
+
+def test_live_neutral_slope_rejects_unconfirmed_breakout_bid(monkeypatch):
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=0.0001,
+        current_price=104.1,
+        bid=103.9,
+        ask=104.2,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "neutral_slope_breakout_bid_unconfirmed"
 
 
 @pytest.mark.parametrize("side", ["CE", "PE"])
@@ -986,3 +1006,105 @@ def test_retest_rebreak_ablation_fails_closed_without_strict_proof(monkeypatch):
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_research_retest_rebreak_required"
+
+
+def test_verified_completed_future_volume_replaces_zero_tick_counter(monkeypatch):
+    future = "NFO:NIFTY26SEPFUT"
+    provenance = {
+        "source": "completed_futures_1m_bars",
+        "ready": True,
+        "reason": "verified",
+        "baseline_count": 20,
+        "ratio": 1.6,
+        "bar_timestamp": "2026-09-10T09:59:00+05:30",
+    }
+    _, signal = _evaluate(
+        monkeypatch,
+        futures_volume_ratio=0.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance=provenance,
+        futures_completed_bar_volume_symbol=future,
+        active_futures_symbol=future,
+    )
+    assert signal is not None
+    assert signal.metadata["futures_volume_ratio"] == 1.6
+    assert (
+        signal.metadata["futures_volume_ratio_source"]
+        == "verified_completed_futures_1m"
+    )
+    assert signal.metadata["futures_quote_counter_ratio"] == 0.0
+    assert signal.metadata["volume_confirmation_source"] == "option_and_futures"
+
+
+@pytest.mark.parametrize(
+    ("bar_timestamp", "future_symbol"),
+    [
+        ("2026-09-10T09:56:00+05:30", "NFO:NIFTY26SEPFUT"),
+        ("2026-09-10T10:01:00+05:30", "NFO:NIFTY26SEPFUT"),
+        ("2026-09-10T09:59:00+05:30", "NFO:NIFTY26OCTFUT"),
+    ],
+)
+def test_stale_future_or_wrong_contract_cannot_confirm_vwap_volume(
+    monkeypatch, bar_timestamp, future_symbol
+):
+    future = "NFO:NIFTY26SEPFUT"
+    _, signal = _evaluate(
+        monkeypatch,
+        futures_volume_ratio=4.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance={
+            "source": "completed_futures_1m_bars",
+            "ready": True,
+            "reason": "verified",
+            "baseline_count": 20,
+            "ratio": 2.1,
+            "bar_timestamp": bar_timestamp,
+        },
+        futures_completed_bar_volume_symbol=future_symbol,
+        active_futures_symbol=future,
+    )
+    assert signal is not None  # independent option volume remains sufficient
+    assert signal.metadata["futures_volume_ratio"] is None
+    assert signal.metadata["volume_confirmation_source"] == "option"
+
+
+def test_vwap_distance_rejection_reports_causal_futures_volume(
+    monkeypatch,
+) -> None:
+    """A distance veto must still expose completed futures volume provenance."""
+    import nifty_scalper_bot.strategies.elite_strategies.vwap_pro as vwap_module
+
+    observed = []
+
+    def _capture_log(_logger, _key, message, *args, **_kwargs):
+        observed.append(message % args)
+
+    monkeypatch.setattr(vwap_module, "log_throttled", _capture_log)
+    provenance = {
+        "source": "completed_futures_1m_bars",
+        "ready": True,
+        "reason": "verified",
+        "ratio": 1.8,
+        "baseline_count": 20,
+        "bar_timestamp": "2026-09-10T09:59:00+05:30",
+    }
+    _, signal = _evaluate(
+        monkeypatch,
+        current_price=135.0,
+        open=131.0,
+        high=138.0,
+        low=130.0,
+        close=135.0,
+        futures_completed_bar_volume_ready=True,
+        futures_completed_bar_volume_provenance=provenance,
+        futures_completed_bar_volume_symbol="NFO:NIFTY26SEPFUT",
+        active_futures_symbol="NFO:NIFTY26SEPFUT",
+        futures_volume_ratio=0.0,
+    )
+    assert signal is None
+    assert any(
+        "VWAP_DISTANCE_REJECTED" in event
+        and "futures_volume_source=verified_completed_futures_1m" in event
+        and "completed_ratio=1.8000" in event
+        for event in observed
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -99,6 +100,85 @@ def _manager() -> StrategyManager:
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
     return manager
+
+
+def test_only_verified_range_reversal_may_use_neutral_context(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("ENABLE_RANGE_VWAP_LIVE", "true")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    signal, evidence = _signal_evidence("RangeVWAPReclaim")
+    proof = {
+        "range_option_flow_verified": True,
+        "range_structure": {
+            "qualified": True,
+            "side": "CE",
+            "reversal_direction_source": "two_completed_futures_candles",
+        },
+        "option_cost_risk": {
+            "qualified": True,
+            "model_only": True,
+            "worst_stop_loss_including_costs": 700.0,
+            "net_reward_risk": 1.6,
+        },
+    }
+    signal.metadata.update(proof)
+    evidence.metadata.update(proof)
+    neutral = {
+        **_live_indicators(),
+        "direction_bias": None,
+        "underlying_direction_bias": None,
+        "underlying_direction_state": "NEUTRAL",
+        "regime": "RANGE",
+        "range_neutral_context_verified": True,
+    }
+    manager = _manager()
+    approved = manager._combine_strategy_votes(
+        symbol=_CE, signals=[(signal, evidence)], indicators=neutral
+    )
+    assert approved is not None
+    assert approved.metadata["direction_contract"]["underlying_state"] == "NEUTRAL"
+    assert approved.metadata["direction_contract"]["reversal_exemption"] is True
+
+    # An explicitly verified futures-led range reversal may also oppose
+    # confirmed older trend direction; a normal trigger never inherits it.
+    countertrend = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(signal, evidence)],
+        indicators={**_live_indicators("PE"), "regime": "RANGE"},
+    )
+    assert countertrend is not None
+    assert countertrend.metadata["direction_contract"]["reversal_exemption"] is True
+    signal.metadata["range_option_flow_verified"] = False
+    evidence.metadata["range_option_flow_verified"] = False
+    unverified = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(signal, evidence)],
+        indicators={**_live_indicators("PE"), "regime": "RANGE"},
+    )
+    assert unverified is None
+    signal.metadata["range_option_flow_verified"] = True
+    evidence.metadata["range_option_flow_verified"] = True
+
+    for changed in (
+        {"range_neutral_context_verified": False},
+        {"regime": "TREND"},
+        {"underlying_direction_state": "TRANSITION"},
+    ):
+        rejected = manager._combine_strategy_votes(
+            symbol=_CE, signals=[(signal, evidence)], indicators={**neutral, **changed}
+        )
+        assert rejected is None
+
+    ordinary = _signal_evidence("VWAPPro")
+    assert (
+        manager._combine_strategy_votes(
+            symbol=_CE, signals=[ordinary], indicators=neutral
+        )
+        is None
+    )
 
 
 def test_countertrend_pe_is_blocked_during_confirmed_bull(monkeypatch) -> None:
@@ -771,3 +851,61 @@ def test_unconfirmed_context_logs_parseable_reasons_without_allowing_entry(
     assert manager._last_no_signal_decision_by_symbol[_CE].blocked_at == (
         "context_contract"
     )
+
+
+def test_cost_comparison_ranks_without_changing_live_primary(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    original = _signal_evidence("VWAPPro")
+    alternative_signal, alternative_evidence = _signal_evidence("ORBPro")
+    alternative = (replace(alternative_signal, take_profit=145.0), alternative_evidence)
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[original, alternative],
+        indicators={
+            **_live_indicators(),
+            "ask": 110.0,
+            "bid": 109.0,
+            "regime": "TREND",
+        },
+    )
+    assert result is not None
+    assert result.metadata["strategy"] == "VWAPPro"
+    assert result.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert result.metadata["shadow_economic_ranking_used_for_entry"] is False
+    ranking = result.metadata["shadow_economic_comparison"]
+    assert len(ranking) == 2
+    assert ranking[0]["strategy"] == "ORBPro"
+    assert ranking[0]["net_rr_proxy"] > ranking[1]["net_rr_proxy"]
+
+
+def test_invalid_option_prices_never_create_shadow_economics() -> None:
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[trigger, context],
+        indicators={**_live_indicators(), "ask": 0, "bid": -1},
+    )
+    assert result is not None
+    assert result.metadata["shadow_economic_comparison"] == []
+
+
+def test_shadow_model_exception_does_not_block_live_trigger(monkeypatch) -> None:
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    def broken_model(**kwargs):
+        raise ValueError("invalid research cost assumptions")
+
+    monkeypatch.setattr(module, "evaluate_net_reward_risk", broken_model)
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence("OrderFlow", role="context")
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[trigger, context],
+        indicators={**_live_indicators(), "ask": 110.0, "bid": 109.0},
+    )
+    assert approved is not None
+    assert approved.metadata["shadow_economic_comparison"] == []

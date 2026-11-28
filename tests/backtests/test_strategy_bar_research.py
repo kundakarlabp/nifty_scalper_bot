@@ -431,6 +431,7 @@ def test_full_orb_research_uses_causal_regime_detector(tmp_path, monkeypatch):
 
     class Detector:
         def evaluate(self, symbol, data):
+            assert data["completed_bar_timestamp"] > 0
             regime_calls.append(symbol)
             return SimpleNamespace(regime="TREND")
 
@@ -974,15 +975,15 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
 
     report = run_orb_comparison(tmp_path)
 
-    assert report["candidate_count"] == 11
+    assert report["candidate_count"] == 13
     assert report["slippage_scenario_count"] == 3
-    assert len(calls) == 33
+    assert len(calls) == 39
     assert all(call["components"] == {"ORBPro"} for call in calls)
     assert all(call["compact_orb_context"] is True for call in calls)
     assert sum(call["range_transition"] == "true" for call in calls) == 3
-    assert sum(call["range_transition"] == "false" for call in calls) == 30
+    assert sum(call["range_transition"] == "false" for call in calls) == 36
     assert sum(call["strict_retest_wick"] == "true" for call in calls) == 3
-    assert sum(call["strict_retest_wick"] == "false" for call in calls) == 30
+    assert sum(call["strict_retest_wick"] == "false" for call in calls) == 36
 
 
 def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
@@ -1056,7 +1057,7 @@ def test_bounded_comparison_restores_environment_and_never_promotes_small_sample
     before = dict(os.environ)
     report = run_orb_comparison(tmp_path)
     assert dict(os.environ) == before
-    assert len(report["candidates"]) == 11
+    assert len(report["candidates"]) == 13
     assert report["selection"]["promotion_eligible"] is False
     assert report["selection"]["selected_for_live"] is None
     assert report["retrospective_check_is_untouched"] is False
@@ -2908,3 +2909,54 @@ def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     assert comparison["selected_for_live"] is None
     assert comparison["promotion_eligible"] is False
     assert report["selection"]["promotion_eligible"] is False
+
+
+def test_completed_underlying_bars_are_fresh_even_without_direction(
+    tmp_path, monkeypatch
+):
+    """A neutral direction estimate is not evidence that a completed bar is stale."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        IndicatorEngine,
+        RuntimeStrategyManager,
+        _research_orb_structural_context,
+        load_archive,
+    )
+
+    first = archive(tmp_path)
+    histories, _, _ = load_archive(tmp_path)
+    engine = IndicatorEngine()
+    for symbol in ("NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"):
+        engine.ingest_historical_bar(symbol, histories[symbol][first])
+    monkeypatch.setattr(
+        RuntimeStrategyManager,
+        "_derive_context_direction",
+        lambda *args, **kwargs: (None, 0.0, ["neutral_completed_minute"]),
+    )
+    context = _research_orb_structural_context(
+        engine,
+        spot_symbol="NSE:NIFTY 50",
+        futures_symbol="NFO:NIFTY26OCTFUT",
+    )
+    assert context["underlying_direction_bias"] is None
+    assert context["context_fresh"] is True
+    assert context["context_age_seconds"] == 0.0
+
+
+def test_missing_underlying_history_remains_stale_in_research(tmp_path):
+    """Do not manufacture freshness when one completed underlying stream is absent."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        IndicatorEngine,
+        _research_orb_structural_context,
+        load_archive,
+    )
+
+    first = archive(tmp_path)
+    histories, _, _ = load_archive(tmp_path)
+    engine = IndicatorEngine()
+    engine.ingest_historical_bar("NSE:NIFTY 50", histories["NSE:NIFTY 50"][first])
+    context = _research_orb_structural_context(
+        engine,
+        spot_symbol="NSE:NIFTY 50",
+        futures_symbol="NFO:NIFTY26OCTFUT",
+    )
+    assert context["context_fresh"] is False

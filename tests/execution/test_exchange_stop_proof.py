@@ -44,11 +44,8 @@ def _verify(evidence: dict) -> tuple[bool, str | None]:
     )
 
 
-@pytest.mark.parametrize("status", ["OPEN", "TRIGGER PENDING"])
-def test_exact_broker_orderbook_identity_proves_stop(status: str) -> None:
-    order = _valid_order()
-    order["status"] = status
-    assert _verify(order) == (True, None)
+def test_exact_pending_broker_orderbook_identity_proves_stop() -> None:
+    assert _verify(_valid_order()) == (True, None)
 
 
 @pytest.mark.parametrize(
@@ -76,6 +73,7 @@ def test_exact_broker_orderbook_identity_proves_stop(status: str) -> None:
         ("price", 104.0, "broker_stop_limit_mismatch"),
         ("price", 109.2, "broker_stop_limit_mismatch"),
         ("price", None, "broker_stop_limit_mismatch"),
+        ("status", "OPEN", "broker_stop_status_unverified:OPEN"),
         ("status", "MODIFY PENDING", "broker_stop_status_unverified:MODIFY PENDING"),
         ("status", "CANCELLED", "broker_stop_status_unverified:CANCELLED"),
     ],
@@ -179,6 +177,33 @@ def test_sparse_history_obtains_exact_live_stop_orderbook_proof() -> None:
     assert reads == ["book"]
 
 
+def test_history_exception_falls_back_to_exact_orderbook() -> None:
+    manager = object.__new__(BracketManager)
+
+    def unavailable(_order_id: str) -> dict:
+        raise RuntimeError("history endpoint unavailable")
+
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=unavailable,
+            get_orders=lambda: [_valid_order()],
+        )
+    )
+    assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)
+
+
+def test_both_broker_status_endpoints_failing_do_not_prove_protection() -> None:
+    manager = object.__new__(BracketManager)
+
+    def unavailable(*_args: object) -> None:
+        raise RuntimeError("broker unavailable")
+
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(get_order_status=unavailable, get_orders=unavailable)
+    )
+    assert manager._get_broker_order_status("stop-123") == {}
+
+
 def test_sparse_history_missing_exact_order_cannot_confirm_protection() -> None:
     other = _valid_order()
     other["order_id"] = "another-stop"
@@ -219,3 +244,122 @@ def test_complete_history_does_not_require_secondary_broker_read() -> None:
         )
     )
     assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)
+
+
+def test_adaptive_owner_requires_orderbook_confirmed_stop_not_virtual() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    order = _valid_order()
+    manager._get_broker_order_status = lambda _order_id: order
+    bracket = SimpleNamespace(
+        exchange_stop_order_id="stop-123",
+        exchange_stop_quantity=65,
+        exchange_stop_trigger_price=113.0,
+        exchange_stop_limit_price=107.5,
+        exchange_stop_degraded_reason=None,
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        updated_at=0.0,
+        trailing_config={
+            "_adaptive_profit_pending_confirmation": {
+                "order_id": "stop-123",
+                "stop": 113.0,
+            }
+        },
+        trade_provenance={
+            "adaptive_profit_lock": {
+                "virtual_stop": 113.0,
+                "broker_orderbook_confirmed_stop": None,
+            }
+        },
+    )
+
+    assert manager._confirm_exchange_protective_stop(bracket) is False
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+    order["trigger_price"] = 113.0
+    order["price"] = 107.5
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config["_adaptive_profit_has_ratcheted"] is True
+    assert bracket.trailing_config["_adaptive_profit_confirmed_order_id"] == "stop-123"
+    assert "_adaptive_profit_pending_confirmation" not in bracket.trailing_config
+    assert (
+        bracket.trade_provenance["adaptive_profit_lock"][
+            "broker_orderbook_confirmed_stop"
+        ]
+        == 113.0
+    )
+
+
+def test_unrelated_stop_cannot_confirm_pending_adaptive_owner() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    order = _valid_order()
+    manager._get_broker_order_status = lambda _order_id: order
+    bracket = SimpleNamespace(
+        exchange_stop_order_id="stop-123",
+        exchange_stop_quantity=65,
+        exchange_stop_trigger_price=109.2,
+        exchange_stop_limit_price=103.75,
+        exchange_stop_degraded_reason=None,
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        updated_at=0.0,
+        trailing_config={
+            "_adaptive_profit_pending_confirmation": {
+                "order_id": "stale-replaced-stop",
+                "stop": 109.2,
+            }
+        },
+        trade_provenance={},
+    )
+
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+    bracket.trailing_config["_adaptive_profit_pending_confirmation"] = {
+        "order_id": "stop-123",
+        "stop": 108.0,
+    }
+    assert manager._confirm_exchange_protective_stop(bracket) is True
+    assert bracket.trailing_config.get("_adaptive_profit_has_ratcheted") is not True
+
+
+def test_new_stop_submission_is_unverified_until_exact_broker_readback() -> None:
+    manager = object.__new__(BracketManager)
+    manager._lock = RLock()
+    manager._exchange_stop_modify_mutex = RLock()
+    manager._exchange_protective_stop_enabled = True
+    manager._is_live_execution = lambda: True
+    manager._exchange_stop_prices = lambda _bracket, sl: (sl, sl - 0.05)
+    manager._order_to_entry = {}
+    manager.order_manager = SimpleNamespace(
+        place_order=lambda **_kwargs: "submitted-stop-123"
+    )
+    observed = []
+    manager._confirm_exchange_protective_stop = (
+        lambda bracket: observed.append(bracket.exchange_stop_degraded_reason) or False
+    )
+    bracket = SimpleNamespace(
+        bracket_id="entry-1",
+        entry_order_id="entry-1",
+        trade_lifecycle_id="entry-1",
+        symbol="NFO:NIFTY26OCT22650PE",
+        side="BUY",
+        product="MIS",
+        active=True,
+        entry_confirmed=True,
+        remaining_quantity=65,
+        sl_trigger_price=100.0,
+        exchange_stop_order_id=None,
+        exchange_stop_quantity=0,
+        exchange_stop_degraded_reason=None,
+        linked_exit_order_ids=[],
+        updated_at=0.0,
+    )
+
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert observed == ["broker_stop_placement_unverified"]
+    assert bracket.exchange_stop_order_id == "submitted-stop-123"
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_placement_unverified"
+    assert bracket.exchange_stop_quantity == 65

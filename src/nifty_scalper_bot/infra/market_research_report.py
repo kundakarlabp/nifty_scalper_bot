@@ -1,28 +1,42 @@
 """Post-session, broker-free analysis of authoritative replay plus journal samples.
 
-Responsibilities: validate existing archived tick/quote provenance, separate
-structural setup decisions from minute-sampled strategy rejections, and produce
-60/180/300/600/900-second exact-contract ask-to-bid research labels, modeled
-execution costs, adverse excursion and volume parity evidence.
+Responsibilities: validate archived quote provenance, report canonical
+first-observed RangeVWAP futures excursions with 5/10/15-minute futures and
+full-lot option bid outcomes stressed at the same default slippage as live,
+with frozen local/session target touch and prior-session clock-matched ATR
+research, while preserving the existing structural decisions,
+regime-stratified minute-sampled rejections, cost/MAE labels and option volume
+parity evidence. Range admission cohorts distinguish observed markouts from
+risk-verified outcomes and are mirrored in bounded archive telemetry.
+Independent rolling-VWAP reclaims are separate from session-VWAP excursions.
+Range markouts consume causal catalog lots scoped to the observed contract phase.
 Ownership: SQLite journal and the replay archive remain sole evidence owners;
 this reader persists an atomic local report and bounded Supabase journal lines.
 Safety: No broker orders or network calls, missing evidence fails closed, and
 observational quotes cannot authorize changing any live entry or risk policy.
+Date-scoped journal decisions must match the replay session's IST calendar date.
+All markout passes must read the same immutable replay bytes.
 """
 
 from __future__ import annotations
 
 import bisect
 import json
+import math
 import os
 import statistics
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.config.regime_ontology import regime_label
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.storage.replay_archive import archive_fingerprint
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    RangeVWAPReclaimStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -30,7 +44,8 @@ LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 _HORIZONS = (60, 180, 300, 600, 900)
 _MODELED_QUANTITY_DEFAULT = 65  # Research assumption; verify instrument lot.
-_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Per-side model, not observed broker fill.
+_MODELED_ADVERSE_SLIPPAGE_BPS = 5.0  # Generic sampling, not broker fill.
+_RANGE_VWAP_SLIPPAGE_BPS = RangeVWAPReclaimStrategyConfig().slippage_stress_bps
 _MIN_LABELLED = 10
 _STRATEGIES = {"SMC", "VWAPPro", "ORBPro"}
 
@@ -184,6 +199,156 @@ def _parse_records(
     return records
 
 
+def _local_regime_minutes(
+    records: list[dict[str, Any]], *, session_date: date, report_directory: Path
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """First observation per completed future/minute, with prior-day ATR reference."""
+    from nifty_scalper_bot.instruments.active_contracts import (
+        canonical_nifty_future_symbol,
+    )
+
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    first_seen: dict[tuple[str, str], datetime] = {}
+    for row in records:
+        try:
+            stamp = datetime.fromisoformat(str(row["bar_timestamp"]))
+            decision = datetime.fromisoformat(str(row["decision_at"]))
+            future = canonical_nifty_future_symbol(row.get("futures_symbol"))
+            atr_bps = row.get("futures_atr_bps")
+            if (
+                future is None
+                or stamp.tzinfo is None
+                or decision.tzinfo is None
+                or stamp.astimezone(_IST).date() != session_date
+                or decision.astimezone(_IST).date() != session_date
+                or stamp.second != 0
+                or stamp.microsecond != 0
+                or not 60 <= (decision - stamp).total_seconds() <= 150
+                or row.get("source") != "contiguous_session_futures_1m"
+                or not isinstance(atr_bps, (int, float))
+                or isinstance(atr_bps, bool)
+                or not math.isfinite(atr_bps)
+                or atr_bps <= 0
+            ):
+                continue
+            stamp = stamp.astimezone(_IST)
+            key = (future, stamp.isoformat())
+            if key in first_seen and first_seen[key] <= decision:
+                continue
+            first_seen[key] = decision
+            unique[key] = {**row, "clock_minute_ist": stamp.strftime("%H:%M")}
+        except (ValueError, TypeError, KeyError, OverflowError):
+            continue
+
+    # Existing dated reports are the only historical source. No future day,
+    # same-day report, missing minute, or synthetic baseline is eligible.
+    references: dict[str, list[float]] = defaultdict(list)
+    prior_sessions = 0
+    for path in sorted(report_directory.glob("????-??-??.json"), reverse=True):
+        if prior_sessions >= 10:
+            break
+        try:
+            prior_date = date.fromisoformat(path.stem)
+            if prior_date >= session_date:
+                continue
+            prior = json.loads(path.read_text(encoding="utf-8"))
+            if prior.get("date_ist") != prior_date.isoformat():
+                continue
+            daily: dict[str, float] = {}
+            for row in prior.get("local_regime_minutes", []):
+                stamp = datetime.fromisoformat(str(row.get("bar_timestamp")))
+                value = row.get("futures_atr_bps")
+                if (
+                    stamp.tzinfo is not None
+                    and stamp.astimezone(_IST).date() == prior_date
+                    and row.get("source") == "contiguous_session_futures_1m"
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    and value > 0
+                ):
+                    daily.setdefault(stamp.astimezone(_IST).strftime("%H:%M"), value)
+            if daily:
+                prior_sessions += 1
+                for minute, value in daily.items():
+                    references[minute].append(value)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+    rows = [unique[key] for key in sorted(unique, key=lambda key: key[1])]
+    state_counts: dict[str, int] = defaultdict(int)
+    shadow_transition_counts: dict[str, int] = defaultdict(int)
+    unknown_local_range = 0
+    denied_observations = 0
+    confirmed_in_trend = 0
+    independent_local_reclaims = 0
+    blocked_range_minutes = 0
+    blocked_range_reclaims = 0
+    blocked_range_session_setups = 0
+    for row in rows:
+        matched = references.get(row["clock_minute_ist"], [])
+        baseline = statistics.median(matched) if len(matched) >= 5 else None
+        row["clock_matched_prior_sessions"] = len(matched)
+        row["clock_matched_atr_bps_median"] = baseline
+        row["atr_vs_clock_matched_median"] = (
+            round(row["futures_atr_bps"] / baseline, 4) if baseline else None
+        )
+        state = str(row.get("local_range_state") or "UNPROVEN")
+        state_counts[state] += 1
+        candidate = row.get("shadow_transition_candidate")
+        if candidate in ("TREND", "RANGE"):
+            shadow_transition_counts[str(candidate)] += 1
+        denied_observations += int(row.get("regime_gate_allowed") is False)
+        if state == "RANGE" and row.get("regime_gate_allowed") is False:
+            blocked_range_minutes += 1
+            blocked_range_reclaims += int(row.get("local_reclaim_side") in ("CE", "PE"))
+            blocked_range_session_setups += int(
+                row.get("session_vwap_setup_qualified") is True
+            )
+        unknown_local_range += int(
+            state == "RANGE" and str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+        )
+        confirmed_in_trend += int(
+            state == "RANGE"
+            and str(row.get("regime") or "").upper() == "TREND"
+            and str(row.get("regime_raw") or "").upper() == "TREND"
+            and row.get("regime_gate_allowed") is True
+            and row.get("regime_transition_pending") is not True
+        )
+        independent_local_reclaims += int(
+            row.get("local_reclaim_side") in {"CE", "PE"}
+            and row.get("session_vwap_setup_qualified") is not True
+        )
+    return rows, {
+        "unit": "distinct_completed_futures_minute_not_trade",
+        "observed_minutes": len(rows),
+        "state_counts": dict(state_counts),
+        "shadow_transition_counts": dict(shadow_transition_counts),
+        "canonical_denied_observed_minutes": denied_observations,
+        "blocked_local_range_minutes": blocked_range_minutes,
+        "blocked_local_range_reclaim_minutes": blocked_range_reclaims,
+        "blocked_local_range_without_reclaim_minutes": (
+            blocked_range_minutes - blocked_range_reclaims
+        ),
+        "blocked_local_range_session_setup_minutes": blocked_range_session_setups,
+        "unknown_with_confirmed_local_range_minutes": unknown_local_range,
+        "clock_matched_calibration_status": (
+            "reference_available_research_only"
+            if any(row["atr_vs_clock_matched_median"] is not None for row in rows)
+            else "insufficient_clock_matched_evidence"
+        ),
+        "confirmed_local_range_in_trend_minutes": confirmed_in_trend,
+        "local_reclaim_without_session_setup_minutes": independent_local_reclaims,
+        "clock_matched_reference_sessions": prior_sessions,
+        "clock_matched_minimum_sessions": 5,
+        "clock_matched_labelled_minutes": sum(
+            row["atr_vs_clock_matched_median"] is not None for row in rows
+        ),
+        "reference": "prior_dated_reports_same_ist_minute_atr_bps_median",
+        "live_policy_changed": False,
+    }
+
+
 def _parity_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     # A restarted process can re-observe one completed minute. Last evidence
     # for the exact contract/minute wins; missing is never converted to match.
@@ -311,7 +476,9 @@ def _sampled_markouts(
         contract: [item[0] for item in books] for contract, books in quotes.items()
     }
     outcomes: list[dict[str, Any]] = []
-    groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str, int, str, str, str], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
     for (strategy, contract, minute), row in sorted(samples.items()):
         try:
             instant = datetime.fromisoformat(str(row["decision_at"]))
@@ -331,6 +498,22 @@ def _sampled_markouts(
             raw_context = row.get("context")
             context: dict[str, Any] = (
                 raw_context if isinstance(raw_context, dict) else {}
+            )
+            regime = (
+                regime_label(context["regime"])
+                if context.get("regime") is not None
+                else "UNRECORDED"
+            )
+            raw_regime = (
+                regime_label(context["regime_raw"])
+                if context.get("regime_raw") is not None
+                else "UNRECORDED"
+            )
+            gate = context.get("regime_gate_allowed")
+            gate_state = (
+                "allowed"
+                if gate is True
+                else "blocked" if gate is False else "unrecorded"
             )
             recorded_lot_size = context.get("lot_size")
             verified_lot_size = (
@@ -387,14 +570,21 @@ def _sampled_markouts(
                     else "unverified_default_nifty_lot_assumption"
                 ),
                 "decision_context": context,
+                "regime": regime,
+                "regime_raw": raw_regime,
+                "regime_gate_state": gate_state,
                 "sampling": "first_no_vote_per_contract_strategy_utc_minute",
                 "independent_structural_setup": False,
             }
             outcomes.append(result)
-            groups[(strategy, reason, horizon)].append(result)
+            groups[(strategy, reason, horizon, regime, raw_regime, gate_state)].append(
+                result
+            )
 
     strata: list[dict[str, Any]] = []
-    for (strategy, reason, horizon), items in sorted(groups.items()):
+    for (strategy, reason, horizon, regime, raw_regime, gate_state), items in sorted(
+        groups.items()
+    ):
         labelled = [
             float(item["markout"]["gross_spread_adjusted_markout_pct"])
             for item in items
@@ -410,6 +600,9 @@ def _sampled_markouts(
             {
                 "strategy": strategy,
                 "reason": reason,
+                "regime": regime,
+                "regime_raw": raw_regime,
+                "regime_gate_state": gate_state,
                 "horizon_seconds": horizon,
                 "sampled_minutes": len(items),
                 "labelled": len(labelled),
@@ -481,6 +674,357 @@ def _attach_structural_costs(
         outcome["cost_quantity_provenance"] = "unverified_default_nifty_lot_assumption"
 
 
+def _session_decision_rows(
+    rows: Sequence[Mapping[str, Any]], session_date: date
+) -> list[Mapping[str, Any]]:
+    """Scope canonical decision rows to one IST date before quote-time matching.
+
+    The canonical trade journal loader is not date-filtered. Mixing its old
+    decisions with one day's immutable option tape produces false missing-quote
+    outcomes even when that day's own quote stream has valid coverage.
+    """
+    start = datetime.combine(session_date, time.min, tzinfo=_IST).timestamp()
+    end = datetime.combine(
+        session_date + timedelta(days=1), time.min, tzinfo=_IST
+    ).timestamp()
+    scoped = []
+    for row in rows:
+        raw = row.get("timestamp")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            observed = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(observed) and start <= observed < end:
+            scoped.append(row)
+    return scoped
+
+
+def _range_excursion_markouts(
+    excursions: Sequence[Mapping[str, Any]],
+    futures: Mapping[str, Sequence[tuple[float, float, str]]],
+    books: Mapping[str, Sequence[tuple[float, float, float, int, int, str]]],
+    scope_lots: Mapping[tuple[str, str], int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Price the same *first-seen* setup; keep thin/unverified paths unlabelled."""
+    from scripts.reporting.rejected_setup_forward_markout import (
+        observed_futures_markout,
+        observed_markout,
+    )
+
+    outcomes: list[dict[str, Any]] = []
+    for row in excursions:
+        symbol = normalize_symbol(str(row["symbol"]))
+        future = str(row["futures_symbol"])
+        when = float(row["decision_timestamp"])
+        quote = row.get("quote")
+        evidence = quote if isinstance(quote, Mapping) else {}
+        raw_quantity = evidence.get("lot_size")
+        quantity: int | None = (
+            raw_quantity
+            if isinstance(raw_quantity, int)
+            and not isinstance(raw_quantity, bool)
+            and 0 < raw_quantity < 10000
+            else None
+        )
+        original_future = futures.get(future, ())
+        future_times = [tick[0] for tick in original_future]
+        previous = bisect.bisect_right(future_times, when) - 1
+        # A restart or selected-contract rotation is not one continuous tape.
+        phase = (
+            original_future[previous][2]
+            if previous >= 0 and 0 <= when - future_times[previous] <= 3
+            else None
+        )
+        archive_lot = scope_lots.get((phase, symbol)) if phase is not None else None
+        lot_source = "decision_observation" if quantity is not None else "unverified"
+        if quantity is None and archive_lot is not None:
+            quantity = archive_lot
+            lot_source = "prior_same_scope_instrument_catalog"
+        elif archive_lot is not None and quantity != archive_lot:
+            quantity = None
+            lot_source = "decision_catalog_lot_conflict"
+        lot_known = quantity is not None
+        scoped_future = [
+            (timestamp, price)
+            for timestamp, price, scope in original_future
+            if phase is not None and scope == phase
+        ]
+        full_lot = (
+            [
+                (timestamp, bid, ask)
+                for timestamp, bid, ask, bid_qty, ask_qty, scope in books.get(
+                    symbol, ()
+                )
+                if scope == phase and bid_qty >= quantity and ask_qty >= quantity
+            ]
+            if phase is not None and quantity is not None
+            else []
+        )
+        times = [item[0] for item in full_lot]
+        stop_risk = row.get("modeled_stop_risk")
+        net_rr = row.get("modeled_net_rr")
+        risk_verified = (
+            isinstance(stop_risk, (float, int))
+            and not isinstance(stop_risk, bool)
+            and isinstance(net_rr, (float, int))
+            and not isinstance(net_rr, bool)
+            and math.isfinite(stop_risk)
+            and math.isfinite(net_rr)
+            and 0 < stop_risk <= 773
+            and net_rr >= 1.5
+        )
+        first_rejection = str(row.get("first_rejection_reason") or "")
+        shadow_unknown_reclaim = (
+            str(row.get("regime_raw") or "").upper() == "UNKNOWN"
+            and row.get("regime_gate_allowed") is False
+            and row.get("shadow_transition_candidate") == "RANGE"
+            and row.get("local_range_state") == "RANGE"
+            and row.get("local_reclaim_side") == row.get("side")
+            and first_rejection == "canonical_regime_gate_block"
+        )
+        for horizon in (300, 600, 900):
+            fut, fut_status = observed_futures_markout(
+                scoped_future,
+                decision_ts=when,
+                horizon_s=horizon,
+                side=str(row["side"]),
+            )
+            option, option_status = (
+                observed_markout(
+                    full_lot,
+                    decision_ts=when,
+                    horizon_s=horizon,
+                    timestamps=times,
+                )
+                if full_lot and not row.get("contract_identity_conflicted")
+                else (
+                    None,
+                    "rotated_contract_or_missing_full_lot_verified_book",
+                )
+            )
+            dense = option is not None and _quote_path_dense(
+                times, decision_ts=when, horizon_s=horizon
+            )
+            if not dense:
+                option = None
+                if option_status == "observed_bid_path_not_broker_fill":
+                    option_status = "option_full_lot_book_path_gapped"
+            costed = (
+                _cost_model(
+                    option,
+                    quantity=quantity,
+                    adverse_slippage_bps=_RANGE_VWAP_SLIPPAGE_BPS,
+                )
+                if option is not None and quantity is not None
+                else None
+            )
+            # Compare frozen VWAP targets against the same observed futures
+            # path. A touch is not an option fill or a stop-adjusted outcome.
+            target_reach: dict[str, Any] = {}
+            direction = 1 if row["side"] == "CE" else -1
+            initial = float(fut["entry_futures_price"]) if fut is not None else None
+            for name, center in (
+                ("session_vwap", row.get("session_vwap")),
+                ("local_vwap", row.get("rolling_center")),
+            ):
+                distance: float | None = None
+                touch: float | None = None
+                if (
+                    initial is not None
+                    and isinstance(center, (int, float))
+                    and not isinstance(center, bool)
+                    and math.isfinite(center)
+                    and center > 0
+                ):
+                    target = float(center)
+                    distance = direction * (target - initial)
+                    if distance > 0:
+                        touch = next(
+                            (
+                                timestamp
+                                for timestamp, price in scoped_future
+                                if when < timestamp <= when + horizon
+                                and direction * (price - target) >= 0
+                            ),
+                            None,
+                        )
+                target_reach[name] = {
+                    "forward_distance_points": (
+                        round(distance, 4) if distance is not None else None
+                    ),
+                    "touched": (
+                        touch is not None
+                        if distance is not None and distance > 0
+                        else None
+                    ),
+                    "first_touch_seconds": (
+                        round(touch - when, 3) if touch is not None else None
+                    ),
+                    "option_fill_verified": False,
+                }
+            outcomes.append(
+                {
+                    "excursion_id": row["excursion_id"],
+                    "excursion_basis": row.get("excursion_basis", "session_vwap"),
+                    "frozen_vwap_target_reach": target_reach,
+                    "first_seen_ts": when,
+                    "futures_contract": future,
+                    "option_contract": symbol,
+                    "side": row["side"],
+                    "replay_epoch_phase_verified": phase is not None,
+                    "regime": row.get("regime"),
+                    "center_gap_atr": row.get("center_gap_atr"),
+                    "volatility_ratio": row.get("volatility_ratio"),
+                    "first_rejection_reason": first_rejection,
+                    "all_reasons": row.get("observed_decision_reasons", []),
+                    "baseline_signal_emitted_at_first_decision": row[
+                        "same_decision_signal_emitted"
+                    ],
+                    "counterfactual_center_gate_candidate": (
+                        first_rejection == "session_rolling_center_disagree"
+                    ),
+                    "counterfactual_range_width_candidate": (
+                        first_rejection == "range_width_unproven"
+                    ),
+                    "shadow_local_range_in_trend_candidate": (
+                        row.get("local_range_session_vwap_setup") is True
+                        and first_rejection == "strategy_regime_ineligible"
+                    ),
+                    "shadow_confirmed_local_range_in_trend_candidate": (
+                        row.get("local_range_confirmed_in_trend") is True
+                        and first_rejection == "strategy_regime_ineligible"
+                    ),
+                    "shadow_rolling_vwap_only_candidate": (
+                        row.get("excursion_basis") == "rolling_vwap"
+                    ),
+                    "shadow_unknown_local_range_candidate": shadow_unknown_reclaim,
+                    "shadow_unknown_session_reclaim_candidate": (
+                        shadow_unknown_reclaim
+                        and row.get("structural_qualified") is True
+                    ),
+                    "quantity_units_from_observed_contract": (
+                        quantity if lot_known else None
+                    ),
+                    "quantity_evidence_source": lot_source,
+                    "modeled_cash_stop_risk": stop_risk,
+                    "modeled_net_rr": net_rr,
+                    "same_decision_risk_773_and_net_rr_verified": risk_verified,
+                    "horizon_seconds": horizon,
+                    "futures_markout": fut,
+                    "futures_status": fut_status,
+                    "option_full_lot_markout": option,
+                    "option_status": option_status,
+                    "option_cost_adjusted": costed,
+                    "adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
+                    "observed_book_and_futures_complete": (
+                        fut is not None and costed is not None
+                    ),
+                    "quote_model_not_broker_fill": True,
+                }
+            )
+
+    comparisons: list[dict[str, Any]] = []
+    for policy, predicate in (
+        ("current_admission", "baseline_signal_emitted_at_first_decision"),
+        ("ignore_center_disagreement_only", "counterfactual_center_gate_candidate"),
+        ("ignore_range_width_only", "counterfactual_range_width_candidate"),
+        ("shadow_local_range_in_trend", "shadow_local_range_in_trend_candidate"),
+        (
+            "shadow_confirmed_local_range_in_trend",
+            "shadow_confirmed_local_range_in_trend_candidate",
+        ),
+        ("shadow_unknown_local_range", "shadow_unknown_local_range_candidate"),
+        ("shadow_rolling_vwap_only", "shadow_rolling_vwap_only_candidate"),
+        (
+            "shadow_unknown_session_reclaim",
+            "shadow_unknown_session_reclaim_candidate",
+        ),
+    ):
+        for horizon in (300, 600, 900):
+            group = [
+                row
+                for row in outcomes
+                if row["horizon_seconds"] == horizon and row[predicate]
+            ]
+            feasible = [
+                row
+                for row in group
+                if row["same_decision_risk_773_and_net_rr_verified"]
+                and row["observed_book_and_futures_complete"]
+            ]
+            observed_net = [
+                float(row["option_cost_adjusted"]["terminal"]["net_rupees"])
+                for row in group
+                if row["observed_book_and_futures_complete"]
+            ]
+            comparisons.append(
+                {
+                    "policy": policy,
+                    "horizon_seconds": horizon,
+                    "adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
+                    "unique_first_seen_excursions": len(group),
+                    "full_lot_bid_futures_labelled": sum(
+                        row["observed_book_and_futures_complete"] for row in group
+                    ),
+                    "same_decision_cash_risk_unverified": sum(
+                        not row["same_decision_risk_773_and_net_rr_verified"]
+                        for row in group
+                    ),
+                    "verified_risk_and_observed_horizon": len(feasible),
+                    "observed_full_lot_net_rupees_mean": (
+                        round(statistics.mean(observed_net), 2)
+                        if len(observed_net) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "observed_full_lot_net_positive_fraction": (
+                        round(
+                            sum(value > 0 for value in observed_net)
+                            / len(observed_net),
+                            4,
+                        )
+                        if len(observed_net) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "observed_markout_not_risk_verified": True,
+                    "futures_target_touch_counts": {
+                        name: {
+                            "forward_target_observed": sum(
+                                item["frozen_vwap_target_reach"][name]["touched"]
+                                is not None
+                                for item in group
+                            ),
+                            "touched": sum(
+                                item["frozen_vwap_target_reach"][name]["touched"]
+                                is True
+                                for item in group
+                            ),
+                        }
+                        for name in ("session_vwap", "local_vwap")
+                    },
+                    "modeled_net_rupees_mean": (
+                        round(
+                            statistics.mean(
+                                float(
+                                    row["option_cost_adjusted"]["terminal"][
+                                        "net_rupees"
+                                    ]
+                                )
+                                for row in feasible
+                            ),
+                            2,
+                        )
+                        if len(feasible) >= _MIN_LABELLED
+                        else None
+                    ),
+                    "broker_fill_and_stop_simulated": False,
+                    "comparison_not_causal_or_promotable": True,
+                }
+            )
+    return outcomes, comparisons
+
+
 def build_session_research_report(
     *,
     session_date: date,
@@ -497,10 +1041,12 @@ def build_session_research_report(
     from scripts.reporting.rejected_setup_forward_markout import (
         evaluate_opportunities,
         load_archive_quotes,
+        load_excursion_quote_paths,
         summarize_groups,
     )
 
     from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
+        canonicalize_range_excursions,
         canonicalize_setup_opportunities,
     )
     from nifty_scalper_bot.journal.trade_ledger import load_candidate_decision_rows
@@ -510,6 +1056,17 @@ def build_session_research_report(
     )
     rejection_records = _parse_records(
         journal, "RESEARCH_STRATEGY_REJECTION", session_date
+    )
+    range_excursion_observed = _parse_records(
+        journal, "RANGE_VWAP_EXCURSION_OBSERVED", session_date
+    )
+    range_excursion_decisions = _parse_records(
+        journal, "RANGE_VWAP_EXCURSION_DECISION", session_date
+    )
+    local_minutes, local_summary = _local_regime_minutes(
+        _parse_records(journal, "RANGE_VWAP_LOCAL_REGIME", session_date),
+        session_date=session_date,
+        report_directory=output_path.parent,
     )
     if not replay_path.is_file() and replay_path.name.endswith(".jsonl"):
         compressed_path = replay_path.with_name(replay_path.name + ".gz")
@@ -526,12 +1083,20 @@ def build_session_research_report(
         "structural_outcomes": [],
         "structural_strata": [],
         "independent_setup_count": 0,
+        "range_excursion_opportunities": [],
+        "local_regime_minutes": local_minutes,
+        "local_regime_summary": local_summary,
+        "range_excursion_horizons": [],
+        "range_admission_comparisons": [],
+        "range_excursion_observed_events": len(range_excursion_observed),
+        "range_excursion_duplicate_observations": 0,
         "replay_sha256": None,
         "eligible_for_entry_filter_change": False,
         "cost_model_provenance": {
             "one_lot_default_units": _MODELED_QUANTITY_DEFAULT,
             "default_lot_size_is_assumption": True,
             "adverse_slippage_bps_per_side": _MODELED_ADVERSE_SLIPPAGE_BPS,
+            "range_vwap_adverse_slippage_bps_per_side": _RANGE_VWAP_SLIPPAGE_BPS,
             "implementation": "risk.cost_model.estimate_round_trip_cost",
             "fills_and_protective_stops_verified": False,
         },
@@ -546,10 +1111,30 @@ def build_session_research_report(
         # failures, sequence continuity and all per-run sidecars.
         if storage["pending_events"]:
             raise ValueError("replay_capture_writer_not_settled")
+        initial_sha = archive_fingerprint(replay_path)
         quotes, sha, quote_count = load_archive_quotes(replay_path)
+        if sha != initial_sha:
+            raise ValueError("replay_archive_changed_between_passes")
+        futures_tape, full_lot_books, scope_lots = load_excursion_quote_paths(
+            replay_path
+        )
+        if archive_fingerprint(replay_path) != sha:
+            raise ValueError("replay_archive_changed_between_passes")
         report["writer_integrity_verified"] = True
         report["replay_sha256"] = sha
         report["tradable_ws_quote_ticks"] = quote_count
+        opportunities = canonicalize_range_excursions(
+            range_excursion_observed, range_excursion_decisions
+        )
+        range_outcomes, comparisons = _range_excursion_markouts(
+            opportunities, futures_tape, full_lot_books, scope_lots
+        )
+        report["range_excursion_opportunities"] = opportunities
+        report["range_excursion_horizons"] = range_outcomes
+        report["range_admission_comparisons"] = comparisons
+        report["range_excursion_duplicate_observations"] = sum(
+            row["duplicate_restart_observations"] for row in opportunities
+        )
         if not quote_count:
             report["blocker"] = "no_tradable_depth_ws_quotes"
         else:
@@ -557,9 +1142,13 @@ def build_session_research_report(
             report["sampled_observations"] = sampled
             report["sampled_strata"] = strata
             if trade_db.is_file():
-                structural = canonicalize_setup_opportunities(
-                    load_candidate_decision_rows(trade_db)
-                )
+                raw_decisions = load_candidate_decision_rows(trade_db)
+                day_decisions = _session_decision_rows(raw_decisions, session_date)
+                report["structural_decision_rows_scoped"] = len(day_decisions)
+                report["structural_decision_rows_excluded_non_session"] = len(
+                    raw_decisions
+                ) - len(day_decisions)
+                structural = canonicalize_setup_opportunities(day_decisions)
                 report["independent_setup_count"] = len(structural)
                 events = evaluate_opportunities(structural, quotes, _HORIZONS)
                 _attach_structural_costs(events, quotes)
@@ -596,8 +1185,23 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
         "replay_sha256": report.get("replay_sha256"),
         "tradable_ws_quote_ticks": report.get("tradable_ws_quote_ticks"),
         "independent_setup_count": report["independent_setup_count"],
+        "range_excursions": len(report["range_excursion_opportunities"]),
+        "range_excursion_duplicate_observations": report[
+            "range_excursion_duplicate_observations"
+        ],
+        "range_option_futures_horizons_fully_labelled": sum(
+            row["observed_book_and_futures_complete"]
+            for row in report["range_excursion_horizons"]
+        ),
+        "structural_decision_rows_scoped": report.get(
+            "structural_decision_rows_scoped"
+        ),
+        "structural_decision_rows_excluded_non_session": report.get(
+            "structural_decision_rows_excluded_non_session"
+        ),
         "sampled_observations": len(report["sampled_observations"]),
         "volume_parity": report["volume_parity"],
+        "local_regime_summary": report.get("local_regime_summary"),
     }
 
     def encoded(row: Mapping[str, Any]) -> str:
@@ -609,6 +1213,14 @@ def research_report_log_lines(report: Mapping[str, Any]) -> list[str]:
     for kind, strata in (
         ("minute_sample", report["sampled_strata"]),
         ("structural_setup", report["structural_strata"]),
+        (
+            "range_admission",
+            [
+                row
+                for row in report.get("range_admission_comparisons", [])
+                if row["unique_first_seen_excursions"] > 0
+            ],
+        ),
     ):
         for row in strata:
             lines.append(
@@ -688,20 +1300,37 @@ def run_postmarket_research(session_date: date, journal: str) -> dict[str, Any]:
             "replay_sha256": fidelity["capture_sha256"],
         }
     except (OSError, ValueError, TypeError) as exc:
-        if isinstance(exc, ValueError) and str(exc) == (
+        archive_changed = isinstance(exc, ValueError) and str(exc) == (
             "replay_archive_changed_between_passes"
-        ):
+        )
+        if not archive_changed and report.get("replay_sha256") is not None:
+            # An audit may fail before returning its fingerprint. Distinguish
+            # a semantic fidelity limitation from a changed or missing tape.
+            try:
+                archive_changed = archive_fingerprint(path) != report["replay_sha256"]
+            except OSError:
+                archive_changed = True
+        if archive_changed:
             report["status"] = "unavailable"
-            report["blocker"] = str(exc)
+            report["blocker"] = "replay_archive_changed_between_passes"
+            report["writer_integrity_verified"] = False
             report["sampled_observations"] = []
             report["sampled_strata"] = []
             report["structural_outcomes"] = []
             report["structural_strata"] = []
+            report["range_excursion_horizons"] = []
+            report["range_admission_comparisons"] = []
             report["eligible_for_entry_filter_change"] = False
         fidelity = {
             "status": "unavailable",
             "blocker": (
-                str(exc)[:110] if isinstance(exc, ValueError) else type(exc).__name__
+                "replay_archive_changed_between_passes"
+                if archive_changed
+                else (
+                    str(exc)[:110]
+                    if isinstance(exc, ValueError)
+                    else type(exc).__name__
+                )
             ),
             "archive_integrity_verified": False,
             "full_session_selected_coverage_proven": False,

@@ -1,7 +1,8 @@
 """Research-only analysis for canonical completed trades.
 
 Responsibilities: Validate CLOSED ledger rows and post-cost identity; report
-chronological trade summaries, exact OOS fold-path drawdown and attribution.
+chronological trade summaries, exact OOS fold-path drawdown, attribution and
+paired entry/exit slippage-evidence coverage.
 Boundaries: Consumes materialized completed trades; never enters the live path.
 Safety: Incomplete OOS paths cannot be labelled ready for parameter promotion.
 """
@@ -835,21 +836,32 @@ def execution_data_quality(
     stale = sum(
         _STALE_QUOTE_EXIT_MARKER in trade.exit_reason.lower() for trade in trades
     )
-    measured = sum(bool(trade.execution_quality) for trade in trades)
+
+    def metric(trade: CanonicalCompletedTrade, key: str) -> float | None:
+        raw = trade.execution_quality.get(key)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        # Negative signed slippage is price improvement, not missing evidence.
+        if key.endswith("_slippage_bps") or key.endswith("_slippage_cost"):
+            return value
+        return value if value >= 0 else None
+
+    # JSON keys or entry-only observations do not establish measured exit quality.
+    # This coverage is intentionally paired by trade, not min(sample counts).
+    measured = sum(
+        metric(trade, "entry_slippage_bps") is not None
+        and metric(trade, "exit_slippage_bps") is not None
+        for trade in trades
+    )
 
     def values(key: str) -> list[float]:
-        resolved: list[float] = []
-        for trade in trades:
-            raw = trade.execution_quality.get(key)
-            if raw is None:
-                continue
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(value) and value >= 0:
-                resolved.append(value)
-        return resolved
+        return [value for trade in trades if (value := metric(trade, key)) is not None]
 
     entry_slippage = values("entry_slippage_bps")
     exit_slippage = values("exit_slippage_bps")

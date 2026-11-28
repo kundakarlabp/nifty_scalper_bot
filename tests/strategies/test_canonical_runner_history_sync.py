@@ -807,3 +807,115 @@ def test_recent_history_timestamp_samples_are_bounded_and_read_only() -> None:
     assert sample["runner"] == [row["timestamp"] for row in rows[-12:]]
     assert sample["indicator"] == sample["runner"]
     assert runner._symbol_history[symbol] == before
+
+
+def test_futures_optional_deep_history_is_backed_off_and_revision_repaired() -> None:
+    """Minimum-ready context is not fetched every 30 seconds for optional 400 bars."""
+    import time
+
+    symbol = "NFO:NIFTY26NOVFUT"
+    rows = _bars(397)
+    revision = [0]
+    requests = []
+    repairs = []
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = SimpleNamespace(
+        info=lambda *a, **k: None, warning=lambda *a, **k: None
+    )
+    runner._normalize_symbol = str
+    runner._context_required_bars = 50
+    runner._active_context_symbols_for_history = lambda: [symbol]
+    runner._history_role_for_symbol = lambda _symbol: "futures_context"
+    runner._get_mdm_bars = lambda _symbol, _limit: rows
+    runner._history_count_for_symbol = lambda _symbol: len(rows)
+    runner._symbol_history = {symbol: list(rows)}
+    runner._runner_history_last_timestamp = lambda _symbol: rows[-1]["timestamp"]
+    runner._indicator_history_last_timestamp = lambda _symbol: rows[-1]["timestamp"]
+    runner._candle_engines = {
+        symbol: SimpleNamespace(get_history_correction_revision=lambda: revision[0])
+    }
+    runner._sync_history_from_mdm_cache = lambda *_a, **_kw: (_ for _ in ()).throw(
+        AssertionError("steady context must not need a full reseed")
+    )
+    runner.sync_history_from_mdm = lambda *_a, **_kw: (
+        repairs.append(revision[0])
+        or SimpleNamespace(success=True, indicator_bars=len(rows))
+    )
+    runner._schedule_runtime_history_ensure = lambda *_a, **_kw: (
+        requests.append(_kw) or True
+    )
+    now = time.monotonic()
+    runner._context_structural_request_at = {symbol: now}
+    runner._context_cold_passes = {}
+
+    runner._sync_context_history_if_cold(source="test")
+    runner._sync_context_history_if_cold(source="test")
+    assert requests == []
+    assert repairs == []
+
+    revision[0] = 1
+    runner._sync_context_history_if_cold(source="test")
+    runner._sync_context_history_if_cold(source="test")
+    assert repairs == [1]
+    assert requests == []
+
+    runner._context_structural_request_at[symbol] = now - 601
+    runner._sync_context_history_if_cold(source="test")
+    assert len(requests) == 1
+    assert requests[0]["target_bars"] == 400
+    assert requests[0]["required_bars"] == 50
+
+
+async def test_recent_history_parity_matches_after_canonical_reseed() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    result = runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    assert result.success
+    report = runner.inspect_recent_canonical_history(symbol, last_n=5)
+    assert report["status"] == "match"
+    assert report["checked_bars"] == 5
+    assert report["first_mismatch"] is None
+
+
+async def test_parity_detects_runner_close_drift_with_equal_counts() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    # The fixture's reseed reuses input dicts; detach the projection before
+    # corrupting it so the canonical MDM fixture remains authoritative.
+    runner._symbol_history[symbol][-1] = dict(runner._symbol_history[symbol][-1])
+    runner._symbol_history[symbol][-1]["close"] += 3.5
+
+    report = runner.inspect_recent_canonical_history(symbol)
+    assert report["status"] == "mismatch"
+    assert report["first_mismatch"]["projection"] == "runner"
+    assert report["first_mismatch"]["field"] == "close"
+
+
+async def test_recent_history_parity_does_not_assume_missing_history_matches() -> None:
+    symbol = "NSE:NIFTY"
+    runner = _runner(_bars(30))
+    runner.sync_history_from_mdm(
+        symbol,
+        required_bars=30,
+        reason="test",
+        role="spot_context",
+        request_if_short=False,
+    )
+    runner._symbol_history[symbol].pop()
+
+    report = runner.inspect_recent_canonical_history(symbol)
+    assert report["status"] == "mismatch"
+    assert report["first_mismatch"]["field"] == "missing_completed_candle"

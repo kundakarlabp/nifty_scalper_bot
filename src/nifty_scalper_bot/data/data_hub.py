@@ -4,6 +4,8 @@ Runtime role:
 - Single read surface that strategies/execution use to access ticks, quotes,
   OHLC, open interest, and active-basket context.
 - Delegates all data access to MarketDataManager; binds to the MDM tick bus.
+- set_active_bracket_symbols forwards the canonical held-option protection set
+  to MDM, including across ATM basket rotation; it owns no subscription list.
 
 Position in the pipeline:
     data/market_data_manager.py → THIS FILE (data_hub.py)
@@ -12,6 +14,12 @@ Position in the pipeline:
 Owns / does NOT own:
 - Owns: convenience read/derive helpers (e.g. quote bid/ask/spread, greeks) and
   a thin store for non-history state.
+- get_option_contract_metadata reads the broker-dump option row without pulls.
+- get_option_model_snapshot: return same-quote NIFTY option expiry, lot and
+  spot-referenced model Greeks using the broker instrument resolver and the
+  existing options_math Black-Scholes/IV functions; fail closed on absent data.
+- _price_option_model: shared internal pricing helper for lazy cached Greeks
+  and the VWAP live snapshot; correct canonical pricing keyword conventions.
 - Does NOT own: price history (MDM is the sole owner — DataHub stores none), and
   does NOT select contracts or infer active futures/options independently.
 
@@ -58,8 +66,14 @@ LOGGER = logging.getLogger(__name__)
 Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
-_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
-_WS_SOURCES = {"ws", "websocket", "stream"}
+_UNUSABLE_TIMESTAMP_QUALITIES = {
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
+}
+_WS_SOURCES = {"ws", "ws_full", "full", "websocket", "stream"}
 _QUOTE_IDENTITY_KEYS = (
     "symbol",
     "tradingsymbol",
@@ -761,8 +775,17 @@ class DataHub:
         stamped["exchange_symbol"] = symbol
         token = self._token_from_symbol(symbol)
         if token is not None:
-            stamped["instrument_token"] = token
-            stamped["token"] = token
+            observed_token = stamped.get("instrument_token")
+            if observed_token is None:
+                observed_token = stamped.get("token")
+            if observed_token is not None and str(observed_token) != str(token):
+                # Never relabel an old basket quote as the new contract.
+                stamped["quote_identity_token_mismatch"] = True
+                stamped["tradable_quote"] = False
+                stamped["hard_readiness_eligible"] = False
+            else:
+                stamped["instrument_token"] = token
+                stamped["token"] = token
         version = self.quote_update_version(symbol)
         if version is not None:
             stamped["quote_update_version"] = int(version)
@@ -789,13 +812,7 @@ class DataHub:
     def _token_from_symbol(self, symbol: str) -> int | None:
         """Resolve instrument token from symbol aliases. Args: symbol. Returns: token. Raises: none."""
         normalized = self._canonical_quote_symbol(symbol)
-        token = self._token_by_symbol.get(normalized)
-        if token is not None:
-            try:
-                return int(token)
-            except Exception:
-                return None
-
+        # The canonical MDM mapping can rotate before this facade receives a tick.
         mdm = getattr(self, "_mdm", None)
         for attr in ("_token_by_symbol", "_symbol_to_token"):
             mapping = getattr(mdm, attr, None)
@@ -806,6 +823,13 @@ class DataHub:
                         return int(token)
                     except Exception:
                         return None
+
+        token = self._token_by_symbol.get(normalized)
+        if token is not None:
+            try:
+                return int(token)
+            except Exception:
+                return None
 
         resolver = getattr(self, "_resolver", None)
         for method_name in ("token_for_symbol", "resolve_token", "get_token", "instrument_token"):
@@ -1062,19 +1086,34 @@ class DataHub:
                 tick["timestamp_ms"] = timestamp_ms
                 timestamp_source = str(tick.get("timestamp_source") or "").lower()
                 timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
-                if not timestamp_quality:
+                if timestamp_source in {
+                    "received_at",
+                    "received_ts",
+                    "received_time",
+                    "received_at_fallback",
+                }:
+                    timestamp_quality = "received_at"
+                elif not timestamp_quality:
                     timestamp_quality = (
                         "exchange" if "exchange" in timestamp_source else "broker"
                     )
-                    tick["timestamp_quality"] = timestamp_quality
-                tick.setdefault("hard_readiness_eligible", True)
+                tick["timestamp_quality"] = timestamp_quality
+                if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+                    tick["hard_readiness_eligible"] = False
+                    tick["tradable_quote"] = False
+                else:
+                    tick.setdefault("hard_readiness_eligible", True)
                 tick.setdefault("quote_source", tick.get("source"))
                 tick.setdefault("exchange_symbol", symbol)
                 tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
                 return tick
 
         tick = dict(payload)
-        timestamp_quality = _timestamp_quality(tick)
+        timestamp_quality = (
+            "invalid"
+            if tick.get("source_timestamp_valid") is False
+            else _timestamp_quality(tick)
+        )
         symbol = str(tick.get("symbol") or "").strip()
         token_raw = tick.get("instrument_token") or tick.get("token")
         price_raw = tick.get("ltp") or tick.get("last_price") or tick.get("price")
@@ -1103,14 +1142,18 @@ class DataHub:
             tick.setdefault("spread_pct", spread_pct)
         if bid_ask_source != "missing":
             tick.setdefault("bid_ask_source", bid_ask_source)
-        if tick.get("depth"):
-            tick["depth_available"] = True
+        depth = tick.get("depth")
+        if isinstance(depth, Mapping):
+            tick["depth_available"] = bool(depth.get("buy") and depth.get("sell"))
         else:
             tick.setdefault("depth_available", False)
-        if bid is not None and ask is not None and bid > 0 and ask > bid:
-            tick["tradable_quote"] = True
-        else:
-            tick.setdefault("tradable_quote", False)
+        tick["tradable_quote"] = bool(
+            bid is not None
+            and ask is not None
+            and bid > 0
+            and ask > bid
+            and tick.get("tradable_quote") is not False
+        )
         if timestamp_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
             tick["synthetic_timestamp"] = True
             tick["hard_readiness_eligible"] = False
@@ -1202,6 +1245,30 @@ class DataHub:
             exc,
         )
 
+    @staticmethod
+    def _price_option_model(
+        *, spot: float, strike: float, ttm: float, premium: float, is_call: bool
+    ) -> tuple[float, dict[str, float]]:
+        """Reuse canonical Black-Scholes and IV conventions for both consumers."""
+        iv = implied_volatility(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            option_price=premium,
+            is_call=is_call,
+        )
+        if not isfinite(iv) or iv <= 0:
+            raise ValueError("unpriceable_option_iv")
+        return iv, black_scholes_greeks(
+            spot=spot,
+            strike=strike,
+            ttm=ttm,
+            rate=0.06,
+            vol=iv,
+            is_call=is_call,
+        )
+
     def _capture_option_metrics(
         self, symbol: str, tick: Tick, *, derive_missing: bool = True
     ) -> None:
@@ -1245,40 +1312,20 @@ class DataHub:
         if ttm_years <= 0:
             return
         try:
-            iv = implied_volatility(
-                price=float(ltp),
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                flag="c" if is_call else "p",
+            iv, greeks = self._price_option_model(
+                spot=float(spot),
+                strike=float(strike),
+                ttm=float(ttm_years),
+                premium=float(ltp),
+                is_call=is_call,
             )
-        except Exception:  # noqa: BLE001
-            return
-        if iv is None or iv <= 0:
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
             return
         self._iv_cache[symbol] = float(iv)
-        try:
-            self._greeks_cache[symbol] = black_scholes_greeks(
-                S=float(spot),
-                K=float(strike),
-                t=float(ttm_years),
-                r=0.06,
-                sigma=float(iv),
-                flag="c" if is_call else "p",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        self._greeks_cache[symbol] = dict(greeks)
 
-    def _parse_option_symbol(
-        self, symbol: str
-    ) -> tuple[str, datetime, float, bool] | None:
-        """Resolve option identity from broker instrument metadata.
-
-        Expiry is deliberately not reconstructed from the trading symbol. Weekly
-        and monthly contracts both use the resolver's broker-dump row, keeping
-        contract dates aligned with the InstrumentManager/contract SSOT.
-        """
+    def get_option_contract_metadata(self, symbol: str) -> Mapping[str, Any] | None:
+        """Read the resolver's option row; never fetch or infer a contract."""
         metadata_owner = self._resolver
         lookup = getattr(metadata_owner, "lookup", None)
         if not callable(lookup):
@@ -1291,6 +1338,21 @@ class DataHub:
         except Exception:  # noqa: BLE001 - optional analytics must stay non-gating
             return None
         if not isinstance(row, Mapping):
+            return None
+        side = str(row.get("instrument_type") or "").strip().upper()
+        return row if side in {"CE", "PE"} else None
+
+    def _parse_option_symbol(
+        self, symbol: str
+    ) -> tuple[str, datetime, float, bool] | None:
+        """Resolve option identity from broker instrument metadata.
+
+        Expiry is deliberately not reconstructed from the trading symbol. Weekly
+        and monthly contracts both use the resolver's broker-dump row, keeping
+        contract dates aligned with the InstrumentManager/contract SSOT.
+        """
+        row = self.get_option_contract_metadata(symbol)
+        if row is None:
             return None
 
         raw_expiry = row.get("expiry")
@@ -1372,7 +1434,7 @@ class DataHub:
                 # Replay/cache authority can stamp a newer synthetic event time
                 # than subsequent live WS ticks. Still deliver those WS ticks to
                 # Runner so entry evaluation does not stop after startup replay.
-                if source not in {"ws", "websocket", "stream"}:
+                if source not in _WS_SOURCES:
                     return
                 deliver_older_ws = True
             if (not deliver_older_ws) and ts_ms == last_ts and now_ms <= last_arr:
@@ -1400,7 +1462,7 @@ class DataHub:
                 self._last_ts[symbol] = ts_ms
                 self._last_arrival[symbol] = now_ms
                 self._last_arrival_mono[symbol] = mono_now
-            if source in {"ws", "websocket", "stream"}:
+            if source in _WS_SOURCES:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
                 if not deliver_older_ws:
@@ -2416,6 +2478,88 @@ class DataHub:
                 continue
         return None
 
+    def get_option_model_snapshot(
+        self,
+        symbol: str,
+        *,
+        spot_price: float | None,
+        bid: float | None,
+        ask: float | None,
+    ) -> dict[str, Any]:
+        """Price the *current* quote against broker-owned contract metadata.
+
+        Reuse the existing instrument resolver and options_math implementation.
+        Cached Greeks have no guaranteed quote/spot provenance, so a live
+        range-reversion decision must not silently reuse that cache. This
+        method never fetches a quote or changes the active contract basket.
+        """
+        parsed = self._parse_option_symbol(symbol)
+        if parsed is None:
+            return {}
+        base, expiry, strike, is_call = parsed
+        if base != "NIFTY":
+            return {}
+        if spot_price is None or bid is None or ask is None:
+            return {}
+        try:
+            row = self.get_option_contract_metadata(symbol)
+            if row is None:
+                return {}
+            lot_size = int(row["lot_size"])
+            spot, best_bid, best_ask = float(spot_price), float(bid), float(ask)
+            if (
+                lot_size <= 0
+                or any(not isfinite(x) for x in (spot, best_bid, best_ask))
+                or spot <= 0
+                or best_bid <= 0
+                or best_ask <= best_bid
+            ):
+                return {}
+            now_ts = float(self._now())
+            ttm = (expiry.timestamp() - now_ts) / 31557600.0
+            ist = timezone(timedelta(hours=5, minutes=30))
+            remaining_days = (
+                expiry.date() - datetime.fromtimestamp(now_ts, tz=ist).date()
+            ).days
+            if remaining_days <= 0 or ttm <= 0:
+                return {}
+            iv, model = self._price_option_model(
+                spot=spot,
+                strike=strike,
+                ttm=ttm,
+                premium=(best_bid + best_ask) / 2.0,
+                is_call=is_call,
+            )
+            if iv >= 5:
+                return {}
+            if any(
+                not isfinite(float(model[key])) for key in ("delta", "theta", "vega")
+            ):
+                return {}
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            ZeroDivisionError,
+        ):
+            return {}
+        return {
+            "days_to_expiry": remaining_days,
+            "lot_size": lot_size,
+            "delta": float(model["delta"]),
+            "delta_underlying": "NIFTY_SPOT",
+            # options_math reports annual theta and vega per *unit* IV.
+            "theta": float(model["theta"]) / 365.0,
+            "theta_period": "calendar_day",
+            "vega_per_iv_point": float(model["vega"]) / 100.0,
+            "vega_convention": "per_iv_percentage_point",
+            "range_option_model_source": "live_spot_bid_ask_black_scholes",
+            "range_option_model_iv": iv,
+            "range_option_contract_expiry": expiry.date().isoformat(),
+        }
+
     def get_greeks(self, symbol: str) -> dict[str, float] | None:
         normalized = self._canonical_quote_symbol(symbol)
         if normalized in self._greeks_cache:
@@ -2598,6 +2742,30 @@ class DataHub:
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("DataHub MDM delegate %s failed: %s", name, exc)
             return default
+
+    def set_active_bracket_symbols(self, symbols: Iterable[str]) -> None:
+        """Forward the bracket owner's full held-symbol set to MDM.
+
+        Unlike the ATM basket, protected contract subscriptions must survive
+        selection rotation until the broker-confirmed bracket is closed.
+        """
+        owned = tuple(str(symbol) for symbol in symbols if str(symbol or "").strip())
+        setter = getattr(self._mdm, "set_active_bracket_symbols", None)
+        if not callable(setter):
+            LOGGER.error(
+                "DATAHUB_BRACKET_SYMBOL_SYNC_UNAVAILABLE held_count=%s",
+                len(owned),
+            )
+            return
+        try:
+            setter(owned)
+        except Exception as exc:  # noqa: BLE001 - avoid silent data loss
+            LOGGER.error(
+                "DATAHUB_BRACKET_SYMBOL_SYNC_FAILED held_count=%s error_type=%s",
+                len(owned),
+                type(exc).__name__,
+            )
+            raise
 
     @property
     def ws_connected(self) -> bool:

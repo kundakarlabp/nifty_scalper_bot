@@ -1,12 +1,10 @@
 # NIFTY production — one-path operator runbook
 
 **Single source of truth:** GitHub `main` contains code; AWS Lightsail is
-the sole LIVE trading runtime; Supabase is the private read-only remote
-telemetry store. **AppDeploy is not in the dependency chain.**
-On 23 October 2026, the five obsolete AppDeploy NIFTY network probes/relays
-were deleted and confirmed deleted. Do not recreate or redeploy them, including
-during investigation of direct HTTP access failures. No bot order, release or
-daily broker-token operation may require AppDeploy.
+the sole LIVE trading runtime; Supabase is the private remote telemetry
+store. Use the existing AWS-hosted admin dashboard, direct AWS endpoints,
+and Supabase for operations and diagnosis. Do not create or rely on
+third-party network relays for broker, release, token or monitoring operations.
 
 ## Daily operation
 
@@ -210,7 +208,7 @@ prior validation) → `deploy/lightsail_release.sh --auto` → broker-flat
 handoff → install + restart + readiness verification (or rollback).
 
 **Do not add GitHub-hosted trading services, GitHub deployment Actions,
-AppDeploy deploy triggers, extra daily restarts, webhook listeners, or
+third-party deploy triggers, extra daily restarts, webhook listeners, or
 alternate restart logic.** The admin's GitHub Update button only requests
 an immediate check of the SAME Lightsail deployer; the timer is already
 automatic. CI green is necessary, not sufficient, to prove a live release.
@@ -277,7 +275,7 @@ addresses** during its off-trading-hot-path 120-second Supabase update:
 `127.0.0.1:8081/healthz` for the independent admin process and
 `127.0.0.1:8501/_stcore/health` for Streamlit. Both require the expected
 HTTP 200 response body and do not follow redirects. No new daemon, token,
-gateway, public firewall port, AppDeploy relay, or control RPC is involved.
+gateway, public firewall port, external monitoring relay, or control RPC is involved.
 
 The same private `nifty-runtime-heartbeat-ingest` receiver accepts only
 booleans or null for `admin_http_responsive` and
@@ -380,7 +378,6 @@ phrases**. Heavy raw log downloads remain on demand.
 
 | Symptom | Authority to check | Correct response |
 | --- | --- | --- |
-| AppDeploy 402 | Supabase heartbeat | Ignore relay billing for bot health; never restart engine just for 402 |
 | Bot not trading | Admin broker/readiness + local logs | Identify actual reason; don't automatically change access token |
 | GitHub merged but old SHA | Canonical release state, CI, 30-second timer | Distinguish deferred order exposure, failed CI, or inactive timer |
 | Dashboard unreachable | Admin :8081 `/healthz` | Recover independent admin service, not the trading engine |
@@ -409,20 +406,12 @@ Streamlit page or a monitoring provider fails. Never put an order or secret
 in the read-only console. Optional Docker/Prometheus/Grafana scripts are
 research infrastructure, not an additional deployed LIVE bot.
 
-## Removed third-party relay inventory
+## Historical data separation
 
-These obsolete AppDeploy apps were permanently deleted on 23 October 2026,
-with `status=deleted` independently checked:
-`nifty-endpoint-probe-qspiq0`,
-`nifty-deploy-recovery-relay-u7c57n`,
-`nifty-cloud-probe-capture-w3mrp1`,
-`nifty-live-diagnostic-relay-09rb32` and
-`nifty-live-readonly-relay-kb0r4e`.
-
-The separate `nifty-historical-data-collector-pwtdwk` is **not** a LIVE
-dependency but still stores Dhan history in AppDeploy storage. Preserve and
-export/verify the archive before deleting that app. Three unrelated clinical
-apps also remain and must not be silently destroyed by NIFTY maintenance.
+Preserve original historical-data archives and integrity records in their
+approved storage locations. Verify any independently maintained archive before
+removing its storage. Historical research infrastructure is not a LIVE trading
+dependency and must not be confused with AWS Lightsail production monitoring.
 
 For first-time Lightsail host provisioning, see `deploy/LIGHTSAIL_SETUP.md`.
 For the separate research/backtesting environment see

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.research_observability import (
+    observe_completed_selected_pair,
     record_strategy_rejection_sample,
     sample_selected_option_parity,
 )
@@ -197,3 +198,87 @@ def test_rejection_stores_trend_evidence_without_depth_or_secrets(caplog) -> Non
     assert "api_secret" not in row["context"]
     assert "NOT_FOR_RESEARCH" not in caplog.text
     assert "never_archive_in_journal" not in caplog.text
+
+
+def test_passive_parity_waits_for_both_canonical_closes_without_strategy_vote() -> None:
+    next_minute = STAMP + timedelta(minutes=1)
+    indicator = {
+        CE: [_bar(200, next_minute)],
+        PE: [_bar(250, next_minute)],
+    }
+    canonical = {
+        CE: [_bar(200, next_minute)],
+        PE: [_bar(240)],
+    }
+    owner = _owner(indicator, canonical)
+    mdm = SimpleNamespace(
+        get_latest_closed_bar=lambda symbol: (
+            canonical[symbol][-1] if canonical.get(symbol) else None
+        )
+    )
+    assert (
+        observe_completed_selected_pair(
+            owner, {"symbol": CE, "timestamp": next_minute}, mdm
+        )
+        == []
+    )
+    canonical[PE].append(_bar(250, next_minute))
+    observed = observe_completed_selected_pair(
+        owner, {"symbol": PE, "timestamp": next_minute}, mdm
+    )
+    assert len(observed) == 2
+    assert {item["status"] for item in observed} == {"same_minute_volume_match"}
+    assert (
+        observe_completed_selected_pair(
+            owner, {"symbol": PE, "timestamp": next_minute}, mdm
+        )
+        == []
+    )
+
+
+def test_rejection_retains_independent_futures_bar_volume() -> None:
+    owner = _owner({}, {})
+    sample = record_strategy_rejection_sample(
+        owner,
+        strategy="VWAPPro",
+        symbol=CE,
+        reason="distance_outside_band",
+        indicators={
+            "regime": "trend",
+            "regime_stable": "trend",
+            "regime_raw": "range",
+            "regime_gate_allowed": True,
+            "regime_evidence_status": "transition_pending",
+            "futures_volume_ratio": 0.0,
+            "futures_completed_bar_volume_ratio": 1.25,
+            "futures_completed_bar_volume_ready": True,
+            "futures_completed_bar_volume_symbol": "NFO:NIFTY26NOVFUT",
+            "futures_completed_bar_volume_provenance": {
+                "raw_depth": "must_not_enter_bounded_sample"
+            },
+        },
+        at=STAMP,
+    )
+    assert sample is not None
+    context = sample["context"]
+    assert context["regime"] == "trend"
+    assert context["regime_stable"] == "trend"
+    assert context["regime_raw"] == "range"
+    assert context["regime_gate_allowed"] is True
+    assert context["regime_evidence_status"] == "transition_pending"
+    assert context["futures_volume_ratio"] == 0.0
+    assert context["futures_completed_bar_volume_ratio"] == 1.25
+    assert context["futures_completed_bar_volume_ready"] is True
+    assert context["futures_completed_bar_volume_symbol"] == "NFO:NIFTY26NOVFUT"
+    assert "futures_completed_bar_volume_provenance" not in context
+    assert (
+        record_strategy_rejection_sample(
+            owner,
+            strategy="VWAPPro",
+            symbol=CE,
+            reason="distance_outside_band",
+            indicators={},
+            at=STAMP,
+        )
+        is None
+    )

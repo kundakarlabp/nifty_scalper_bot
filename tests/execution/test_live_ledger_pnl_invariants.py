@@ -112,6 +112,17 @@ def test_incomplete_final_ledger_never_fabricates_full_quantity_completed_pnl(
         price=95.0,
         residual=0,
     )
+    # Preserve decision provenance even when final broker accounting is unresolved.
+    bracket.trailing_config["_optional_trail_owner"] = "adaptive_then_verified_tiers"
+    bracket.trailing_config["_optional_trail_eval_count"] = 17
+    bracket.trailing_config["_adaptive_skip_reasons"] = {
+        "full_size_quote_unqualified:missing_depth": 2
+    }
+    bracket.trailing_config["_adaptive_last_skip_reason"] = (
+        "full_size_quote_unqualified:missing_depth"
+    )
+    bracket.trailing_config["_adaptive_last_skip_bid"] = 107.0
+    bracket.trailing_config["_adaptive_last_skip_at"] = 1795162279.49
     original_record_exit = manager._record_exit_fill
 
     def _fail_final_fill(*args: Any, **kwargs: Any) -> None:
@@ -130,5 +141,13 @@ def test_incomplete_final_ledger_never_fabricates_full_quantity_completed_pnl(
     assert outcome["ledger_complete"] is False
     assert outcome["gross_pnl"] is None
     assert outcome["net_pnl"] is None
+    evidence = outcome["optional_trailing_evidence"]
+    assert evidence["owner"] == "adaptive_then_verified_tiers"
+    assert evidence["evaluations"] == 17
+    assert evidence["skip_reason_counts"] == {
+        "full_size_quote_unqualified:missing_depth": 2
+    }
+    assert evidence["last_skip_bid"] == 107.0
+    assert evidence["missing_skip_reason_does_not_prove_success"] is True
     assert released == []
     assert manager.has_unresolved_exit() is True

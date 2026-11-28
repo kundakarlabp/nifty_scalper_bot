@@ -88,7 +88,9 @@ def test_orderflow_elite_result_is_relabelled_as_context_vote() -> None:
         strategy="OrderFlow",
     )
 
-    assert control.filter(record) is True
+    # Detailed evidence is now source-throttled, so the generic INFO
+    # context-vote record is intentionally suppressed as a duplicate.
+    assert control.filter(record) is False
     assert record.event == "elite_strategy_context_vote"
     assert record.getMessage() == "Condition met: elite context vote generated"
     assert record.role == "context"
@@ -152,3 +154,18 @@ def test_global_readiness_throttle_remains_global() -> None:
     assert control.filter(first) is True
     assert control.filter(same) is False
     assert control.filter(changed) is True
+
+
+def test_orderflow_context_vote_warning_remains_visible() -> None:
+    control = BootLogRateControl(interval_seconds=300.0)
+    record = _record(
+        "elite_strategy_signal",
+        logger_name="nifty_scalper_bot.strategies.elite_strategies.base_elite",
+        strategy="OrderFlow",
+    )
+    record.levelno = logging.WARNING
+    record.levelname = "WARNING"
+
+    assert control.filter(record) is True
+    assert record.levelno == logging.WARNING
+    assert record.context_only is True

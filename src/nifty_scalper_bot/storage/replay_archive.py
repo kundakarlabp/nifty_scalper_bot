@@ -383,6 +383,7 @@ def archive_fingerprint(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
     """Fail closed on missing pre-queue wire observations per symbol/epoch.
 
@@ -402,6 +403,7 @@ def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
         payload = event["payload"]
         if payload.get("capture_stream") != "raw_ws_ingress":
             raise ValueError("raw_ingress_stream_identity_missing")
+        bucket = seen.setdefault(run, {})
         if event["kind"] == "snapshot":
             continue
         receipt = payload.get("receipt")
@@ -415,17 +417,27 @@ def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
         if (
             not isinstance(symbol, str)
             or not symbol
+            or symbol == "UNKNOWN"
+            or type(token) is not int
+            or token <= 0
             or type(generation) is not int
+            or generation < 0
             or type(sequence) is not int
             or sequence <= 0
         ):
             raise ValueError("raw_ingress_identity_invalid")
+        wire_token = wire.get("instrument_token") or wire.get("token")
+        if (
+            not isinstance(wire_token, (int, str))
+            or isinstance(wire_token, bool)
+            or str(wire_token) != str(token)
+        ):
+            raise ValueError("raw_ingress_wire_token_mismatch")
         identity = f"{symbol}|{token}|{generation}"
-        prior = last_sequence.get((run, identity))
-        if prior is not None and sequence != prior + 1:
+        prior = last_sequence.get((run, identity), 0)
+        if sequence != prior + 1:
             raise ValueError("raw_ingress_contract_epoch_sequence_gap")
         last_sequence[run, identity] = sequence
-        bucket = seen.setdefault(run, {})
         bucket[identity] = bucket.get(identity, 0) + 1
 
     for run, by_identity in seen.items():
@@ -436,7 +448,12 @@ def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
         ending = integrity.get("upstream_latest")
         if not isinstance(starting, dict) or not isinstance(ending, dict):
             raise ValueError("raw_ingress_upstream_counts_missing")
-        if int(ending.get("capture_errors", 0)) != 0:
+        if not by_identity or integrity.get("pending") != 0:
+            raise ValueError("raw_ingress_capture_incomplete")
+        if (
+            type(ending.get("capture_errors")) is not int
+            or ending["capture_errors"] != 0
+        ):
             raise ValueError("raw_ingress_capture_error_observed")
         for identity, count in by_identity.items():
             key = f"day_receipt:{day}|{identity}"
@@ -459,4 +476,3 @@ def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
         "counts_by_run_and_contract_epoch": seen,
         "sha256": archive_fingerprint(path),
     }
-

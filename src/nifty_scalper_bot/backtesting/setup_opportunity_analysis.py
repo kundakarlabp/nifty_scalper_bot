@@ -1,7 +1,8 @@
 """Research-only setup opportunity and counterfactual outcome analysis.
 
-Responsibilities: Deduplicate structural decisions and preserve the approved
-contract, decision context, and chronological forward-path provenance.
+Responsibilities: Deduplicate structural decisions and first-observed
+RangeVWAP futures excursions across restarts; preserve their original contract,
+decision context and chronological forward-path provenance.
 Boundaries: Consumes persisted decisions and observed quotes; never places orders.
 Counterfactual stratification uses one row per unique setup and never promotes
 unlabelled or thinly labelled strata into profitability claims.
@@ -231,6 +232,173 @@ def canonicalize_setup_opportunities(
     return tuple(opportunities)
 
 
+def canonicalize_range_excursions(
+    observations: Sequence[Mapping[str, Any]],
+    decisions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use the first causal futures-excursion observation, across restarts.
+
+    Do not cherry-pick a later option/quote after seeing a reversal. Only
+    same-evaluation economic evidence can license a modeled comparison.
+    """
+    grouped: dict[str, list[tuple[float, Mapping[str, Any]]]] = {}
+    for row in observations:
+        identity = str(row.get("excursion_id") or "")
+        future = str(row.get("futures_symbol") or "")
+        side = str(row.get("side") or "")
+        first_bar_identity = str(row.get("excursion_first_bar") or "")
+        basis = row.get("excursion_basis", "session_vwap")
+        expected_identity = (
+            f"{future}:{side}:LOCAL:{first_bar_identity}"
+            if basis == "rolling_vwap"
+            else f"{future}:{side}:{first_bar_identity}"
+        )
+        if (
+            not future.startswith("NFO:")
+            or not future.endswith("FUT")
+            or side not in {"CE", "PE"}
+            or not first_bar_identity
+            or basis not in ("session_vwap", "rolling_vwap")
+            or identity != expected_identity
+            or (
+                basis == "rolling_vwap"
+                and (
+                    row.get("local_range_state") != "RANGE"
+                    or row.get("local_reclaim_side") != side
+                    or row.get("structural_qualified") is not False
+                )
+            )
+        ):
+            continue
+        try:
+            ts = _timestamp(row.get("decision_at"), field="excursion decision")
+            first_ts = _timestamp(first_bar_identity, field="first outside bar")
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not first_ts < ts or ts - first_ts > 375 * 60:
+            continue
+        grouped.setdefault(identity, []).append((ts, row))
+
+    decision_rows: dict[str, list[tuple[float, Mapping[str, Any]]]] = {}
+    for row in decisions:
+        identity = str(row.get("excursion_id") or "")
+        if identity not in grouped:
+            continue
+        try:
+            ts = _timestamp(row.get("decision_at"), field="stage decision")
+        except (TypeError, ValueError, OverflowError):
+            continue
+        decision_rows.setdefault(identity, []).append((ts, row))
+
+    unique: list[dict[str, Any]] = []
+    for identity, samples in grouped.items():
+        samples.sort(key=lambda item: item[0])
+        first_ts, first = samples[0]
+        side = str(first["side"])
+        future = str(first["futures_symbol"])
+        symbol = normalize_symbol(str(first.get("symbol") or ""))
+        conflicts = any(
+            str(row.get("futures_symbol")) != future
+            or str(row.get("side")) != side
+            or normalize_symbol(str(row.get("symbol") or "")) != symbol
+            for _, row in samples
+        )
+        basis = first.get("excursion_basis", "session_vwap")
+        # A rolling-only research observation cannot inherit session entry risk.
+        stage_events = (
+            sorted(decision_rows.get(identity, ()), key=lambda it: it[0])
+            if basis == "session_vwap"
+            else []
+        )
+        reasons = list(
+            dict.fromkeys(
+                str(row.get("reason") or "unavailable") for _, row in stage_events
+            )
+        )
+        # Only the exact original evaluation timestamp may establish its risk.
+        # Even a 1-second-later evaluation may use a different executable ask.
+        same_decision = [
+            (ts, row)
+            for ts, row in stage_events
+            if abs(ts - first_ts) < 0.001
+            and normalize_symbol(str(row.get("symbol") or "")) == symbol
+        ]
+        economics = [
+            row
+            for _, row in same_decision
+            if row.get("reason") in {"cost_eligible", "signal_emitted"}
+            and row.get("modeled_stop_risk") is not None
+            and row.get("modeled_net_rr") is not None
+        ]
+        risk = economics[-1] if economics else {}
+        try:
+            stop_risk = float(risk["modeled_stop_risk"])
+            net_rr = float(risk["modeled_net_rr"])
+            if not (math.isfinite(stop_risk) and math.isfinite(net_rr)):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, OverflowError):
+            stop_risk, net_rr = None, None
+        initial_rejection = next(
+            (
+                str(row.get("reason"))
+                for _, row in same_decision
+                if row.get("reason") not in {"cost_eligible", "signal_emitted"}
+            ),
+            str(first.get("structural_reason") or "decision_not_captured"),
+        )
+        unique.append(
+            {
+                "excursion_id": identity,
+                "excursion_basis": basis,
+                "decision_timestamp": first_ts,
+                "futures_symbol": future,
+                "side": side,
+                "symbol": symbol,
+                "regime": first.get("regime"),
+                "regime_raw": first.get("regime_raw"),
+                "regime_gate_allowed": first.get("regime_gate_allowed"),
+                "shadow_transition_candidate": first.get("shadow_transition_candidate"),
+                "local_range_candidate": first.get("local_range_candidate"),
+                "local_range_state": first.get("local_range_state"),
+                "local_range_evidence_fraction": first.get(
+                    "local_range_evidence_fraction"
+                ),
+                "local_reclaim_side": first.get("local_reclaim_side"),
+                "local_range_confirmed_in_trend": first.get(
+                    "local_range_confirmed_in_trend"
+                ),
+                "local_rolling_center_slope_bps_per_min": first.get(
+                    "local_rolling_center_slope_bps_per_min"
+                ),
+                "local_range_session_vwap_setup": first.get(
+                    "local_range_session_vwap_setup"
+                ),
+                "structural_reason": first.get("structural_reason"),
+                "structural_qualified": first.get("structural_qualified") is True,
+                "first_rejection_reason": initial_rejection,
+                "observed_decision_reasons": reasons,
+                "same_decision_signal_emitted": any(
+                    row.get("reason") == "signal_emitted" for _, row in same_decision
+                ),
+                "modeled_stop_risk": stop_risk,
+                "modeled_net_rr": net_rr,
+                "quote": first.get("quote"),
+                "center_gap_atr": first.get("center_gap_atr"),
+                "session_vwap": first.get("session_vwap"),
+                "rolling_center": first.get("rolling_center"),
+                "futures_atr": first.get("futures_atr"),
+                "range_width_atr": first.get("range_width_atr"),
+                "volatility_ratio": first.get("volatility_ratio"),
+                "directional_efficiency": first.get("directional_efficiency"),
+                "duplicate_restart_observations": len(samples) - 1,
+                "contract_identity_conflicted": conflicts,
+                "entry_evidence_from_first_observation_only": True,
+            }
+        )
+    unique.sort(key=lambda row: (row["decision_timestamp"], row["excursion_id"]))
+    return unique
+
+
 def summarize_contextual_label_coverage(
     opportunities: Sequence[CanonicalSetupOpportunity],
     post_cost_labels: Mapping[str, float],
@@ -441,6 +609,7 @@ __all__ = [
     "CanonicalSetupOpportunity",
     "ExperimentRecord",
     "ForwardPathLabel",
+    "canonicalize_range_excursions",
     "canonicalize_setup_opportunities",
     "label_forward_option_buy_path",
     "validate_experiment_record",

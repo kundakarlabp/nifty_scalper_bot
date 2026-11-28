@@ -10,7 +10,6 @@ Safety: Missing, non-finite, or future-dated broker ticks cannot authorize LIVE.
 
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
@@ -44,12 +43,6 @@ def _float(payload: Mapping[str, Any] | object | None, *keys: str) -> float | No
 
 
 def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:
-    timestamp_ms = _float(payload, "last_tick_ts_ms")
-    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
-        # Do not clamp a future broker timestamp to zero: that would make an
-        # invalid tick appear fresh to both strategy context and order gates.
-        age_ms = time.time() * 1000.0 - timestamp_ms
-        return age_ms if age_ms >= 0.0 else None
     age_s = resolve_quote_age_seconds(payload)
     return None if age_s is None else age_s * 1000.0
 
@@ -145,23 +138,32 @@ def evaluate_execution_quote(
         payload
     )
     has_bid_ask = bool(bid is not None and ask is not None and bid > 0 and ask > bid)
-    spread_pct = _float(payload, "spread_pct")
-    if spread_pct is None:
-        spread_pct = derived_spread_pct
+    # The current executable BBO, not a cached summary field, owns spread.
+    spread_pct = derived_spread_pct if has_bid_ask else _float(payload, "spread_pct")
     tick_age_ms = resolve_tick_age_ms(payload)
     quote_version = resolve_quote_version(payload)
     depth = _value(payload, "depth")
-    depth_available = bool(
-        _value(payload, "depth_available") is True
-        or _value(payload, "quote_depth_valid") is True
-        or (
-            isinstance(depth, Mapping)
-            and bool(depth.get("buy"))
-            and bool(depth.get("sell"))
+    # A supplied (possibly partial) broker book outranks summary flags.
+    # Legacy quote-only fixtures without depth retain their declared proof.
+    depth_available = (
+        bool(
+            isinstance(depth.get("buy"), (list, tuple))
+            and depth.get("buy")
+            and isinstance(depth.get("sell"), (list, tuple))
+            and depth.get("sell")
+        )
+        if isinstance(depth, Mapping)
+        else bool(
+            _value(payload, "depth_available") is True
+            or _value(payload, "quote_depth_valid") is True
         )
     )
     explicit_tradable = _value(payload, "tradable_quote")
-    tradable_quote = bool(has_bid_ask and explicit_tradable is not False)
+    tradable_quote = bool(
+        has_bid_ask
+        and explicit_tradable is not False
+        and _value(payload, "hard_readiness_eligible") is not False
+    )
     real_ticks, derived = resolve_real_tick_count(
         payload,
         tick_age_ms=tick_age_ms,

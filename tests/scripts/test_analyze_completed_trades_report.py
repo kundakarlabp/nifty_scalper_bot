@@ -248,3 +248,208 @@ def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> N
     assert evidence["completed_ledger_rows"] == 0
     assert evidence["unreferenced_broker_order_count"] == 1
     assert evidence["final_net_pnl_broker_reconciled"] is False
+
+
+def test_range_vwap_completed_analysis_filters_other_strategies() -> None:
+    def row(trade_id: str, strategy: str, amount: float) -> dict:
+        return {
+            "trade_id": trade_id,
+            "closed_at": 100.0 if trade_id == "range" else 200.0,
+            "strategy": strategy,
+            "gross_pnl": amount + 20.0,
+            "estimated_costs": 20.0,
+            "net_pnl": amount,
+            "ledger_complete": True,
+            "state": "CLOSED",
+            "exit_reason": "TARGET",
+            "entry_price": 100.0,
+            "exit_price": 110.0,
+            "quantity": 65,
+            "outcome": {
+                "cost_source": "broker_virtual_contract_note",
+                "effective_costs": {"total": 20.0},
+            },
+        }
+
+    rows = [
+        row("range", "RangeVWAPReclaim", 630.0),
+        row("orb", "ORBPro", -80.0),
+    ]
+    selected = module.build_analysis(
+        rows,
+        block_size=20,
+        components=(),
+        strategy="range_vwap_reclaim",
+    )
+    assert selected["dataset"]["strategy_filter"] == "range_vwap_reclaim"
+    assert selected["dataset"]["canonical_completed_trades"] == 1
+    assert selected["overall_post_cost"]["net_pnl"] == 630.0
+    stress = module.range_vwap_slippage_stress(rows)
+    assert stress["ready"] is True
+    assert stress["option_profitability_proven"] is False
+    assert [row["extra_slippage_bps_each_side"] for row in stress["scenarios"]] == [
+        10,
+        25,
+        50,
+    ]
+    assert stress["scenarios"][0]["net_pnl"] == 616.35
+    assert stress["scenarios"][2]["net_pnl"] < stress["scenarios"][0]["net_pnl"]
+
+
+def test_range_stress_abstains_on_missing_or_estimated_evidence() -> None:
+    assert module.range_vwap_slippage_stress([])["ready"] is False
+    row = {
+        "trade_id": "r1",
+        "closed_at": 1.0,
+        "strategy": "RangeVWAPReclaim",
+        "gross_pnl": 60.0,
+        "estimated_costs": 20.0,
+        "net_pnl": 40.0,
+        "state": "CLOSED",
+        "ledger_complete": True,
+        "outcome": {
+            "cost_source": "broker_virtual_contract_note",
+            "effective_costs": {"total": 20.0},
+        },
+    }
+    assert (
+        module.range_vwap_slippage_stress([row])["reason"]
+        == "premium_or_quantity_missing"
+    )
+    row.update(entry_price=100.0, exit_price=102.0, quantity=65)
+    row["outcome"] = {"cost_source": "estimated_model"}
+    assert (
+        module.range_vwap_slippage_stress([row], allow_estimated_costs=True)["reason"]
+        == "premium_or_broker_cost_unverified"
+    )
+
+
+def test_strategy_cli_with_no_range_trades_does_not_infer_returns(
+    tmp_path, capsys
+) -> None:
+    database = tmp_path / "empty.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+    assert (
+        module.main(
+            [
+                "--trades-db",
+                str(database),
+                "--strategy",
+                "range_vwap_reclaim",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["overall_post_cost"]["trade_count"] == 0
+    assert report["range_vwap_slippage_stress"]["ready"] is False
+    assert report["range_vwap_slippage_stress"]["scenarios"] == []
+    calibration = report["range_vwap_execution_calibration"]
+    assert calibration["ready_for_research_calibration"] is False
+    assert calibration["paired_measured_quote_fill_trades"] == 0
+    transition = report["range_vwap_transition_economics"]
+    assert transition["completed_range_trades"] == 0
+    assert transition["cohorts"] == []
+    assert not transition["live_filter_or_parameter_promotion_allowed"]
+    assert report["parameter_change"]["allowed"] is False
+
+
+def test_range_calibration_requires_paired_quotes_and_sessions() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    start = datetime(2026, 11, 1, 13, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rows = []
+    for i in range(30):
+        closed_at = start + timedelta(days=i // 3)
+        rows.append(
+            {
+                "trade_id": f"range-{i}",
+                "closed_at": closed_at.timestamp(),
+                "strategy": "RangeVWAPReclaim",
+                "state": "CLOSED",
+                "ledger_complete": True,
+                "gross_pnl": 45.0,
+                "estimated_costs": 20.0,
+                "net_pnl": 25.0,
+                "execution_quality": {
+                    "entry_slippage_bps": 10.0 + i % 3,
+                    "exit_slippage_bps": 20.0 + i % 3,
+                    "entry_quote_ask": 101.0,
+                    "exit_quote_bid": 103.0,
+                    "exit_quote_age_ms": 90.0,
+                    "exit_quote_evidence_source": "cached_bid_observation",
+                },
+                "outcome": {
+                    "cost_source": "broker_virtual_contract_note",
+                    "effective_costs": {"total": 20.0},
+                },
+            }
+        )
+
+    calibrated = module.range_vwap_execution_calibration(rows)
+    assert calibrated["ready_for_research_calibration"] is True
+    assert calibrated["completed_range_trades"] == 30
+    assert calibrated["independent_trading_sessions"] == 10
+    assert calibrated["paired_coverage_fraction"] == 1.0
+    assert calibrated["entry_adverse_slippage_median_bps"] == 11.0
+    assert calibrated["exit_adverse_slippage_median_bps"] == 21.0
+    assert calibrated["live_parameter_change_allowed"] is False
+
+    # Missing a contemporaneous exit quote cannot count as paired evidence.
+    rows[0]["execution_quality"]["exit_quote_evidence_source"] = "unavailable"
+    incomplete = module.range_vwap_execution_calibration(rows)
+    assert incomplete["paired_measured_quote_fill_trades"] == 29
+    assert incomplete["ready_for_research_calibration"] is False
+
+
+def test_range_transition_economics_requires_causal_broker_costed_evidence() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    start = datetime(2026, 10, 1, 15, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rows = []
+    for i in range(20):
+        rows.append(
+            {
+                "trade_id": f"risk-{i}",
+                "closed_at": (start + timedelta(days=i)).timestamp(),
+                "strategy": "RangeVWAPReclaim",
+                "gross_pnl": 40.0,
+                "estimated_costs": 20.0,
+                "net_pnl": 20.0,
+                "state": "CLOSED",
+                "ledger_complete": True,
+                "outcome": {
+                    "cost_source": "broker_virtual_contract_note",
+                    "effective_costs": {"total": 20.0},
+                    "range_structure": {
+                        "prior_5m_to_14m_true_range_ratio": 1.25,
+                        "prior_5m_directional_efficiency": 0.3,
+                        "directional_efficiency": 0.2,
+                    },
+                    "option_cost_risk": {
+                        "target_net_reward_after_costs": 150.0,
+                        "worst_stop_loss_including_costs": 600.0,
+                    },
+                },
+            }
+        )
+    report = module.range_vwap_transition_economics(rows)
+    assert report["completed_range_trades"] == 20
+    assert report["trades_with_causal_volatility_and_economic_provenance"] == 20
+    cohort = report["cohorts"][0]
+    assert cohort["preentry_volatility_cohort"] == "recent_true_range_expansion"
+    assert cohort["recent_directional_pressure_rising_fraction"] == 1.0
+    assert cohort["modeled_target_net_reward_mean"] == 150.0
+    assert cohort["realized_net_expectancy"] == 20.0
+    assert cohort["independent_sessions"] == 20
+    assert cohort["research_sample_sufficient"] is True
+    assert not report["live_filter_or_parameter_promotion_allowed"]
+
+    rows[0]["outcome"]["range_structure"].pop("prior_5m_to_14m_true_range_ratio")
+    incomplete = module.range_vwap_transition_economics(rows)
+    assert incomplete["completed_range_trades"] == 20
+    assert incomplete["trades_with_causal_volatility_and_economic_provenance"] == 19
+    assert incomplete["cohorts"][0]["research_sample_sufficient"] is False

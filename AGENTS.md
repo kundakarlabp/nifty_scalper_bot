@@ -103,6 +103,8 @@ The manifest-driven `scripts/module_doc_guard.py` runs in the single
 coverage and callable-interface/header changes; human reviewers must verify
 semantic accuracy. Do not auto-generate fabricated descriptions from names.
 
+## Single-task PR rule
+Search open/draft PRs before creating a branch. Reuse the same task PR/head branch and `Task-Key` for all corrections; iterate with focused draft checks, then require full exact-head CI when ready. Close only demonstrably superseded PRs with documented SHA/equivalence evidence. Do not delete divergent safety/research branches or bypass broker-safe deployment. See `docs/CHATGPT_CODE_WORKFLOW.md`.
 ## Validation
 
 Use the single public agent façade rather than hand-building validation commands:
@@ -115,6 +117,12 @@ python scripts/agent_task.py full --files <changed files>
 The façade performs debt-safe style preflight, SSOT-driven focused validation, and relevant historical-regression benchmarks.
 
 For GitHub-connector-only work, keep iterative PRs in **draft** so CI runs the focused remote gate only. Mark the PR ready once to trigger the full final validation matrix on the intended merge head. If another commit is required, return the PR to draft before editing. Final-head GitHub `final-validation` remains authoritative before merge.
+
+### Merge at any time; deploy only when broker-safe
+
+Code corrections, PR validation, and GitHub merges may happen **at any time**, including during NSE trading hours. Do not impose a market-hours merge blackout, wait for 15:30 IST, or delay an otherwise validated merge until the market closes. When the user has requested **validate and merge**, the agent may complete that merge after the exact final-head checks, review, and base/head verification; a second manual merge authorization is not required.
+
+A GitHub merge is **not** a production restart. The existing release runner independently requires exact-main push CI and broker-safe entry hold, terminal-order/flat-position reconciliation, health checks, and rollback. It may defer *activation* for real broker exposure or failed safety evidence, never solely because of the clock. Do not weaken those deployment or live-trading protections to accelerate a merge.
 
 Before merge, verify the exact validated base/head through the same façade when a working tree is available:
 
@@ -156,5 +164,7 @@ connection timeouts from Supabase SQL HTTP and restricted tool environments.
 Never label the bot down from those timeouts alone. Supabase heartbeat is
 host-local monitoring, not proof of public ingress. Control-plane access is
 separate: HTTPS requires a publicly trusted certificate and authentication;
-independent port 8081 must bind to localhost. Do not use AppDeploy/SSH,
-change trading risk, or bypass broker-safe deployment to troubleshoot HTTP.
+independent port 8081 must bind to localhost. Diagnose through the
+existing AWS admin endpoints and private Supabase telemetry. Do not use
+retired third-party relays or SSH, change trading risk, or bypass broker-safe
+deployment to troubleshoot HTTP.

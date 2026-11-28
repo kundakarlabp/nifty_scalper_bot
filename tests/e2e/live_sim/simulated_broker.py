@@ -172,11 +172,45 @@ class SimulatedBroker:
     def query_orders(self) -> list[SimulatedOrder]:
         return list(self.orders.values())
 
+    def get_orders(self) -> list[dict[str, Any]]:
+        """Expose the real broker's complete orderbook shape to LIVE simulation.
+
+        The canonical reducing-order guard must run unchanged in simulations;
+        omitted orderbook interfaces must not disable that safety check.
+        """
+        return [
+            {
+                **self._response(order),
+                "tradingsymbol": order.symbol.removeprefix("NFO:"),
+                "exchange": "NFO",
+                "product": "MIS",
+                "status": order.status.replace("_", " "),
+            }
+            for order in self.orders.values()
+        ]
+
     def query_trades(self) -> list[SimulatedTrade]:
         return list(self.trades)
 
     def query_positions(self) -> dict[str, int]:
         return dict(self.positions)
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        """Mirror the production net-position contract for LIVE simulation."""
+        return [
+            {
+                "tradingsymbol": symbol,
+                "quantity": quantity,
+                "product": "MIS",
+                "average_price": float(self._entry_cost.get(symbol, 0.0)),
+                "last_price": float(
+                    self._last_quotes.get(symbol, (0.0, 0.0, 0.0))[2]
+                    or self._entry_cost.get(symbol, 0.0)
+                ),
+            }
+            for symbol, quantity in self.positions.items()
+            if quantity != 0
+        ]
 
     def query_holdings(self) -> list[Any]:
         return []

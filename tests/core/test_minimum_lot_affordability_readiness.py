@@ -145,6 +145,33 @@ async def test_one_affordable_side_keeps_global_arming_and_side_gate(
     assert calls[-1]["live_orders_armed"] is True
 
 
+@pytest.mark.parametrize("eligible", [True, False])
+@pytest.mark.asyncio
+async def test_affordable_active_otm_candidate_can_supply_capacity(
+    monkeypatch, eligible: bool
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    otm = "NFO:NIFTY26AUG25100CE"
+    ctx, calls = _context({CE: 172.0, PE: 180.0, otm: 100.0}, 10_000.0)
+    ctx.active_trading_universe["option_symbols"].append(otm)
+    ctx.active_trading_universe["token_by_symbol"][otm] = 13
+    ctx.active_symbol_tokens[otm] = 13
+    ctx.strategy_runner._live_entry_candidate_eligibility = lambda symbol: (
+        eligible and symbol == otm,
+        "test",
+        {},
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason="otm_capacity")
+
+    assert ctx.evaluation_ready is True
+    assert ctx.execution_capacity_ready is eligible
+    assert ctx.live_orders_armed is eligible
+    assert ctx.execution_ready_by_symbol[CE] is False
+    assert ctx.execution_ready_by_symbol[PE] is False
+    assert ctx.execution_ready_by_symbol.get(otm, False) is eligible
+    assert calls[-1]["live_orders_armed"] is eligible
+
+
 @pytest.mark.asyncio
 async def test_pipeline_overload_disarms_canonical_runtime_readiness(
     monkeypatch,
@@ -199,3 +226,87 @@ async def test_risk_breaker_read_failure_keeps_runtime_disarmed(monkeypatch) -> 
     assert ctx.risk_halt is True
     assert ctx.live_orders_armed is False
     assert ctx.live_block_reason == "execution_not_armed:risk_halt"
+
+
+@pytest.mark.parametrize("missing_quote_side", [CE, PE])
+@pytest.mark.asyncio
+async def test_live_arming_is_per_side_when_opposite_quote_missing(
+    monkeypatch, missing_quote_side: str
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+    original_snapshot = ctx.market_data_manager.get_symbol_snapshot
+
+    def get_snapshot(symbol: str):
+        if symbol == missing_quote_side:
+            return SimpleNamespace(
+                ltp=100.0,
+                tick_age_s=1.0,
+                bid=None,
+                ask=None,
+                tradable_quote=False,
+                depth_available=False,
+            )
+        return original_snapshot(symbol)
+
+    monkeypatch.setattr(ctx.market_data_manager, "get_symbol_snapshot", get_snapshot)
+    await app._recompute_and_push_runtime_readiness(ctx, reason="one_side_quote")
+
+    ready_side = PE if missing_quote_side == CE else CE
+    assert ctx.data_hard_ready is True
+    assert ctx.evaluation_ready is True
+    assert ctx.live_orders_armed is True
+    assert ctx.live_block_reason is None
+    assert ctx.execution_ready_by_symbol[ready_side] is True
+    assert ctx.execution_ready_by_symbol[missing_quote_side] is False
+    assert calls[-1]["execution_ready_by_symbol"][missing_quote_side] is False
+
+
+@pytest.mark.asyncio
+async def test_both_selected_quotes_unusable_keep_live_orders_disarmed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+    original_snapshot = ctx.market_data_manager.get_symbol_snapshot
+
+    def no_option_quotes(symbol: str):
+        if symbol in {CE, PE}:
+            return SimpleNamespace(
+                ltp=100.0,
+                tick_age_s=1.0,
+                bid=None,
+                ask=None,
+                tradable_quote=False,
+                depth_available=False,
+            )
+        return original_snapshot(symbol)
+
+    monkeypatch.setattr(
+        ctx.market_data_manager, "get_symbol_snapshot", no_option_quotes
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason="both_quotes_missing")
+
+    assert ctx.evaluation_ready is True
+    assert ctx.live_orders_armed is False
+    assert ctx.execution_ready_by_symbol == {CE: False, PE: False}
+    assert calls[-1]["live_orders_armed"] is False
+
+
+@pytest.mark.asyncio
+async def test_opposite_side_missing_history_still_disarms_global_readiness(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(app, "get_market_state", lambda: app.MarketState.OPEN)
+    ctx, calls = _context({CE: 100.0, PE: 110.0}, 10_000.0)
+    original_bars = ctx.market_data_manager.get_ohlc_bars
+    monkeypatch.setattr(
+        ctx.market_data_manager,
+        "get_ohlc_bars",
+        lambda symbol: [] if symbol == PE else original_bars(symbol),
+    )
+    await app._recompute_and_push_runtime_readiness(ctx, reason="history_cold")
+
+    assert ctx.data_hard_ready is False
+    assert ctx.live_orders_armed is False
+    assert calls[-1]["live_orders_armed"] is False

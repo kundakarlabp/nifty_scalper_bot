@@ -7,13 +7,17 @@ Runtime role:
 - Fans ticks out to subscribers via the message bus.
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
+- Fast WebSocket receipt caching refuses retired option/futures tokens and
+  cannot demote a validated exchange-time quote to an unverified arrival.
+- Rejects wrong-token and retired-generation queued ticks before candle mutation;
+  preserves original ingress receipt time through normalized quote delivery.
 - Verifies reconnect from fresh current-generation required-symbol WS receipts;
-  drains ordered ticks on a dedicated serial worker rather than the shared
-  asyncio executor, and exports bounded tick latency percentiles.
-- _capture_raw_ws_ingress and _raw_ingress_upstream_snapshot record exact,
-  pre-queue wire observations using synchronized per-symbol/epoch receipts;
-  get_raw_ingress_capture_stats exposes immutable diagnostic snapshots;
-  the established normalized decision-replay tape remains unchanged.
+  drains bounded ordered batches on a dedicated serial worker rather than the
+  shared asyncio executor, and exports bounded latency percentiles (worker
+  dispatch/await samples are per batch; individual tick samples remain per tick).
+- Restricts replay capture to the exchange session, without gating live quotes.
+- Optional pre-queue raw receipt capture uses ReplayArchive; initialization is
+  before transport start, and capture failure invalidates research only.
 
 Position in the pipeline:
     core/app.py → THIS FILE (market_data_manager.py)
@@ -84,6 +88,7 @@ from nifty_scalper_bot.data.time_contract import (
 from nifty_scalper_bot.data.validator import validate_tick
 from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
+    quote_timestamp_quality_allows_hard_readiness,
     resolve_quote_bid_ask_spread,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -437,12 +442,15 @@ class MarketDataManager:
         self._external_tick_handler: Callable[[dict[str, Any]], None] | None = None
         self._replay_capture_lock = threading.RLock()
         self._replay_archive: Any | None = None
+        self._raw_ws_receipts_total = 0
+        self._raw_ingress_enabled = os.getenv(
+            "REPLAY_RAW_INGRESS_ENABLED", "false"
+        ).lower() in {"true", "1", "yes", "on"}
+        self._raw_ingress_lock = threading.Lock()
         self._raw_ingress_archive: Any | None = None
-        self._raw_ingress_sequence: dict[str, int] = {}
         self._raw_ingress_count_by_day: dict[str, int] = {}
         self._raw_ingress_capture_errors = 0
-        self._raw_ingress_init_retry_at = 0.0
-        self._raw_ws_receipts_total = 0
+        self._raw_ingress_day: str | None = None
         self._replay_snapshot_key: tuple[str, str] | None = None
         self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
         self._broker = broker
@@ -2040,6 +2048,7 @@ class MarketDataManager:
                     "ws_token_count": ws_token_count,
                 },
             )
+            self._start_raw_ingress_capture()
             self._ws.start()
             post_status = self.ws_status_snapshot()
             self._ws_connect_task_started = bool(post_status.get("connect_task_alive"))
@@ -2107,6 +2116,7 @@ class MarketDataManager:
                 self._ws.stop()
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("ws.stop() raised: %s", exc)
+        self._stop_raw_ingress_capture()
         return True
 
     async def async_stop(self) -> None:
@@ -2186,9 +2196,6 @@ class MarketDataManager:
         archive = getattr(self, "_replay_archive", None)
         if archive is not None:
             archive.close()
-        raw_archive = getattr(self, "_raw_ingress_archive", None)
-        if raw_archive is not None:
-            raw_archive.close()
         self._stop_candle_flush_task()
         stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
         if callable(stop_fallback_worker):
@@ -2654,9 +2661,9 @@ class MarketDataManager:
             to_add    = desired_tokens - current_ws_tokens
             to_remove = current_ws_tokens - desired_tokens
 
-        Tokens in ``desired_tokens`` are never unsubscribed (they ARE the
-        protected set).  Anything not in ``desired_tokens`` is stale and will
-        be removed from both ``_desired_tokens`` and the WebSocket transport.
+        The basket token list is supplemented by live bracket/open-position
+        tokens before any removal. A selected-ATM rotation may remove context
+        contracts, but must not remove a held position's tick/depth feed.
 
         Args:
             desired_tokens: Complete set of int tokens the bot should subscribe
@@ -2672,6 +2679,28 @@ class MarketDataManager:
         desired = {int(t) for t in desired_tokens if t and int(t) > 0}
 
         with self._lock:
+            # An ATM basket is NOT the full protected subscription universe.
+            # A newly selected strike must never unsubscribe an open option
+            # or its bracket's resting protective stop. Position/bracket
+            # ownership is maintained by the canonical execution layer.
+            protected_symbols = set(self._active_bracket_symbols)
+            protected_symbols.update(self._open_position_symbols)
+            protected_tokens: set[int] = set()
+            unresolved_protected: list[str] = []
+            for symbol in protected_symbols:
+                token = self._token_by_symbol.get(symbol) or self._symbol_to_token.get(
+                    symbol
+                )
+                try:
+                    token_num = int(token) if token is not None else 0
+                except (TypeError, ValueError):
+                    token_num = 0
+                if token_num > 0:
+                    protected_tokens.add(token_num)
+                else:
+                    unresolved_protected.append(symbol)
+            preserved = len(protected_tokens - desired)
+            desired.update(protected_tokens)
             ws = self._ws
             if ws is not None:
                 snapshot_fn = getattr(ws, "tokens_snapshot", None)
@@ -2730,7 +2759,17 @@ class MarketDataManager:
             "added": len(to_add),
             "removed": len(to_remove),
             "after": after,
+            "protected_tokens_retained": preserved,
+            "protected_symbols_unresolved": len(unresolved_protected),
         }
+        if preserved or unresolved_protected:
+            self._logger.warning(
+                "PROTECTED_SUBSCRIPTIONS_RETAINED retained=%s "
+                "unresolved_count=%s held_symbols=%s",
+                preserved,
+                len(unresolved_protected),
+                sorted(protected_symbols)[:8],
+            )
         self._logger.info(
             "SUBSCRIPTION_RECONCILED desired=%d current_before=%d added=%d removed=%d current_after=%d",
             result["desired"],
@@ -7078,6 +7117,8 @@ class MarketDataManager:
         self._record_raw_ws_receive(tick_payload, raw_receive_mono)
         self._capture_raw_ws_ingress(tick_payload)
         tick_payload.setdefault("_enqueued_monotonic", raw_receive_mono)
+        # Ingress receipt is not a substitute for a missing market timestamp.
+        tick_payload.setdefault("_mdm_received_at", time.time())
 
         loop = self._main_loop
         if loop is not None and loop.is_running():
@@ -7093,90 +7134,86 @@ class MarketDataManager:
             self._logger.debug("WS enqueue failed: %s", exc)
 
     def _raw_ingress_upstream_snapshot(self) -> dict[str, int]:
-        """Snapshot counters under the owner lock for integrity sidecars."""
-        with self._replay_capture_lock:
-            return {
-                "raw_ws_receipts": int(self._raw_ws_receipts_total),
-                "capture_errors": int(self._raw_ingress_capture_errors),
-                **{
-                    "day_receipt:" + key: value
-                    for key, value in self._raw_ingress_count_by_day.items()
-                },
-            }
+        """Return receipt counts without taking a lock on the writer thread."""
+        counts = self._raw_ingress_count_by_day.copy()
+        return {
+            "capture_errors": self._raw_ingress_capture_errors,
+            **{"day_receipt:" + key: value for key, value in counts.items()},
+        }
+
+    def _start_raw_ingress_capture(self) -> None:
+        """Initialize the optional research tape before the WS transport starts."""
+        if not getattr(self, "_raw_ingress_enabled", False):
+            return
+        if self._raw_ingress_archive is not None:
+            return
+        try:
+            from shutil import disk_usage
+
+            from nifty_scalper_bot.config.paths import get_data_dir
+            from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+            root = get_data_dir()
+            try:
+                raw_mb = int(os.getenv("REPLAY_RAW_MAX_SESSION_MB", "512"))
+            except (TypeError, ValueError):
+                raw_mb = 512
+            try:
+                normalized_mb = int(
+                    os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024")
+                )
+            except (TypeError, ValueError):
+                normalized_mb = 1024
+            raw_mb = max(128, min(1024, raw_mb))
+            normalized_mb = max(512, min(2048, normalized_mb))
+            if disk_usage(root).free < (raw_mb + normalized_mb + 2048) * 1024**2:
+                raise OSError("raw_ingress_disk_reserve")
+            self._raw_ingress_archive = ReplayArchive(
+                root / "replay_raw_ingress",
+                capacity=4096,
+                max_session_bytes=raw_mb * 1024**2,
+                upstream_provider=self._raw_ingress_upstream_snapshot,
+            )
+            self._raw_ingress_day = None
+        except Exception as exc:  # noqa: BLE001 - research cannot block transport
+            self._raw_ingress_capture_errors += 1
+            self._logger.warning(
+                "RAW_WS_CAPTURE_UNAVAILABLE error_type=%s", type(exc).__name__
+            )
+
+    def _stop_raw_ingress_capture(self) -> None:
+        """Detach after WS shutdown, then finalize without holding ingress lock."""
+        archive = getattr(self, "_raw_ingress_archive", None)
+        if archive is None:
+            return
+        with self._raw_ingress_lock:
+            self._raw_ingress_archive = None
+            self._raw_ingress_enabled = False
+        archive.close()
 
     def _capture_raw_ws_ingress(self, raw: Mapping[str, Any]) -> None:
-        """Persist pre-coalescing WS identity without changing normalized replay.
-
-        Only the LIVE default or an explicit test/operator opt-in records raw
-        quotes. An unavailable or full recorder marks research evidence
-        incomplete; it never blocks protective execution or fabricates data.
-        """
-        enabled = str(os.getenv("REPLAY_RAW_INGRESS_ENABLED", "auto")).lower()
-        if enabled in {"false", "0", "off", "no"}:
+        """Capture before coalescing; never initialize storage or wait for a lock."""
+        if not getattr(self, "_raw_ingress_enabled", False):
             return
-        if enabled == "auto" and not (
-            str(os.getenv("EXECUTION_MODE", "")).upper() == "LIVE"
-            and any(
-                str(os.getenv(name, "")).lower() in {"true", "1", "yes", "on"}
-                for name in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
-            )
-        ):
-            return
-        lock = getattr(self, "_replay_capture_lock", None)
-        if lock is None:
-            return
-        with lock:
-            if (
-                self._raw_ingress_archive is None
-                and time.monotonic() < self._raw_ingress_init_retry_at
-            ):
+        try:
+            if get_market_session_state(datetime.now(timezone.utc)) not in {
+                "preopen",
+                "open",
+            }:
+                return
+            if not self._raw_ingress_lock.acquire(blocking=False):
+                self._raw_ingress_capture_errors += 1
                 return
             try:
-                from shutil import disk_usage
-
-                from nifty_scalper_bot.config.paths import get_data_dir
-                from nifty_scalper_bot.storage.replay_archive import ReplayArchive
-
-                if getattr(self, "_raw_ingress_archive", None) is None:
-                    root = get_data_dir()
-                    try:
-                        requested_mb = max(
-                            128,
-                            min(1024, int(os.getenv("REPLAY_RAW_MAX_SESSION_MB", "512"))),
-                        )
-                    except (TypeError, ValueError):
-                        requested_mb = 512
-                    # Two independent tapes must leave a 2 GiB emergency
-                    # reserve; do not silently consume free host storage.
-                    normalized_mb = max(
-                        512, int(os.getenv("REPLAY_CAPTURE_MAX_SESSION_MB", "1024"))
-                    )
-                    required_free = (
-                        requested_mb + normalized_mb + 2048
-                    ) * 1024 * 1024
-                    if disk_usage(root).free < required_free:
-                        self._raw_ingress_capture_errors += 1
-                        self._raw_ingress_init_retry_at = time.monotonic() + 300.0
-                        log_throttled(
-                            self._logger,
-                            "raw_ws_capture_no_headroom",
-                            "RAW_WS_CAPTURE_UNAVAILABLE reason=disk_reserve",
-                            interval_sec=60.0,
-                            level=logging.ERROR,
-                        )
-                        return
-                    self._raw_ingress_archive = ReplayArchive(
-                        root / "replay_raw_ingress",
-                        capacity=4096,
-                        max_session_bytes=requested_mb * 1024 * 1024,
-                        upstream_provider=self._raw_ingress_upstream_snapshot,
-                    )
-                    self._raw_ingress_day = None
-
                 archive = self._raw_ingress_archive
+                if archive is None:
+                    self._raw_ingress_capture_errors += 1
+                    return
                 observed = datetime.now(timezone.utc)
-                day = observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
-                if getattr(self, "_raw_ingress_day", None) != day:
+                day = (
+                    observed.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat()
+                )
+                if self._raw_ingress_day != day:
                     archive.record(
                         "snapshot",
                         {"capture_stream": "raw_ws_ingress", "version": 1},
@@ -7184,22 +7221,27 @@ class MarketDataManager:
                     )
                     self._raw_ingress_day = day
 
-                symbol = self._resolve_tick_symbol_for_priority(raw)
-                token_value = raw.get("instrument_token") or raw.get("token")
-                try:
-                    token = int(token_value) if token_value is not None else None
-                except (TypeError, ValueError):
-                    token = None
-                generation = self._generation_for_raw_ingress(
-                    symbol if symbol != "UNKNOWN" else None, token
+                raw_token = raw.get("instrument_token") or raw.get("token")
+                if not isinstance(raw_token, (int, str)) or isinstance(
+                    raw_token, bool
+                ):
+                    raise ValueError("raw_ingress_invalid_token")
+                token = int(raw_token)
+                if token <= 0:
+                    raise ValueError("raw_ingress_invalid_token")
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+                    token
                 )
-                identity = f"{symbol}|{token}|{generation}"
-                next_sequence = self._raw_ingress_sequence.get(identity, 0) + 1
-                self._raw_ingress_sequence[identity] = next_sequence
-                day_identity = f"{day}|{identity}"
-                self._raw_ingress_count_by_day[day_identity] = (
-                    self._raw_ingress_count_by_day.get(day_identity, 0) + 1
-                )
+                raw_symbol = raw.get("symbol") or mapped
+                if not raw_symbol:
+                    raise ValueError("raw_ingress_symbol_missing")
+                symbol = canonical_symbol(str(raw_symbol))
+                if mapped and canonical_symbol(str(mapped)) != symbol:
+                    raise ValueError("raw_ingress_symbol_token_mismatch")
+                generation = self._generation_for_raw_ingress(symbol, token)
+                identity = f"{day}|{symbol}|{token}|{generation}"
+                sequence = self._raw_ingress_count_by_day.get(identity, 0) + 1
+                self._raw_ingress_count_by_day[identity] = sequence
                 archive.record(
                     "tick",
                     {
@@ -7208,36 +7250,33 @@ class MarketDataManager:
                             "symbol": symbol,
                             "token": token,
                             "generation": generation,
-                            "sequence": next_sequence,
+                            "sequence": sequence,
                         },
                         "wire": dict(raw),
                     },
                     observed,
                 )
-            except Exception as exc:  # noqa: BLE001 - research cannot block trading
-                self._raw_ingress_capture_errors += 1
-                if self._raw_ingress_archive is None:
-                    self._raw_ingress_init_retry_at = time.monotonic() + 300.0
-                log_throttled(
-                    self._logger,
-                    "raw_ws_capture_failure",
-                    "RAW_WS_CAPTURE_UNAVAILABLE error_type=%s",
-                    type(exc).__name__,
-                    interval_sec=60.0,
-                    level=logging.ERROR,
-                )
+            finally:
+                self._raw_ingress_lock.release()
+        except Exception:  # noqa: BLE001 - invalidate research, never the tick
+            self._raw_ingress_capture_errors += 1
 
     def get_raw_ingress_capture_stats(self) -> dict[str, Any]:
-        """Return per-symbol/epoch receipts and bounded recorder loss evidence."""
-        with self._replay_capture_lock:
-            archive = getattr(self, "_raw_ingress_archive", None)
-            return {
-                "raw_ws_receipts_total": int(self._raw_ws_receipts_total),
-                "capture_errors": int(self._raw_ingress_capture_errors),
-                "received_by_symbol_epoch": dict(self._raw_ingress_sequence),
-                "received_by_day_symbol_epoch": dict(self._raw_ingress_count_by_day),
-                "archive": archive.stats() if archive is not None else None,
-            }
+        """Return detached diagnostic counters without changing trading state."""
+        counts = self._raw_ingress_count_by_day.copy()
+        prefix = f"{self._raw_ingress_day}|"
+        archive = self._raw_ingress_archive
+        return {
+            "raw_ws_receipts_total": int(self._raw_ws_receipts_total),
+            "capture_errors": self._raw_ingress_capture_errors,
+            "received_by_symbol_epoch": {
+                key.removeprefix(prefix): value
+                for key, value in counts.items()
+                if key.startswith(prefix)
+            },
+            "received_by_day_symbol_epoch": counts,
+            "archive": archive.stats() if archive is not None else None,
+        }
 
     def _raw_receive_evidence(
         self, received_mono: float, generation: int | None
@@ -8095,61 +8134,28 @@ class MarketDataManager:
         awaited_worker_s = 0.0
         processed_in_invocation = 0
 
-        def _run_tick_on_worker(
-            tick_payload: dict[str, Any], scheduled_at: float
-        ) -> None:
-            # Worker-await wall time includes dispatch and processing time.
-            # This measurement starts on the actual worker thread, before the
-            # indivisible tick is processed; order and ownership are unchanged.
+        def _run_batch_on_worker(
+            batch: list[dict[str, Any]], scheduled_at: float, remaining: int
+        ) -> int:
+            # One bounded serial dispatch, not one executor round trip per tick.
             dispatch_wait_ms = (time.perf_counter() - scheduled_at) * 1000.0
             self._record_tick_latency("worker_dispatch_wait", dispatch_wait_ms)
             if dispatch_wait_ms >= 50.0:
                 self._log_slow_tick_stage(
                     stage="worker_dispatch_wait",
-                    symbol=str(tick_payload.get("symbol") or "") or None,
+                    symbol=str(batch[0].get("symbol") or "") or None,
                     duration_ms=dispatch_wait_ms,
-                    source=str(tick_payload.get("source") or "ws"),
+                    source=str(batch[0].get("source") or "ws"),
                 )
-            self._process_queued_tick(tick_payload)
-        with self._pending_tick_lock:
-            self._tick_active_drains += 1
-            self._tick_max_active_drains = max(
-                self._tick_max_active_drains, self._tick_active_drains
-            )
-        try:
-            while True:
-                start = time.monotonic()
-                batch = self._pop_pending_tick_batch()
-                if not batch:
-                    return
-                for index, raw in enumerate(batch):
+            processed = 0
+            consumed = 0
+            try:
+                for raw in batch[:remaining]:
+                    consumed += 1
                     try:
-                        # A tick can synchronously finalize a candle and fan
-                        # out through DataHub/Runner. Keep strict serial order,
-                        # but move that indivisible work off the asyncio owner.
-                        worker_started = time.monotonic()
-                        worker_scheduled_at = time.perf_counter()
-                        try:
-                            await asyncio.get_running_loop().run_in_executor(
-                                self._tick_executor,
-                                copy_context().run,
-                                _run_tick_on_worker,
-                                raw,
-                                worker_scheduled_at,
-                            )
-                        finally:
-                            # This is time suspended awaiting a worker, NOT
-                            # proof that the owner event loop was blocked.
-                            worker_ms = (time.monotonic() - worker_started) * 1000.0
-                            awaited_worker_s += worker_ms / 1000.0
-                            self._record_tick_latency("worker_await", worker_ms)
+                        self._process_queued_tick(raw)
                         self._tick_processed_total += 1
-                        processed_in_invocation += 1
-                    except asyncio.CancelledError:
-                        # A running worker cannot be cancelled. Requeueing raw
-                        # here could therefore apply the same tick twice.
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
-                        raise
+                        processed += 1
                     except Exception as exc:
                         self._record_tick_drop(
                             str(raw.get("_mdm_priority_bucket") or "unknown"),
@@ -8158,12 +8164,57 @@ class MarketDataManager:
                         self._logger.error(
                             "MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True
                         )
-                    if processed_in_invocation >= self._tick_drain_invocation_max_ticks:
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
-                        return
-                    if time.monotonic() - start >= self._tick_drain_budget_s:
-                        self._requeue_unprocessed_ticks(batch[index + 1 :])
+                    if (
+                        self._tick_drain_stopping
+                        or time.perf_counter() - scheduled_at
+                        >= self._tick_drain_budget_s
+                    ):
                         break
+            finally:
+                # The worker owns the popped prefix even if its waiter cancels.
+                self._requeue_unprocessed_ticks(batch[consumed:])
+            return processed
+
+        with self._pending_tick_lock:
+            self._tick_active_drains += 1
+            self._tick_max_active_drains = max(
+                self._tick_max_active_drains, self._tick_active_drains
+            )
+        try:
+            while True:
+                batch = self._pop_pending_tick_batch()
+                if not batch:
+                    return
+                remaining = (
+                    self._tick_drain_invocation_max_ticks - processed_in_invocation
+                )
+                worker_started = time.monotonic()
+                worker_scheduled_at = time.perf_counter()
+                try:
+                    worker = asyncio.get_running_loop().run_in_executor(
+                        self._tick_executor,
+                        copy_context().run,
+                        _run_batch_on_worker,
+                        batch,
+                        worker_scheduled_at,
+                        remaining,
+                    )
+                except Exception:
+                    self._requeue_unprocessed_ticks(batch)
+                    raise
+                try:
+                    processed_in_invocation += await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Do not reschedule or release the single-owner drain while
+                    # an uncancellable worker still owns these reserved ticks.
+                    await worker
+                    raise
+                finally:
+                    worker_ms = (time.monotonic() - worker_started) * 1000.0
+                    awaited_worker_s += worker_ms / 1000.0
+                    self._record_tick_latency("worker_await", worker_ms)
+                if processed_in_invocation >= self._tick_drain_invocation_max_ticks:
+                    return
                 if (
                     time.monotonic() - drain_started
                     >= self._tick_drain_invocation_budget_s
@@ -8420,7 +8471,7 @@ class MarketDataManager:
         try:
             canonical = self._canonical_symbol(symbol)
             price = float(ltp)
-            if price <= 0:
+            if not math.isfinite(price) or price <= 0:
                 return
             now = time.time()
             payload = dict(raw_tick)
@@ -8430,6 +8481,11 @@ class MarketDataManager:
             payload["source"] = "ws"
             payload["received_at"] = now
             payload.setdefault("timestamp", now)
+            # Raw WS arrival has not passed the canonical exchange-time parser.
+            # Keep the fast LTP observable, never present it as executable proof.
+            payload["source_timestamp_valid"] = False
+            payload["timestamp_source"] = "received_at_fallback"
+            payload["timestamp_quality"] = "unknown"
             # KiteTicker emits average_traded_price, not REST average_price.
             # The fast cache is read by DataHub before the queued tick is
             # normalized; publish the canonical, broker-derived field here too.
@@ -8439,6 +8495,23 @@ class MarketDataManager:
                 payload["instrument_token"] = int(token)
 
             with self._lock:
+                # _emit_tick enforces this same current-basket contract later.
+                # A retired tick must never transiently refresh the public cache.
+                if canonical.startswith("NFO:") and canonical.endswith(
+                    ("CE", "PE", "FUT")
+                ):
+                    if (
+                        token is None
+                        or int(token) not in self._desired_tokens
+                        or self._current_symbol_token_locked(canonical) != int(token)
+                    ):
+                        return
+                # Ordered normalization owns authoritative quote publication.
+                # Do not overwrite a previously verified quote with raw arrival.
+                current = self._tick_cache.get(canonical)
+                if isinstance(current, Mapping):
+                    if current.get("source_timestamp_valid") is True:
+                        return
                 if token is not None:
                     token_int = int(token)
                     self._set_symbol_token_mapping(
@@ -8763,14 +8836,17 @@ class MarketDataManager:
             "quote",
             "rest_quote",
         }
-        token_raw = raw.get("instrument_token") or raw.get("token")
+        token_raw = raw.get("instrument_token")
+        if token_raw is None:
+            token_raw = raw.get("token")
         token: int | None = None
         if token_raw is not None:
             try:
                 token = int(token_raw)
-            except Exception:
-                if not approved_rest_fallback:
-                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if token <= 0:
+                return None
 
         raw_symbol = (
             raw.get("symbol") or raw.get("tradingsymbol") or raw.get("trading_symbol")
@@ -8782,12 +8858,26 @@ class MarketDataManager:
                     symbol = self._canonical_symbol(str(raw_symbol))
                 except Exception:
                     symbol = str(raw_symbol)
-            if symbol is None and token is not None:
-                symbol = self._symbol_by_token.get(token) or self._token_to_symbol.get(
+            if token is not None:
+                mapped = self._symbol_by_token.get(token) or self._token_to_symbol.get(
                     token
                 )
-            if approved_rest_fallback and symbol is not None and token is None:
-                token = self._token_by_symbol.get(symbol)
+                if mapped is not None:
+                    mapped = self._canonical_symbol(mapped)
+                    if symbol is not None and symbol != mapped:
+                        return None
+                    symbol = mapped
+            if symbol is not None:
+                expected_token = self._current_symbol_token_locked(symbol)
+                if token is not None and expected_token is not None:
+                    if token != expected_token:
+                        return None
+                if approved_rest_fallback and token is None:
+                    token = expected_token
+                generation = raw.get("_mdm_subscription_generation")
+                if not approved_rest_fallback and generation is not None:
+                    if generation != self._generation_for_raw_ingress(symbol, token):
+                        return None
 
         if token is None and not (approved_rest_fallback and symbol):
             return None
@@ -8891,9 +8981,11 @@ class MarketDataManager:
 
     @staticmethod
     def _tick_received_at_epoch(raw: Mapping[str, Any]) -> float:
-        value = raw.get("received_at")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        for key in ("_mdm_received_at", "received_at"):
+            value = raw.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if math.isfinite(value) and value > 0:
+                    return float(value)
         return time.time()
 
     @staticmethod
@@ -8969,8 +9061,10 @@ class MarketDataManager:
             or (sell_top or {}).get("quantity")
         )
         depth_available = bool(
-            (isinstance(buy_levels, list) and buy_levels)
-            or (isinstance(sell_levels, list) and sell_levels)
+            isinstance(buy_levels, list)
+            and buy_levels
+            and isinstance(sell_levels, list)
+            and sell_levels
         )
         spread = (
             (ask - bid) if (bid is not None and ask is not None and ask > bid) else None
@@ -9443,9 +9537,10 @@ class MarketDataManager:
             elif "volume_traded" in raw_safe:
                 tick_dict["volume_cumulative"] = raw_safe.get("volume_traded")
             tick_dict["symbol"] = symbol
-            tick_dict["timestamp"] = pd.to_datetime(
-                tick_dict["timestamp"], utc=True, errors="coerce"
-            ).isoformat()
+            # The validated tick timestamp was already parsed to UTC above.
+            # Reusing it avoids a second Pandas datetime conversion on every
+            # websocket tick while keeping the same canonical UTC timestamp.
+            tick_dict["timestamp"] = tick_ts.isoformat()
             token_value = raw.get("instrument_token") or raw.get("token")
             if token_value is not None:
                 tick_dict["instrument_token"] = token_value
@@ -9890,11 +9985,13 @@ class MarketDataManager:
     def _is_full_websocket_quote(tick: Mapping[str, Any]) -> bool:
         source = str(tick.get("source") or "").strip().lower()
         websocket_source = source in {"ws", "ws_full", "full", "websocket"}
-        full_quote = (
-            bool(tick.get("depth_available"))
-            or bool(tick.get("depth"))
-            or str(tick.get("bid_ask_source") or "").lower()
-            in {"market_depth", "ws_full"}
+        depth = tick.get("depth")
+        full_quote = bool(
+            isinstance(depth, Mapping)
+            and isinstance(depth.get("buy"), (list, tuple))
+            and depth.get("buy")
+            and isinstance(depth.get("sell"), (list, tuple))
+            and depth.get("sell")
         )
         return websocket_source and full_quote
 
@@ -9930,12 +10027,28 @@ class MarketDataManager:
         ):
             return False
 
-        if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
+        current_quality = str(current.get("timestamp_quality") or "").lower()
+        incoming_quality = str(incoming.get("timestamp_quality") or "").lower()
+        unusable_quality = {"synthetic", "invalid", "unknown", "received_at"}
+        current_proven = (
+            current.get("source_timestamp_valid") is not False
+            and current_quality not in unusable_quality
+        )
+        incoming_degraded = (
+            not self._is_full_websocket_quote(incoming)
+            or incoming.get("source_timestamp_valid") is False
+            or incoming_quality in unusable_quality
+        )
+        if (
+            current_proven
+            and incoming_degraded
+            and self._is_full_websocket_quote(current)
+        ):
             current_received = self._tick_wallclock(current)
             if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
-                arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
-                event_fresh = max(now_wall - current_event, 0.0) <= threshold
+                arrival_fresh = 0 <= now_wall - current_received <= threshold
+                event_fresh = 0 <= now_wall - current_event <= threshold
                 if arrival_fresh and event_fresh:
                     return False
         return True
@@ -10268,6 +10381,11 @@ class MarketDataManager:
                 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
                 now = datetime.now(timezone.utc)
+                # Post-close quote refreshes must not mutate the session tape
+                # while postmarket analysis is reading it. This is a capture-only
+                # boundary; tick delivery and protective management are unchanged.
+                if get_market_session_state(now) not in {"preopen", "open"}:
+                    return
                 if self._replay_archive is None:
                     # Buffer bursts without blocking the live tick path. The
                     # session ceiling is bounded/configurable; exceeding it
@@ -10427,7 +10545,12 @@ class MarketDataManager:
                     )
                     return
                 else:
-                    if token_int is not None:
+                    # A received-only or synthetic WS packet is transport
+                    # activity, not validated current-generation market proof.
+                    valid_market_time = quote_timestamp_quality_allows_hard_readiness(
+                        tick
+                    )
+                    if token_int is not None and valid_market_time:
                         self._confirmed_subscriptions.add(token_int)
                         self._last_valid_live_tick_mono[canonical_symbol] = now_mono
                         self._symbol_first_tick_generation[canonical_symbol] = (
@@ -12902,9 +13025,14 @@ class MarketDataManager:
         if bid is not None and ask is not None and bid > 0 and ask > 0:
             mid = (float(bid) + float(ask)) / 2.0
         age = None
-        wallclock = self._tick_wallclock(tick)
-        if wallclock is not None:
-            age = max(0.0, time.time() - wallclock)
+        event_epoch = self._tick_event_wallclock(tick)
+        now_epoch = time.time()
+        if (
+            event_epoch is not None
+            and 0.0 <= now_epoch - event_epoch
+            and quote_timestamp_quality_allows_hard_readiness(tick)
+        ):
+            age = now_epoch - event_epoch
         with self._lock:
             source = str(
                 self._last_tick_source.get(canonical) or tick.get("source") or "unknown"
@@ -12947,8 +13075,9 @@ class MarketDataManager:
             bool(latest.get("synthetic")) if isinstance(latest, Mapping) else False
         )
         ohlc_valid = bool(bars)
-        depth_available = isinstance(tick.get("depth"), Mapping) and bool(
-            tick.get("depth")
+        depth = tick.get("depth")
+        depth_available = bool(
+            isinstance(depth, Mapping) and depth.get("buy") and depth.get("sell")
         )
         bid_missing = bool(tick.get("bid_missing")) or bid is None or bid <= 0
         ask_missing = bool(tick.get("ask_missing")) or ask is None or ask <= 0
@@ -12972,6 +13101,9 @@ class MarketDataManager:
             (not bid_missing and not ask_missing)
             and source_ok
             and (self._quote_api_available or not rest_quote_source)
+            and tick.get("tradable_quote") is not False
+            and tick.get("hard_readiness_eligible") is not False
+            and quote_timestamp_quality_allows_hard_readiness(tick)
         )
         snapshot = MarketSnapshot(
             symbol=str(symbol),
@@ -13847,12 +13979,35 @@ class MarketDataManager:
                 }:
                     return None
                 ts = pd.Timestamp.now(tz="UTC")
-                timestamp_source = raw.get("timestamp_source")
-                source_timestamp_valid = raw.get("source_timestamp_valid")
+                timestamp_source = "synthetic"
+                source_timestamp_valid = False
             else:
                 ts = pd.Timestamp(normalized_ts.timestamp)
-                timestamp_source = normalized_ts.source
-                source_timestamp_valid = True
+                # A second normalization pass must not promote receipt-only
+                # event time into a broker timestamp.
+                timestamp_source = str(
+                    raw.get("timestamp_source") or normalized_ts.source
+                ).lower()
+                source_timestamp_valid = raw.get("source_timestamp_valid") is not False
+            timestamp_quality = str(raw.get("timestamp_quality") or "").lower()
+            if not source_timestamp_valid:
+                timestamp_quality = "synthetic"
+            elif timestamp_source in {
+                "received_at",
+                "received_ts",
+                "received_time",
+                "received_at_fallback",
+            }:
+                timestamp_quality = "received_at"
+            elif timestamp_quality not in {
+                "synthetic",
+                "invalid",
+                "unknown",
+                "received_at",
+            }:
+                timestamp_quality = (
+                    "exchange" if "exchange" in timestamp_source else "broker"
+                )
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
             bid = _coerce_float(
                 raw.get("bid")
@@ -13876,8 +14031,14 @@ class MarketDataManager:
                 depth_obj.get("sell") if isinstance(depth_obj, Mapping) else None
             )
             bid_ask_source = "missing"
+            depth_complete = bool(
+                isinstance(buy_levels, list)
+                and buy_levels
+                and isinstance(sell_levels, list)
+                and sell_levels
+            )
             if bid is not None and ask is not None:
-                bid_ask_source = "ws_full"
+                bid_ask_source = "ws_full" if depth_complete else "quote"
             elif depth_obj:
                 if isinstance(buy_levels, list) and buy_levels:
                     bid = _coerce_float((buy_levels[0] or {}).get("price"))
@@ -13941,7 +14102,7 @@ class MarketDataManager:
                 "volume_delta_reset": bool(raw.get("volume_delta_reset")),
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
-                "depth_available": bool(depth_obj),
+                "depth_available": depth_complete,
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
                 "tick_direction": tick_direction or None,
@@ -13951,7 +14112,9 @@ class MarketDataManager:
                     else ("market_tick" if tick_direction else None)
                 ),
                 "timestamp": ts_py,
+                "received_at": self._tick_received_at_epoch(raw),
                 "timestamp_source": timestamp_source,
+                "timestamp_quality": timestamp_quality,
                 "source_timestamp_valid": source_timestamp_valid,
                 "source": (
                     "poll"
@@ -14831,13 +14994,15 @@ class MarketDataManager:
                 fetched_rows = len(rows or [])
                 rows = list(rows or [])
                 recent_rows = rows[-requested_bars:]
-                # A mid-session tail cannot reconstruct the 09:15-09:45 range.
-                # Retain that small anchor alongside the normal recent window.
+                # Option session VWAP cannot be reconstructed from opening
+                # candles plus a late tail: the intervening traded volume is
+                # part of the weighted price. Retain the complete latest
+                # session already present in this broker response, alongside
+                # the requested recent history for readiness/indicators.
+                # No additional fetch or alternate history owner is needed.
                 if (
                     normalized.endswith(("CE", "PE"))
                     and normalized_interval == "minute"
-                    and str(os.getenv("ORB_ENABLED", "true")).strip().lower()
-                    in {"1", "true", "yes", "on"}
                     and rows
                 ):
                     timestamped_rows = [
@@ -14853,16 +15018,16 @@ class MarketDataManager:
                         session_open = latest_local.normalize() + pd.Timedelta(
                             hours=9, minutes=15
                         )
-                        cutoff = session_open + pd.Timedelta(minutes=30)
-                        opening_rows = [
+                        session_close = session_open + pd.Timedelta(minutes=375)
+                        session_rows = [
                             (timestamp, row)
                             for timestamp, row in timestamped_rows
                             if session_open
                             <= pd.Timestamp(timestamp).tz_convert("Asia/Kolkata")
-                            <= cutoff
+                            < session_close
                         ]
                         recent_timestamped = timestamped_rows[-requested_bars:]
-                        retained = dict([*opening_rows, *recent_timestamped])
+                        retained = dict([*session_rows, *recent_timestamped])
                         rows = [retained[key] for key in sorted(retained)]
                     else:
                         rows = recent_rows

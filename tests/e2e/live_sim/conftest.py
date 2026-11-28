@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
 import nifty_scalper_bot.execution.order_manager_core as order_manager_core
+import nifty_scalper_bot.execution.readiness as readiness
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.core.message_bus import MessageBus
 from nifty_scalper_bot.core.strategy_manager import (
@@ -388,6 +390,12 @@ class LiveSimSystem:
                 ask=float(latest_tick.get("ask", entry)),
                 ltp=float(latest_tick.get("ltp", entry)),
             )
+        if self._entry_order_id and self._filled_entry_seen:
+            # Broker fill and market ticks must use the same virtual clock.
+            # Production exchange-time parsing must not be weakened for tests.
+            bracket = self.bracket_manager.get_bracket(self._entry_order_id)
+            if bracket is not None and bracket.entry_confirmed:
+                bracket.entry_fill_ts = self.clock.time()
 
     def _on_closed_bar(self, bar: dict[str, Any]) -> None:
         symbol = str(bar.get("symbol") or "")
@@ -564,6 +572,9 @@ def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
         order_manager_core, "get_time_status", lambda: (True, "live_sim_market_open")
     )
     clock = VirtualClock(datetime(2026, 7, 15, 9, 35, tzinfo=IST))
+    # Quote readiness must use the same event clock as the simulated exchange.
+    # Replace only this module's clock, not the process-wide wall clock.
+    monkeypatch.setattr(readiness, "time", SimpleNamespace(time=clock.time))
     recorder = EventRecorder(clock)
     broker = SimulatedBroker(clock, recorder)
     exchange = SimulatedExchange(clock, broker, recorder)

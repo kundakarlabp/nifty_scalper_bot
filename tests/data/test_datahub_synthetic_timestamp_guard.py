@@ -78,4 +78,48 @@ def test_received_at_quality_preserved_when_it_is_the_only_valid_time_proof() ->
 
     assert quote is not None
     assert quote["timestamp_quality"] == "received_at"
-    assert quote["hard_readiness_eligible"] is True
+    assert quote["hard_readiness_eligible"] is False
+    assert quote["tradable_quote"] is False
+
+
+def test_partial_book_and_explicit_nontradable_state_are_never_upgraded() -> None:
+    hub = DataHub(_MdmNoop())
+    symbol = "NFO:NIFTY26JUL24000CE"
+    hub.ingest_tick_sync(
+        _quote_payload(
+            symbol=symbol,
+            source="ws_full",
+            timestamp=pd.Timestamp.utcnow().isoformat(),
+            depth={
+                "buy": [{"price": 99.5, "quantity": 65}],
+                "sell": [],
+            },
+            tradable_quote=False,
+        )
+    )
+    quote = hub.get_quote(symbol, allow_pull=False)
+
+    assert quote is not None
+    assert quote["depth_available"] is False
+    assert quote["tradable_quote"] is False
+    assert symbol in hub._last_ws_arrival
+    hub.close()
+
+
+def test_explicit_invalid_event_proof_cannot_be_rehabilitated_by_timestamp() -> None:
+    hub = DataHub(_MdmNoop())
+    symbol = "NFO:NIFTY26JUL24000PE"
+    hub.ingest_tick_sync(
+        _quote_payload(
+            symbol=symbol,
+            source="ws",
+            timestamp=pd.Timestamp.utcnow().isoformat(),
+            source_timestamp_valid=False,
+        )
+    )
+    quote = hub.get_quote(symbol, allow_pull=False)
+    assert quote is not None
+    assert quote["timestamp_quality"] == "invalid"
+    assert quote["hard_readiness_eligible"] is False
+    assert quote["tradable_quote"] is False
+    hub.close()

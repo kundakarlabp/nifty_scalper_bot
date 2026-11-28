@@ -90,3 +90,19 @@ def test_discordant_millisecond_timestamp_uses_parsed_exchange_time(
     quote = hub.get_quote(SYMBOL, allow_pull=False)
     assert quote is not None
     assert abs(quote["timestamp_ms"] - payload["timestamp_ms"]) >= 59_000.0
+
+
+def test_receipt_only_canonical_tick_never_becomes_broker_time_proof() -> None:
+    hub = DataHub(MarketDataManager(kite=None))
+    payload = _canonical_tick()
+    payload["timestamp_source"] = "received_at"
+    payload.pop("timestamp_quality")
+
+    hub.ingest_tick_sync(payload)
+    quote = hub.get_quote(SYMBOL, allow_pull=False)
+
+    assert quote is not None
+    assert quote["timestamp_quality"] == "received_at"
+    assert quote["tradable_quote"] is False
+    assert quote["hard_readiness_eligible"] is False
+    hub.close()

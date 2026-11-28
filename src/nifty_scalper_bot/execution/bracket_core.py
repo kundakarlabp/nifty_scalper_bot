@@ -8,8 +8,21 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- LIVE executable bid/ask cache ages from broker event time, never receipt time.
+- _record_trade_quality_shadow separates cached top bids from same-tick
+  full-lot, timestamp-attested bid evidence for research only; never controls stops.
+- _is_replayed_protection_tick permanently vetoes provably pre-fill or
+  out-of-order exchange events, retaining legitimate same-second updates.
+- _range_vwap_underlying_exit_action reuses the existing protective/target exit
+  dispatcher with a verified active futures cache and frozen session-VWAP
+  invalidation/target carried through the canonical TradePlan provenance.
+- _time_stop_action enforces the Range VWAP strategy-specific maximum hold
+  regardless of the optional global stalled-position time-stop setting.
 - Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
   without resetting the original trade clock, protective ratchet or exit state.
+- Broker order completion cannot close a residual position; emergency market
+  flatten verifies signed net residual after terminal cancellation.
+- LIVE bracket-specific flatness checks require exact broker product identity.
 - reconcile_symbol_flat has an opt-in broker-filled-stop settlement mode for
   ghost cleanup: journal a proven protective exit before removing the bracket;
   defer on missing fill or unresolved ledger accounting.
@@ -27,8 +40,12 @@ Owns / does NOT own:
 Safe-edit notes:
 - Live money and thread-sensitive (RLock-guarded). Preserve locking and the
   exit-trigger logic; a missed/duplicated exit is a real financial risk.
+- Initial exchange stop placement remains unverified until exact broker readback;
+  an ambiguous failed amend requires reconciliation before another modify.
 - Linked-portfolio group exits are currently broker-truth diagnostic only;
   this owner never blindly submits a portfolio leg or claims flat by intent.
+- Every ordered protection tick is assessed even when second-resolution Kite
+  exchange timestamps repeat; a failed deferred exit must not kill the worker.
 """
 
 from __future__ import annotations
@@ -199,20 +216,13 @@ def _existing_owner(
 STALE_TICK_ARM_WINDOW_SEC = 5.0
 
 
-def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
-    """Return broker event time, then explicit receipt time, as epoch seconds."""
-    raw = tick.get("exchange_timestamp") or tick.get("timestamp")
-    if raw is not None:
-        if hasattr(raw, "timestamp"):
-            try:
-                return float(raw.timestamp())
-            except (TypeError, ValueError, OSError):
-                pass
-        elif isinstance(raw, (int, float)):
-            value = float(raw)
-            return value / 1000.0 if value > 1e12 else value
-
+def tick_exchange_epoch(
+    tick: Mapping[str, Any], *, allow_receipt: bool = True
+) -> float | None:
+    """Read event epoch; receipt fallback is for legacy protection routing only."""
     for key in (
+        "exchange_timestamp",
+        "timestamp",
         "last_trade_time",
         "last_traded_time",
         "last_trade_timestamp",
@@ -220,17 +230,34 @@ def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
         "received_ts",
         "received_time",
     ):
-        value = tick.get(key)
-        if hasattr(value, "timestamp"):
+        if not allow_receipt and key.startswith("received_"):
+            break
+        raw = tick.get(key)
+        if raw is None or isinstance(raw, bool):
+            continue
+        if isinstance(raw, str):
             try:
-                return float(value.timestamp())
-            except (TypeError, ValueError, OSError):
+                parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            except ValueError:
                 continue
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            epoch = float(value)
-            return epoch / 1000.0 if epoch > 1e12 else epoch
+            # Never guess the timezone of an ambiguous string.
+            if parsed.tzinfo is None:
+                continue
+            value = parsed.timestamp()
+        elif isinstance(raw, (int, float)):
+            value = float(raw)
+            if value > 1e12:
+                value /= 1000.0
+        elif hasattr(raw, "timestamp"):
+            try:
+                value = float(raw.timestamp())
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+        else:
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return value
     return None
-
 
 _PROTECTIVE_EXIT_REASON_TOKENS = (
     "HARD_SL_BREACH",
@@ -639,7 +666,8 @@ class BracketManager:
         if SafeATRProvider and indicator_engine:
             self._atr_provider = SafeATRProvider(indicator_engine, max_cache_age=60.0)
         self._recent_ticks: Dict[str, deque] = {}
-        # symbol -> (bid, ask, captured_at). Stop breach must be judged on the
+        # symbol -> (bid, ask, event time in LIVE; receipt time in replay).
+        # Stop breach must be judged on the
         # side the position is actually liquidated into, not on LTP.
         self._exit_quotes: Dict[str, tuple[float, float, float]] = {}
         self._exit_quote_max_age = max(
@@ -843,6 +871,7 @@ class BracketManager:
                 "modify_unavailable",
                 "cancel_unconfirmed",
                 "cancel_unavailable",
+                "cancel_preflight_unverified",
             )
         )
         return bool(
@@ -1273,7 +1302,10 @@ class BracketManager:
         )
         if not (terminal_unfilled or authoritatively_absent):
             return
-        if not self._position_flat_for_symbol(bracket.symbol):
+        if not self._position_flat_for_symbol(
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        ):
             return
         LOGGER.warning(
             "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s "
@@ -2212,6 +2244,151 @@ class BracketManager:
         self._sync_exchange_protective_stop(target_bracket)
         return True
 
+    def _record_trade_quality_shadow(
+        self,
+        bracket: BracketState,
+        ltp: float,
+        *,
+        tick: Mapping[str, Any] | None = None,
+        exchange_ts: float | None = None,
+    ) -> None:
+        """Store read-only bids; separately attest FULL, fresh, whole-lot depth.
+
+        This uses only the SAME tick already entering the stop owner. A cached
+        bid or favorable LTP without attested depth remains observational only.
+        The method cannot block hard stops, submit orders or upgrade readiness.
+        """
+        try:
+            price, source = self._executable_exit_price(bracket, ltp)
+            now = time.time()
+            config = bracket.trailing_config
+            path = config.setdefault("_research_executable_path", [])
+            if not isinstance(path, list):
+                return
+            previous = path[-1] if path else None
+            must_keep = bool(
+                price <= float(bracket.sl_trigger_price or 0.0)
+                if bracket.side == "BUY"
+                else price >= float(bracket.sl_trigger_price or 0.0)
+            )
+            if (
+                previous is not None
+                and now - float(previous["ts"]) < 0.20
+                and not must_keep
+            ):
+                return
+            if len(path) >= 2048:
+                config["_research_executable_path_truncated"] = True
+                del path[:256]
+            quote = self._exit_quotes.get(bracket.symbol)
+            observed_bid = (
+                float(quote[0])
+                if source == "bid" and quote is not None
+                else None
+            )
+            observed_ask = (
+                float(quote[1])
+                if source == "bid" and quote is not None
+                else None
+            )
+            captured_at = (
+                float(quote[2])
+                if source == "bid" and quote is not None
+                else None
+            )
+            required_qty = int(bracket.remaining_quantity or 0)
+            top_bid_qty = None
+            full_lot_proven = False
+            market_age_ms = None
+            # A genuine exchange event must carry the canonical aware clock;
+            # wall-clock receive time or a naive broker datetime cannot prove
+            # when the bid was available. Retain uncertainty as uncertainty.
+            if (
+                source == "bid"
+                and bracket.side == "BUY"
+                and isinstance(tick, Mapping)
+                and exchange_ts is not None
+                and tick.get("source_timestamp_valid") is True
+                and str(tick.get("timestamp_source") or "") in {
+                    "exchange_timestamp", "last_trade_time",
+                    "last_traded_time", "last_trade_timestamp",
+                    "exchange_update_time", "last_price_time",
+                }
+                and str(tick.get("source") or "").lower() in {
+                    "ws", "ws_full", "websocket", "websocket_full",
+                }
+                and normalize_symbol(str(tick.get("symbol") or ""))
+                == bracket.symbol
+            ):
+                stamp = tick.get("timestamp")
+                if isinstance(stamp, str):
+                    stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if isinstance(stamp, datetime) and stamp.tzinfo is not None:
+                    event_epoch = stamp.timestamp()
+                    market_age_ms = round((now - event_epoch) * 1000.0, 2)
+                    depth = tick.get("depth")
+                    buy = depth.get("buy") if isinstance(depth, Mapping) else None
+                    level = (
+                        buy[0]
+                        if isinstance(buy, list) and buy
+                        and isinstance(buy[0], Mapping)
+                        else None
+                    )
+                    if level is not None:
+                        try:
+                            top_bid_qty = float(level.get("quantity"))
+                            depth_bid = float(level.get("price"))
+                            tick_ltp = float(
+                                tick.get("ltp") or tick.get("last_price")
+                            )
+                            resolved_bid, resolved_ask, _, _ = (
+                                resolve_quote_bid_ask_spread(tick)
+                            )
+                            full_lot_proven = bool(
+                                required_qty > 0
+                                and top_bid_qty >= required_qty
+                                and math.isfinite(top_bid_qty)
+                                and depth_bid > 0
+                                and math.isfinite(depth_bid)
+                                and observed_bid is not None
+                                and observed_ask is not None
+                                and abs(depth_bid - observed_bid) < 0.001
+                                and resolved_bid is not None
+                                and resolved_ask is not None
+                                and abs(resolved_bid - observed_bid) < 0.001
+                                and abs(resolved_ask - observed_ask) < 0.001
+                                and abs(tick_ltp - ltp) < 0.001
+                                and abs(event_epoch - float(exchange_ts)) <= 0.001
+                                and 0 <= market_age_ms <= 2000.0
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            full_lot_proven = False
+            observation = {
+                "ts": round(now, 4),
+                "bid": observed_bid,
+                "ask": observed_ask,
+                "source": source,
+                "quote_age_ms": (
+                    round(max(0.0, (now - captured_at) * 1000.0), 2)
+                    if captured_at is not None
+                    else None
+                ),
+                "market_age_ms": market_age_ms,
+                "full_lot_bid_proven": full_lot_proven,
+                "top_bid_qty": top_bid_qty,
+                "required_qty": required_qty,
+                "ltp": round(float(ltp), 4),
+                "virtual_stop": round(float(bracket.sl_trigger_price or 0.0), 4),
+                "exchange_stop": getattr(bracket, "exchange_stop_trigger_price", None),
+            }
+            path.append(observation)
+            config["_research_last_quote"] = observation
+        except Exception:  # noqa: BLE001 - telemetry cannot prevent an exit
+            LOGGER.debug(
+                "TRADE_QUALITY_SHADOW_CAPTURE_UNAVAILABLE symbol=%s",
+                bracket.symbol, exc_info=True,
+            )
+
     # --------------------------------------------------------------------------
     # 3. EXECUTION LOGIC (The "Sniper")
     # --------------------------------------------------------------------------
@@ -2223,6 +2400,7 @@ class BracketManager:
         exchange_ts: float | None = None,
         *,
         defer_submission: bool = False,
+        tick: Mapping[str, Any] | None = None,
     ) -> None:
         """Process one tick through trailing and hard SL/TP evaluation.
 
@@ -2271,12 +2449,8 @@ class BracketManager:
                 # pre-fill/replayed signal tick — never evaluate it against
                 # this bracket. Bounded window so clock skew cannot suppress
                 # genuine SL/TP evaluation beyond the first seconds.
-                if (
-                    b is not None
-                    and exchange_ts is not None
-                    and b.entry_fill_ts is not None
-                    and exchange_ts < b.entry_fill_ts
-                    and (now_ts - b.entry_fill_ts) <= STALE_TICK_ARM_WINDOW_SEC
+                if b is not None and self._is_replayed_protection_tick(
+                    b, exchange_ts, now_ts
                 ):
                     self._log_throttled(
                         "debug",
@@ -2332,16 +2506,26 @@ class BracketManager:
             time_stop_progress_crossed = False
             # Keep all bracket field mutations atomic against watchdog reads.
             with self._lock:
-                if tick_id is not None and bracket.last_processed_tick_id == tick_id:
-                    continue
+                # Kite FULL exchange timestamps are second-resolution: a
+                # changed price or depth update within the same second is a
+                # new protective event, not a duplicate. Existing exit latches
+                # and monotonic broker ratchets own idempotency.
                 if tick_id is not None:
                     bracket.last_processed_tick_id = tick_id
+                    bracket.trailing_config["_last_protection_exchange_ts"] = (
+                        float(exchange_ts)
+                    )
                 # Track previous tick for jump/cross stop-loss detection.
                 bracket.previous_ltp = float(
                     bracket.last_ltp or bracket.entry_price or ltp
                 )
                 bracket.last_ltp = ltp
                 old_committed_sl = float(bracket.sl_trigger_price or 0.0)
+                # Hot-path shadow capture is O(1), cache-only, and never
+                # feeds back into the broker/stop/target decision.
+                self._record_trade_quality_shadow(
+                    bracket, ltp, tick=tick, exchange_ts=exchange_ts
+                )
 
                 # Update high/low water marks (atomic operations)
                 if bracket.side == "BUY":
@@ -2524,8 +2708,74 @@ class BracketManager:
             )
             self._fire_exits_batch(exits_to_fire)
 
+    @staticmethod
+    def _is_replayed_protection_tick(
+        bracket: BracketState, exchange_ts: float | None, now_ts: float
+    ) -> bool:
+        """Reject pre-fill and older exchange events without losing same-second ticks."""
+        if exchange_ts is None:
+            return False
+        try:
+            event_epoch = float(exchange_ts)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        if not math.isfinite(event_epoch):
+            return True
+        config = bracket.trailing_config
+        try:
+            previous = float(config.get("_last_protection_exchange_ts") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            previous = 0.0
+        if math.isfinite(previous) and previous > 0 and event_epoch < previous - 0.001:
+            return True
+        if bracket.entry_fill_ts is None:
+            return False
+        try:
+            fill_epoch = float(bracket.entry_fill_ts)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(fill_epoch) or event_epoch >= fill_epoch:
+            return False
+        # A tick from an earlier exchange second is definitely pre-fill even
+        # if queued for more than the short startup grace period. Fractional
+        # exchange timestamps can likewise prove the event preceded the fill.
+        if event_epoch < math.floor(fill_epoch) or not event_epoch.is_integer():
+            return True
+        # Kite often stamps several updates with the same whole second.
+        # During initial arming keep the existing conservative pre-fill veto;
+        # afterwards allow updates that cannot be ordered within that second.
+        return now_ts - fill_epoch <= STALE_TICK_ARM_WINDOW_SEC
+
     def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> bool:
-        """Cache executable bid/ask from a full tick and report capture success."""
+        """Cache executable bid/ask only from an eligible post-fill event."""
+        # Cache receipt time alone cannot make an old exchange event safe:
+        # the watchdog consumes this quote even when core.on_tick rejects it.
+        live = self._is_live_execution()
+        event_epoch = tick_exchange_epoch(tick, allow_receipt=not live)
+        now_ts = time.time()
+        if live:
+            # Receipt-only clocks cannot attest an executable live book.
+            if event_epoch is None or not (
+                0.0 <= now_ts - event_epoch <= self._exit_quote_max_age
+            ):
+                return False
+            captured_at = event_epoch
+        else:
+            # Preserve broker-free replay's virtual exchange clock.
+            captured_at = now_ts
+        if event_epoch is not None:
+            with self._lock:
+                for entry_id in self._symbol_map.get(symbol, ()):
+                    bracket = self._brackets.get(entry_id)
+                    if (
+                        bracket is not None
+                        and bracket.entry_confirmed
+                        and bracket.remaining_quantity > 0
+                        and self._is_replayed_protection_tick(
+                            bracket, event_epoch, now_ts
+                        )
+                    ):
+                        return False
         try:
             bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
         except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
@@ -2540,7 +2790,7 @@ class BracketManager:
             or ask < bid
         ):
             return False
-        self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
+        self._exit_quotes[symbol] = (float(bid), float(ask), captured_at)
         return True
 
     def _executable_exit_price(
@@ -2680,6 +2930,10 @@ class BracketManager:
                     "trigger_price_source": target_exit_src,
                     "reason": "HARD_TP_BREACH",
                 }
+
+        range_exit = self._range_vwap_underlying_exit_action(bracket, ltp)
+        if range_exit is not None:
+            return range_exit
 
         time_stop = self._time_stop_action(bracket, ltp)
         if time_stop is not None:
@@ -2840,6 +3094,28 @@ class BracketManager:
                 except Exception as exc:  # noqa: BLE001 - exits remain mandatory
                     self._mark_persistence_degraded("exit_trigger_persist_failed", exc)
                 self._process_exit_state(bracket, action, now=time.time())
+            except Exception as exc:  # noqa: BLE001 - preserve exit worker liveness
+                # A broker lookup can raise before or after an order request.
+                # Keep its intent unresolved; never assume flat or retry an
+                # uncertain broker submission merely because a callback failed.
+                if item is not None:
+                    failed_bracket = item[0]
+                    with self._lock:
+                        failed_bracket.exit_pending = True
+                        failed_bracket.last_exit_error = (
+                            f"exit_dispatch_exception:{type(exc).__name__}"
+                        )
+                        failed_bracket.updated_at = time.time()
+                    self._log_throttled(
+                        "error",
+                        f"exit_dispatch_exception:{failed_bracket.bracket_id}",
+                        5.0,
+                        "BRACKET_EXIT_DISPATCH_FAILED bracket_id=%s symbol=%s "
+                        "error_type=%s unresolved=True",
+                        failed_bracket.bracket_id,
+                        failed_bracket.symbol,
+                        type(exc).__name__,
+                    )
             finally:
                 if item is not None:
                     with self._lock:
@@ -3038,6 +3314,7 @@ class BracketManager:
             qty,
             reason,
         )
+        decision_before = getattr(self.order_manager, "_last_order_decision", None)
         submit = self.submit_exit_order(
             symbol=symbol,
             qty=qty,
@@ -3213,6 +3490,73 @@ class BracketManager:
                         submit.error_message,
                     )
                     self._escalate_exit_locked(bracket, "fatal_or_retry_exhausted")
+
+        # The old exchange stop was retired before this alternative exit.
+        # Only a proven *pre-broker* rejection permits restoring protection:
+        # an attempted/uncertain broker exit may still execute, so rearming
+        # then could create a second SELL and reverse the position.
+        decision_raw = getattr(self.order_manager, "_last_order_decision", None)
+        decision = decision_raw if isinstance(decision_raw, Mapping) else {}
+        if (
+            not submit.accepted
+            and decision_raw is not decision_before
+            and decision.get("broker_attempted") is False
+            and self._is_live_execution()
+            and self._exchange_protective_stop_enabled
+            and not bracket.exchange_stop_order_id
+            and bracket.exit_state
+            != BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+            and not getattr(bracket, "_market_escalation_fired", False)
+        ):
+            try:
+                signed_qty = self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol, product=bracket.product
+                )
+                expected_qty = int(bracket.remaining_quantity) * (
+                    1 if bracket.side == "BUY" else -1
+                )
+                if signed_qty != expected_qty or expected_qty == 0:
+                    raise PositionSnapshotError("residual_quantity_or_side_unverified")
+                broker = getattr(self.order_manager, "_broker", None)
+                fetch_orders = getattr(broker, "get_orders", None)
+                orders = fetch_orders() if callable(fetch_orders) else None
+                if not isinstance(orders, list) or any(
+                    not isinstance(order, Mapping) for order in orders
+                ):
+                    raise ValueError("broker_orderbook_unavailable_for_rearm")
+                reducing_side = "SELL" if bracket.side == "BUY" else "BUY"
+                for order in orders:
+                    order_symbol = normalize_symbol(
+                        str(order.get("tradingsymbol") or order.get("symbol") or "")
+                    )
+                    order_product = str(order.get("product") or "").upper()
+                    order_side = str(
+                        order.get("transaction_type") or order.get("side") or ""
+                    ).upper()
+                    status = str(order.get("status") or "").upper()
+                    if (
+                        order_symbol == normalize_symbol(bracket.symbol)
+                        and order_product in {"", str(bracket.product).upper()}
+                        and order_side == reducing_side
+                        and status not in {
+                            "COMPLETE", "CANCELLED", "CANCELED", "REJECTED"
+                        }
+                    ):
+                        raise ValueError("competing_reducing_order_prevents_rearm")
+                rearmed = bool(self._ensure_exchange_protective_stop(bracket))
+                if not rearmed:
+                    LOGGER.critical(
+                        "EXIT_PREBROKER_REARM_UNVERIFIED bracket_id=%s symbol=%s",
+                        bracket.bracket_id,
+                        bracket.symbol,
+                    )
+            except Exception as exc:  # noqa: BLE001 - never infer protection
+                LOGGER.critical(
+                    "EXIT_PREBROKER_REARM_BLOCKED bracket_id=%s symbol=%s error_type=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    type(exc).__name__,
+                )
         self._reconcile_exit_state(bracket, requested_by="post_submit")
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
@@ -3326,16 +3670,53 @@ class BracketManager:
                     bracket.bracket_id,
                     stuck_order_id,
                 )
+            # A partially filled cancelled exit can leave fewer contracts
+            # than the bracket's last recorded quantity. A second SELL for
+            # the old size could open an unintended short position.
+            try:
+                signed_qty = int(
+                    self._authoritative_position_snapshot().quantity_for(symbol)
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown is not a quantity
+                LOGGER.critical(
+                    "EXIT_ESCALATION_RESIDUAL_UNVERIFIED bracket_id=%s symbol=%s "
+                    "reason=broker_positions_unavailable error_type=%s",
+                    bracket.bracket_id,
+                    symbol,
+                    type(exc).__name__,
+                )
+                return
+            if signed_qty == 0:
+                self._reconcile_exit_state(
+                    bracket, requested_by="escalation_cancelled_flat"
+                )
+                return
+            direction_matches = (
+                signed_qty > 0 if bracket.side == "BUY" else signed_qty < 0
+            )
+            residual_qty = abs(signed_qty)
+            if not direction_matches or residual_qty > qty:
+                LOGGER.critical(
+                    "EXIT_ESCALATION_RESIDUAL_MISMATCH bracket_id=%s symbol=%s "
+                    "broker_signed_qty=%s bracket_qty=%s expected_side=%s",
+                    bracket.bracket_id,
+                    symbol,
+                    signed_qty,
+                    qty,
+                    side,
+                )
+                return
             with self._lock:
+                bracket.remaining_quantity = residual_qty
                 bracket.exit_order_id = None
                 bracket.pending_exit_order_id = None
-            if not symbol or qty <= 0:
+            if not symbol or residual_qty <= 0:
                 return
             try:
                 order_id = self.order_manager.place_order(
                     symbol=symbol,
                     side=side,
-                    quantity=qty,
+                    quantity=residual_qty,
                     order_type="MARKET",
                     tag=f"EXIT_MKT_{bracket.bracket_id[:8]}",
                     check_risk=False,
@@ -3364,7 +3745,7 @@ class BracketManager:
                     bracket.bracket_id,
                     symbol,
                     order_id,
-                    qty,
+                    residual_qty,
                 )
             else:
                 LOGGER.critical(
@@ -3397,7 +3778,7 @@ class BracketManager:
                 return
             exchange_ts = tick_exchange_epoch(tick)
             self._capture_exit_quote(normalize_symbol(symbol), tick)
-            self.on_tick(symbol, float(ltp), exchange_ts)
+            self.on_tick(symbol, float(ltp), exchange_ts, tick=tick)
         except Exception as e:
             LOGGER.error("Failure in BracketManager.on_tick_event: %s", e)
 
@@ -3631,6 +4012,88 @@ class BracketManager:
         # Never let an implausible cost estimate swallow the whole stop band.
         return min(cost, entry * 0.02)
 
+    def _range_vwap_underlying_exit_action(
+        self, bracket: BracketState, ltp: float
+    ) -> dict[str, Any] | None:
+        """Exit a verified VWAP pilot when its frozen futures thesis resolves.
+
+        Read only the existing active-futures cache; never query the broker
+        synchronously on the protective exit path. An absent, rotated or stale
+        futures quote cannot veto the ordinary option stop/target/time stop.
+        """
+        proof = bracket.trade_provenance or {}
+        if (
+            proof.get("setup_name") != "session_vwap_reentry_live"
+            or bracket.side != "BUY"
+            or bracket.remaining_quantity <= 0
+        ):
+            return None
+        source = self._market_data
+        # DataHub is the runtime facade; its existing cached-only resolver
+        # is named get_active_futures_symbol. Keep direct-MDM compatibility.
+        active = getattr(source, "get_active_futures_symbol", None)
+        if not callable(active):
+            active = getattr(source, "get_active_nifty_future_symbol_cached", None)
+        if not callable(active):
+            active = getattr(
+                getattr(source, "_mdm", None),
+                "get_active_nifty_future_symbol_cached",
+                None,
+            )
+        cached_ltp = getattr(source, "get_cached_ltp", None)
+        if not callable(active) or not callable(cached_ltp):
+            return None
+        # This independent age signal is optional; the canonical cached_ltp
+        # max_age_seconds check below is mandatory even when it is absent.
+        age_getter = getattr(source, "time_since_last_tick", None)
+        if not callable(age_getter):
+            age_getter = getattr(
+                getattr(source, "_mdm", None), "time_since_last_tick", None
+            )
+        symbol = str(proof.get("range_futures_contract") or "")
+        side = str(proof.get("range_futures_side") or "").upper()
+        if not symbol or side not in {"CE", "PE"}:
+            return None
+        try:
+            if normalize_symbol(active()) != normalize_symbol(symbol):
+                return None
+            target = float(proof["range_futures_target"])
+            invalidation = float(proof["range_futures_invalidation"])
+            if callable(age_getter):
+                age = float(age_getter(symbol))
+                if not math.isfinite(age) or not 0 <= age <= 2.0:
+                    return None
+            future_price = cached_ltp(
+                symbol, max_age_seconds=2.0, require_ws=False
+            )
+            current = float(future_price)
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if (
+            not all(math.isfinite(v) and v > 0 for v in (target, invalidation, current))
+            or (side == "CE" and invalidation >= target)
+            or (side == "PE" and target >= invalidation)
+        ):
+            return None
+        at_target = current >= target if side == "CE" else current <= target
+        at_stop = current <= invalidation if side == "CE" else current >= invalidation
+        if not at_target and not at_stop:
+            return None
+        return {
+            "decision": (
+                BracketTickDecision.EXIT_STOP.value
+                if at_stop else BracketTickDecision.EXIT_TARGET.value
+            ),
+            "type": "SL" if at_stop else "FINAL_TP",
+            "price": ltp,
+            "qty": bracket.remaining_quantity,
+            "reason": (
+                "HARD_SL_BREACH RANGE_VWAP_FUTURES_INVALIDATION"
+                if at_stop else "RANGE_VWAP_FUTURES_TARGET"
+            ),
+            "trigger_price_source": "active_future_cached_ltp",
+        }
+
     def _time_stop_action(
         self, bracket: BracketState, ltp: float
     ) -> dict[str, Any] | None:
@@ -3641,13 +4104,33 @@ class BracketManager:
         The trade is closed once it has been held past LIFECYCLE_TIME_STOP_MIN
         without ever reaching TIME_STOP_MIN_PROGRESS_R of its initial risk.
         """
-        if self._time_stop_seconds <= 0 or bracket.remaining_quantity <= 0:
+        if bracket.remaining_quantity <= 0:
             return None
         opened_at = float(bracket.entry_fill_ts or 0.0)
         if opened_at <= 0:
             return None
         held = time.time() - opened_at
-        if held < self._time_stop_seconds:
+        # The explicit Range VWAP maximum is independent of the shared
+        # stalled-position time-stop, which operators may disable or lengthen.
+        # A VWAP mean-reversion trade is a time-limited thesis. Reuse this
+        # canonical reduce-only exit path even when it briefly reached +0.5R,
+        # instead of holding past the decay window used to price its entry.
+        provenance = bracket.trade_provenance or {}
+        if provenance.get("setup_name") == "session_vwap_reentry_live":
+            try:
+                max_minutes = float(provenance["range_option_hold_minutes"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                max_minutes = 0.0
+            if math.isfinite(max_minutes) and 5.0 <= max_minutes <= 30.0:
+                if held >= max_minutes * 60.0:
+                    return {
+                        "decision": BracketTickDecision.EXIT_STOP.value,
+                        "type": "TIME_STOP",
+                        "price": ltp,
+                        "qty": bracket.remaining_quantity,
+                        "reason": f"RANGE_VWAP_MAX_HOLD held={int(held)}s",
+                    }
+        if self._time_stop_seconds <= 0 or held < self._time_stop_seconds:
             return None
         entry = float(bracket.entry_price or 0.0)
         initial_sl = float(bracket.initial_sl_trigger_price or bracket.sl_trigger_price or 0.0)
@@ -4599,7 +5082,10 @@ class BracketManager:
                             self._escalate_exit_locked(
                                 bracket, "broker_order_rejected_or_cancelled"
                             )
-            flat = self._position_flat_for_symbol(bracket.symbol)
+            flat = self._position_flat_for_symbol(
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
         except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
             with self._lock:
                 bracket.last_exit_error = f"reconcile_failed:{type(exc).__name__}:{exc}"
@@ -4627,6 +5113,30 @@ class BracketManager:
             filled,
         )
         if filled:
+            if self._is_live_execution() and not flat:
+                # An exchange order can be COMPLETE while the position still
+                # carries residual exposure, or the broker net snapshot is
+                # temporarily unavailable. Order fill is not flatness proof.
+                with self._lock:
+                    bracket.exit_pending = True
+                    bracket.position_flat_confirmed = False
+                    bracket.last_exit_error = "filled_order_position_not_proven_flat"
+                LOGGER.critical(
+                    "EXIT_FILLED_POSITION_UNRESOLVED bracket_id=%s symbol=%s "
+                    "order_id=%s filled_qty=%s reason=broker_not_proven_flat",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    order_id,
+                    filled_qty,
+                    extra={
+                        "event": "EXIT_FILLED_POSITION_UNRESOLVED",
+                        "bracket_id": bracket.bracket_id,
+                        "symbol": bracket.symbol,
+                        "order_id": order_id,
+                        "filled_qty": filled_qty,
+                    },
+                )
+                return False
             self._log_bracket_event(
                 "EXIT_FILLED",
                 bracket,
@@ -4715,7 +5225,15 @@ class BracketManager:
         )
         result: Mapping[str, Any] = {}
         if callable(getter):
-            history = getter(order_id)
+            try:
+                history = getter(order_id)
+            except Exception as exc:  # noqa: BLE001 - orderbook may still prove state
+                LOGGER.warning(
+                    "BROKER_ORDER_HISTORY_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                history = None
             if isinstance(history, Mapping):
                 result = history
                 state = str(history.get("status") or "").strip().upper()
@@ -4744,7 +5262,15 @@ class BracketManager:
                         return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
-            orders = getter()
+            try:
+                orders = getter()
+            except Exception as exc:  # noqa: BLE001 - unknown is not terminal
+                LOGGER.warning(
+                    "BROKER_ORDERBOOK_UNAVAILABLE order_id=%s error_type=%s",
+                    order_id,
+                    type(exc).__name__,
+                )
+                return result
             # Broker orderbooks are lists; a missing/malformed response is not
             # proof of cancellation or of a fill (also protects mock adapters).
             if not isinstance(orders, (list, tuple)):
@@ -4808,10 +5334,12 @@ class BracketManager:
         except (TypeError, ValueError, OverflowError):
             return 0
 
-    def _position_flat_for_symbol(self, symbol: str) -> bool:
+    def _position_flat_for_symbol(
+        self, symbol: str, *, product: str | None = None
+    ) -> bool:
         """Return flatness only from the canonical authoritative snapshot."""
         try:
-            return self._authoritative_position_quantity(symbol) == 0
+            return self._authoritative_position_quantity(symbol, product=product) == 0
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "EXIT_POSITION_SNAPSHOT_INVALID symbol=%s error=%s",
@@ -5017,11 +5545,13 @@ class BracketManager:
             status="FILLED" if closed else result.status.upper(),
         )
 
-    def _verify_position_closed(self, symbol: str) -> bool:
+    def _verify_position_closed(
+        self, symbol: str, *, product: str | None = None
+    ) -> bool:
         """Return true only when a complete authoritative snapshot proves flatness."""
         normalized = normalize_symbol(symbol)
         try:
-            return self._authoritative_position_quantity(normalized) == 0
+            return self._authoritative_position_quantity(normalized, product=product) == 0
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "POSITION_FLAT_VERIFY_FAILED symbol=%s error=%s",
@@ -5093,7 +5623,10 @@ class BracketManager:
                         True, False, str(order_id), 0, reason, status="UNFILLED"
                     )
 
-            position_closed = self._verify_position_closed(bracket.symbol)
+            position_closed = self._verify_position_closed(
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
             if not position_closed:
                 LOGGER.critical(
                     "MARKET_FALLBACK_POSITION_OPEN symbol=%s order_id=%s",
@@ -5705,6 +6238,36 @@ class BracketManager:
                                 record["broker_confirmed_at"] = time.time()
                                 trail_proven = True
                             break
+        if confirmed:
+            # Only an exact broker-orderbook readback may promote an adaptive
+            # virtual proposal to the owner of acknowledged protection.
+            with self._lock:
+                config = getattr(bracket, "trailing_config", None)
+                pending = (
+                    config.get("_adaptive_profit_pending_confirmation")
+                    if isinstance(config, dict)
+                    else None
+                )
+                if (
+                    isinstance(pending, Mapping)
+                    and str(pending.get("order_id") or "") == order_id
+                    and bracket.exchange_stop_trigger_price is not None
+                ):
+                    try:
+                        proposed = float(pending.get("stop"))
+                        proven = float(bracket.exchange_stop_trigger_price)
+                    except (TypeError, ValueError):
+                        proposed = 0.0
+                        proven = 0.0
+                    if proposed > 0 and abs(proven - proposed) <= 0.025:
+                        config["_adaptive_profit_has_ratcheted"] = True
+                        config["_adaptive_profit_confirmed_order_id"] = order_id
+                        config.pop("_adaptive_profit_pending_confirmation", None)
+                        provenance = getattr(bracket, "trade_provenance", None)
+                        if isinstance(provenance, dict):
+                            trace = provenance.get("adaptive_profit_lock")
+                            if isinstance(trace, dict):
+                                trace["broker_orderbook_confirmed_stop"] = proven
         if confirmed and (prior_reason or trail_proven):
             LOGGER.info(
                 "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=%s symbol=%s "
@@ -5863,7 +6426,9 @@ class BracketManager:
             bracket.exchange_stop_trigger_price = trigger
             bracket.exchange_stop_limit_price = limit_price
             bracket.exchange_stop_triggered_at = None
-            bracket.exchange_stop_degraded_reason = None
+            # Placement acceptance is not broker-resident stop proof.
+            # Keep the entry gate blocked until orderbook verification succeeds.
+            bracket.exchange_stop_degraded_reason = "broker_stop_placement_unverified"
             bracket.exchange_stop_modify_count = 0
             if stop_id not in bracket.linked_exit_order_ids:
                 bracket.linked_exit_order_ids.append(stop_id)
@@ -5928,7 +6493,7 @@ class BracketManager:
             # before another modification can be sent to this order ID.
             unsettled_broker_stop = str(
                 bracket.exchange_stop_degraded_reason or ""
-            ).startswith("broker_stop_")
+            ).startswith(("broker_stop_", "modify_failed"))
             recorded_qty = int(bracket.exchange_stop_quantity or 0)
             quantity_repair_needed = (
                 recorded_qty > 0
@@ -6055,11 +6620,14 @@ class BracketManager:
             )
         with self._lock:
             if modified:
+                # An accepted modify response is not exchange protection.
+                # Keep the stop explicitly degraded until exact orderbook proof
+                # promotes this revision in _confirm_exchange_protective_stop.
                 bracket.exchange_stop_quantity = desired_quantity
                 bracket.exchange_stop_trigger_price = trigger
                 bracket.exchange_stop_limit_price = limit_price
                 bracket.exchange_stop_modify_count = modify_count + 1
-                bracket.exchange_stop_degraded_reason = None
+                bracket.exchange_stop_degraded_reason = "broker_stop_modify_unverified"
             else:
                 bracket.exchange_stop_degraded_reason = "modify_failed"
             bracket.updated_at = time.time()
@@ -6176,7 +6744,9 @@ class BracketManager:
                 for value in timestamps
             ):
                 return False
-            if self._authoritative_position_quantity(bracket.symbol) != 0:
+            if self._authoritative_position_quantity(
+                bracket.symbol, product=bracket.product
+            ) != 0:
                 return False
             orders = get_orders(allow_cache_fallback=False)
         except Exception:  # noqa: BLE001 - missing broker proof is not expiry
@@ -6276,6 +6846,22 @@ class BracketManager:
             )
             return "filled"
 
+        # Do not disarm an exchange stop when neither history nor the exact
+        # broker orderbook proves that it is presently working.  An unknown
+        # status followed by a successful cancel can create a naked position.
+        if status_text not in {"OPEN", "TRIGGER PENDING"}:
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    f"cancel_preflight_unverified:{status_text or 'unknown'}"
+                )
+            LOGGER.critical(
+                "EXCHANGE_STOP_CANCEL_PREFLIGHT_UNVERIFIED order_id=%s symbol=%s status=%s",
+                order_id,
+                bracket.symbol,
+                status_text or "UNKNOWN",
+            )
+            return "unresolved"
+
         cancel = getattr(self.order_manager, "cancel_order", None)
         if not callable(cancel):
             with self._lock:
@@ -6359,7 +6945,12 @@ class BracketManager:
             bracket.exit_order_id = order_id
             bracket.pending_exit_order_id = order_id
             bracket.exit_order_type = "SL"
-            bracket.exit_reason = reason
+            # Broker-confirmed stop fill, not a competing local exit intent,
+            # is the authoritative terminal exit classification.
+            if reason and reason != "exchange_protective_stop_fill":
+                bracket.trade_provenance = dict(bracket.trade_provenance or {})
+                bracket.trade_provenance["stop_fill_prior_intent"] = reason
+            bracket.exit_reason = "exchange_protective_stop_fill"
             bracket.exit_pending = True
             bracket.exit_in_progress = False
             bracket.exit_submission_inflight = False
@@ -6399,6 +6990,26 @@ class BracketManager:
                 self._clear_exchange_stop_locked(bracket)
                 bracket.updated_at = time.time()
             return False
+
+        # A rearmed stop remains the sole reducing order during exit backoff,
+        # but its broker fill must still be recognized immediately.
+        with self._lock:
+            waiting_for_exit = not (
+                bracket.exit_order_id or bracket.pending_exit_order_id
+            ) and (
+                (
+                    bracket.next_exit_attempt_at is not None
+                    and now < float(bracket.next_exit_attempt_at)
+                )
+                or (
+                    bracket.exit_state
+                    == BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                    and not self._exit_continue_retry_after_escalation
+                )
+            )
+            if waiting_for_exit:
+                self._log_exit_pending_summary_locked(bracket, now)
+                return True
 
         upper_reason = str(reason or "").upper()
         hard_stop = any(
@@ -6487,9 +7098,11 @@ class BracketManager:
             raise PositionSnapshotError("broker get_positions is unavailable")
         return decode_position_snapshot(getter())
 
-    def _authoritative_position_quantity(self, symbol: str) -> int:
+    def _authoritative_position_quantity(
+        self, symbol: str, *, product: str | None = None
+    ) -> int:
         snapshot = self._authoritative_position_snapshot()
-        return abs(int(snapshot.quantity_for(normalize_symbol(symbol))))
+        return abs(int(snapshot.quantity_for(normalize_symbol(symbol), product=product)))
 
     def _decode_restored_bracket(
         self,

@@ -6,7 +6,11 @@ Runtime role:
 - Owns the startup sequence: broker auth, instrument load, subsystem bring-up,
   the data-hydration/readiness pipeline, and the live-arming gate.
 - Computes the canonical readiness/arming decision (history + quote freshness)
-  and pushes it to the runner.
+  and pushes it to the runner, synchronizing DataHub and regime indicator
+  readiness as genuine selected-option history becomes sufficient or regresses.
+- Requires both selected sides for evaluation, but recognizes independently
+  verified, affordable near-ATM basket candidates for execution readiness.
+- Wires the canonical completed-spot regime path, with aligned futures volume.
 
 Position in the pipeline (authoritative runtime path):
     THIS FILE (app.py)
@@ -4386,6 +4390,34 @@ def _compute_indicator_readiness(ctx: BotContext) -> bool:
     return False
 
 
+def _sync_indicator_readiness(ctx: BotContext, *, data_hard_ready: bool) -> bool:
+    """Refresh the startup-only hub flag from current canonical runtime readiness."""
+    ready = bool(data_hard_ready and _compute_indicator_readiness(ctx))
+    hub = getattr(ctx, "data_hub", None)
+    previous = getattr(hub, "indicators_ready", None)
+    hub_writable = hub is not None and (
+        hasattr(hub, "indicators_ready") or hasattr(hub, "__dict__")
+    )
+    if hub_writable and hub is not None:
+        hub.indicators_ready = ready
+    regime = getattr(ctx, "market_regime_manager", None)
+    if regime is not None and (
+        hasattr(regime, "indicators_ready") or hasattr(regime, "__dict__")
+    ):
+        regime.indicators_ready = ready
+    if hub_writable and previous is not ready:
+        LOGGER.info(
+            "INDICATOR_READINESS_SYNC ready=%s source=runtime_recompute",
+            ready,
+            extra={
+                "event": "INDICATOR_READINESS_SYNC",
+                "ready": ready,
+                "source": "runtime_recompute",
+            },
+        )
+    return ready
+
+
 def _build_canonical_active_basket(
     *,
     instrument_manager: InstrumentManager | None,
@@ -5830,9 +5862,9 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ):
         os.environ.setdefault(env_key, env_default)
 
-    regime_symbol = "NIFTY"
-    if poll_symbols:
-        regime_symbol = poll_symbols[0]
+    # Use the canonical NIFTY spot context, never whichever option or
+    # instrument happens to appear first in a polling configuration.
+    regime_symbol = "NSE:NIFTY"
 
     market_regime_detector = MarketRegimeDetector()
     market_regime_manager = MarketRegimeManager(
@@ -5841,6 +5873,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         indicators=indicator_engine,
         regime_settings={
             "symbol": regime_symbol,
+            "require_completed_evidence": True,
             "update_interval_sec": 60,
             "atr_trend_threshold": 1.5,
             "vol_threshold": 25.0,
@@ -5848,30 +5881,8 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         },
     )
 
-    # Wire Regime Detector to Stream
-    try:
-        if hasattr(data_hub, "subscribe_ticks") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
-            callback = cast(
-                Callable[[dict[str, Any]], None],
-                market_regime_detector.ingest_tick,
-            )
-            data_hub.subscribe_ticks(regime_symbol, callback)
-            LOGGER.debug(f"Regime detector subscribed via DataHub to {regime_symbol}")
-
-        elif hasattr(streamer, "register_handler") and hasattr(
-            market_regime_detector, "ingest_tick"
-        ):
-            streamer.register_handler(market_regime_detector.ingest_tick)
-            LOGGER.debug(f"Regime detector subscribed via Streamer to {regime_symbol}")
-
-    except Exception as exc:
-        LOGGER.error(
-            "Regime detector tick subscription failed",
-            extra={"event": "regime_subscription_failed", "symbol": regime_symbol},
-            exc_info=exc,
-        )
+    # RegimeManager refreshes the completed-candle snapshot. Raw quote ticks
+    # must not publish a competing directional regime or refresh its timestamp.
     data_dir = os.getenv("DATA_DIR", "data")
     persistent_state = PersistentStateManager(base_path=Path(data_dir))
 
@@ -6176,6 +6187,15 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
         except Exception as exc:
             LOGGER.error(f"Failed to initialize BracketManager: {exc}")
+
+    # KiteTicker postbacks share the existing authenticated market-data socket.
+    # The canonical OrderManager journals every update and processes only known
+    # orders; unknown/manual orders remain with broker-position reconciliation.
+    order_postback_binding = getattr(
+        websocket_manager, "set_order_update_callback", None
+    )
+    if callable(order_postback_binding):
+        order_postback_binding(order_manager.on_broker_stream_update)
 
     if risk_state is not None:
 
@@ -6594,6 +6614,24 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             strategy_runner.notify_entry_order_failed
         )
     market_data_manager.subscribe_bars(strategy_runner.ingest_historical_bar)
+
+    # Passive OHLCV parity must fire on closed canonical bars, even when no
+    # strategy is evaluated. Subscribe after the runner so its indicator
+    # projection has the first opportunity to ingest the same finalized bar.
+    from nifty_scalper_bot.core.research_observability import (
+        observe_completed_selected_pair,
+    )
+
+    def _audit_selected_bar(bar: dict[str, Any]) -> None:
+        try:
+            observe_completed_selected_pair(strategy_manager, bar, market_data_manager)
+        except Exception as exc:  # noqa: BLE001 - observation cannot block orders
+            LOGGER.warning(
+                "OPTION_PARITY_OBSERVER_FAILED error_type=%s",
+                type(exc).__name__,
+            )
+
+    market_data_manager.subscribe_bars(_audit_selected_bar)
     strategy_runner.restore_trades(persistent_state.load_trades())
     settings.enable_live = bool(live_toggle_env or live_simulation_mode)
     mandatory_paper = not live_possible
@@ -9426,17 +9464,29 @@ async def _ensure_active_basket_history(
     reqs = getattr(ctx, "history_hydration_requirement_by_symbol", {})
     cooldown = _runtime_hydration_cooldown_seconds()
     now_mono = time_module.monotonic()
-    for symbol, spec in requirements.items():
+    context_quality_repair_started = False
+    for symbol, spec in sorted(
+        requirements.items(), key=lambda item: not item[1]["gating"]
+    ):
         required = int(spec["required"])
         role = str(spec["role"])
         status = build_symbol_hydration_status(ctx, symbol, role, required)
         mdm_short = int(status.mdm_bars or 0) < required
         runner_short = int(status.runner_bars or 0) < required
         indicator_short = int(status.indicator_bars or 0) < required
-        quality_gating = bool(spec["gating"])
-        stale = quality_gating and required > 0 and not bool(status.latest_bar_fresh)
+        # Non-gating option context can become an execution candidate. Repair
+        # its stale/gapped history only with a current tradable quote, after
+        # required symbols, and at most once per readiness pass.
+        repair_context = bool(
+            role == "option_context"
+            and get_market_state() == MarketState.OPEN
+            and status.live_tick_fresh
+            and status.tradable_quote
+        )
+        quality_repair = bool(spec["gating"]) or repair_context
+        stale = quality_repair and required > 0 and not bool(status.latest_bar_fresh)
         gap = (
-            quality_gating
+            quality_repair
             and required > 0
             and not bool(status.recent_window_contiguous)
         )
@@ -9479,6 +9529,17 @@ async def _ensure_active_basket_history(
             ):
                 result[symbol] = {"skipped": True, "reason": "cooldown"}
                 continue
+            if repair_context and ensure_reason in {
+                "history_stale",
+                "recovery_gap_fill",
+            }:
+                if context_quality_repair_started:
+                    result[symbol] = {
+                        "skipped": True,
+                        "reason": "context_quality_repair_budget",
+                    }
+                    continue
+                context_quality_repair_started = True
             attempts[symbol] = now_mono
             reqs[symbol] = required
             hydration_phase = (
@@ -10083,28 +10144,62 @@ async def _recompute_and_push_runtime_readiness(
     if selected_pe:
         execution_ready_by_symbol[str(selected_pe)] = bool(pe_exec_ready)
     selected_options_data_exec_ready = bool(
-        ce_market_exec_ready and pe_market_exec_ready
+        ce_market_exec_ready or pe_market_exec_ready
     )
-    all_selected_options_exec_ready = bool(
-        selected_options_data_exec_ready and execution_capacity_ready
-    )
+    if live_mode and basket_hard_ready:
+        # The ATM pair still owns context/evaluation readiness. An alternative
+        # may contribute execution capacity only under the existing runner
+        # near-ATM policy, with its own token, delivery, history and quote proof.
+        eligible = getattr(
+            getattr(ctx, "strategy_runner", None),
+            "_live_entry_candidate_eligibility",
+            None,
+        )
+        for symbol in option_symbols:
+            if symbol in execution_ready_by_symbol or not callable(eligible):
+                continue
+            side = symbol[-2:]
+            if side not in {"CE", "PE"}:
+                continue
+            status = statuses.get(symbol)
+            expected_token = (selection.token_by_symbol or {}).get(symbol)
+            allowed, _, _ = eligible(symbol)
+            if not (
+                allowed
+                and status is not None
+                and expected_token is not None
+                and expected_token > 0
+                and status.token == expected_token
+                and status.ready_for_execution
+                and status.live_tick_fresh
+                and status.tradable_quote
+                and _runner_delivery_ready(symbol)
+            ):
+                continue
+            selected_options_data_exec_ready = True
+            decision = _minimum_lot_capacity(symbol, status)
+            execution_ready_by_symbol[symbol] = bool(
+                decision is not None and decision.determinate and decision.affordable
+            )
+        execution_capacity_ready = any(execution_ready_by_symbol.values())
+    selected_option_exec_ready = any(execution_ready_by_symbol.values())
     live_orders_armed = bool(
         live_mode
         and market_open
         and evaluation_ready
         and context_exec_ready
         and broker_ready
-        and all_selected_options_exec_ready
+        and selected_option_exec_ready
         and not pipeline_overloaded
     )
     missing = []
     if pipeline_overloaded:
         missing.append("data_pipeline_overloaded")
     if live_mode and selected_options_data_exec_ready and not execution_capacity_ready:
-        capacity_decisions = [
-            item for item in (ce_affordability, pe_affordability) if item is not None
-        ]
-        if capacity_decisions and all(item.determinate for item in capacity_decisions):
+        capacity_decisions = list(affordability_by_symbol.values())
+        if capacity_decisions and all(
+            item.get("determinate") for item in capacity_decisions
+        ):
             missing.append("minimum_lot_unaffordable")
         else:
             missing.append("execution_capacity_unavailable")
@@ -10156,18 +10251,22 @@ async def _recompute_and_push_runtime_readiness(
             missing.append("ce_exec_bars_missing")
         if pe_bars < option_execution_min_bars:
             missing.append("pe_exec_bars_missing")
-    if ce_status and not ce_status.tradable_quote:
-        missing.append("selected_ce_quote_missing")
-    if pe_status and not pe_status.tradable_quote:
-        missing.append("selected_pe_quote_missing")
-    if ce_status and not ce_status.depth_available:
-        missing.append("selected_ce_depth_missing")
-    if pe_status and not pe_status.depth_available:
-        missing.append("selected_pe_depth_missing")
-    if (ce_status and not ce_status.tradable_quote) or (
-        pe_status and not pe_status.tradable_quote
-    ):
-        missing.append("selected_option_bid_ask_missing")
+    # A failed quote on the opposite side cannot disable a fully verified
+    # candidate. Its symbol-specific readiness stays False, and final order
+    # preflight still independently rejects that option's stale/absent quote.
+    if not selected_option_exec_ready:
+        if ce_status and not ce_status.tradable_quote:
+            missing.append("selected_ce_quote_missing")
+        if pe_status and not pe_status.tradable_quote:
+            missing.append("selected_pe_quote_missing")
+        if ce_status and not ce_status.depth_available:
+            missing.append("selected_ce_depth_missing")
+        if pe_status and not pe_status.depth_available:
+            missing.append("selected_pe_depth_missing")
+        if (ce_status and not ce_status.tradable_quote) or (
+            pe_status and not pe_status.tradable_quote
+        ):
+            missing.append("selected_option_bid_ask_missing")
     if not runner_running:
         missing.append("runner_not_running")
     if live_mode:
@@ -10235,7 +10334,7 @@ async def _recompute_and_push_runtime_readiness(
         },
         live_mode=live_mode,
         evaluation_ready=evaluation_ready,
-        execution_ready=all_selected_options_exec_ready
+        execution_ready=selected_option_exec_ready
         and context_exec_ready
         and broker_ready
         and not pipeline_overloaded
@@ -10256,6 +10355,9 @@ async def _recompute_and_push_runtime_readiness(
     )
     ctx.data_hard_ready = data_hard_ready
     ctx.evaluation_ready = evaluation_ready
+    # Startup may set DataHub.indicators_ready=False before selected options
+    # collect enough bars; refresh it whenever live readiness is recomputed.
+    _sync_indicator_readiness(ctx, data_hard_ready=data_hard_ready)
     ctx.live_orders_armed = live_orders_armed
     ctx.trading_ready = evaluation_ready
     ctx.live_block_reason = block_reason
@@ -10310,7 +10412,7 @@ async def _recompute_and_push_runtime_readiness(
         normalized_decision.secondary_blockers,
         bool(data_hard_ready),
         bool(evaluation_ready),
-        bool(all_selected_options_exec_ready),
+        bool(selected_option_exec_ready),
         bool(live_orders_armed),
         extra={
             "event": "READINESS_BLOCKER_SUMMARY",
@@ -10323,7 +10425,7 @@ async def _recompute_and_push_runtime_readiness(
             "market_mode": get_runtime_market_mode(),
             "data_hard_ready": bool(data_hard_ready),
             "evaluation_ready": bool(evaluation_ready),
-            "execution_ready": bool(all_selected_options_exec_ready),
+            "execution_ready": bool(selected_option_exec_ready),
             "live_orders_armed": bool(live_orders_armed),
         },
     )
@@ -12645,25 +12747,49 @@ async def startup_sequence(ctx: BotContext) -> None:
                         mdm_history_count = len(
                             ctx.market_data_manager.get_ohlc_bars(canonical_sym) or []
                         )
-                    LOGGER.info(
-                        "RUNNER_HISTORY_CONSISTENCY symbol=%s mdm_bars=%d indicator_bars=%d consistent=%s",
+                    # Counts establish readiness, never content consistency.
+                    history_ready = bool(
+                        runner_history_count >= required_bars
+                        and mdm_history_count >= required_bars
+                        and getattr(sync_result, "success", False)
+                    )
+                    parity_reader = getattr(
+                        ctx.strategy_runner, "inspect_recent_canonical_history", None
+                    )
+                    parity_report: dict[str, Any] = {"status": "unavailable"}
+                    if callable(parity_reader):
+                        try:
+                            parity_report = parity_reader(canonical_sym, last_n=5)
+                        except Exception as exc:
+                            parity_report = {
+                                "status": "unavailable",
+                                "reason": type(exc).__name__,
+                            }
+                    parity_status = str(parity_report.get("status") or "unavailable")
+                    history_consistent = history_ready and parity_status == "match"
+                    history_log = (
+                        LOGGER.warning if parity_status == "mismatch" else LOGGER.info
+                    )
+                    history_log(
+                        "RUNNER_HISTORY_CONSISTENCY symbol=%s mdm_bars=%d "
+                        "indicator_bars=%d ready=%s parity=%s consistent=%s "
+                        "first_mismatch=%s",
                         canonical_sym,
                         mdm_history_count,
                         runner_history_count,
-                        bool(
-                            runner_history_count >= required_bars
-                            and mdm_history_count >= required_bars
-                        ),
+                        history_ready,
+                        parity_status,
+                        history_consistent,
+                        parity_report.get("first_mismatch"),
                         extra={
                             "event": "RUNNER_HISTORY_CONSISTENCY",
                             "symbol": canonical_sym,
                             "mdm_bars": mdm_history_count,
                             "indicator_bars": runner_history_count,
-                            # runner_history_count >= required_bars and mdm_history_count >= required_bars
-                            "consistent": bool(
-                                runner_history_count >= required_bars
-                                and mdm_history_count >= required_bars
-                            ),
+                            "ready": history_ready,
+                            "parity_status": parity_status,
+                            "consistent": history_consistent,
+                            "first_mismatch": parity_report.get("first_mismatch"),
                         },
                     )
                     LOGGER.info(
@@ -13539,6 +13665,46 @@ async def startup_sequence(ctx: BotContext) -> None:
             }
             option_universe_controller = UniverseController()
             option_universe_controller.update(dynamic_option_symbols)
+            from nifty_scalper_bot.core.vwap_history_prewarm import VwapHistoryPrewarmer
+
+            # VWAP's 50-bar warm-up is independent of the 30-bar execution floor.
+            # These best-effort tasks use the existing canonical MDM history owner.
+            try:
+                _vwap_ema_target = max(
+                    50, int(float(os.getenv("VWAP_EMA_PERIOD", "50") or "50"))
+                )
+            except (TypeError, ValueError, OverflowError):
+                _vwap_ema_target = 50
+            vwap_prewarmer = VwapHistoryPrewarmer(target_bars=_vwap_ema_target)
+
+            def _vwap_cached_bars(sym: str) -> int:
+                mdm = ctx.market_data_manager
+                runner = ctx.strategy_runner
+                if mdm is None or runner is None:
+                    return 0
+                try:
+                    mdm_count = len(mdm.get_ohlc_bars(sym) or [])
+                    runner_count = runner.runner_history_count(sym)
+                    indicator_count = runner.indicator_history_count(sym)
+                    return min(int(mdm_count), int(runner_count), int(indicator_count))
+                except (AttributeError, TypeError, ValueError):
+                    return 0
+
+            async def _vwap_preload(sym: str, target: int) -> object:
+                selected = sym in {
+                    getattr(ctx, "selected_ce", None),
+                    getattr(ctx, "selected_pe", None),
+                }
+                return await ensure_symbol_runtime_history(
+                    ctx,
+                    sym,
+                    role="selected_option" if selected else "option_context",
+                    phase="dynamic_update",
+                    reason="vwap_adjacent_prewarm",
+                    required_bars=30,
+                    target_bars=target,
+                )
+
             # Symbols waiting for enough MDM bars before being added to runner.
 
             async def _option_universe_sync_loop() -> None:
@@ -13729,6 +13895,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                             else "option_context"
                                         )
                                     )
+                                    if role == "option_context":
+                                        # Count failed fetches too: a transient
+                                        # error must not immediately duplicate
+                                        # the broker request in the prewarmer.
+                                        vwap_prewarmer.note_attempt(sym)
                                     runtime = await ensure_symbol_runtime_history(
                                         ctx,
                                         sym,
@@ -13912,6 +14083,28 @@ async def startup_sequence(ctx: BotContext) -> None:
 
                         dynamic_option_symbols = latest_symbols
 
+                        # Background history top-up for selected CE/PE and their
+                        # nearby same-expiry contracts; no wait in this loop and
+                        # no changes to SMC/ORB execution readiness.
+                        if (
+                            market_open
+                            and ctx.market_data_manager
+                            and ctx.strategy_runner
+                        ):
+                            _prewarm_symbols = vwap_prewarmer.schedule(
+                                incoming_ce or getattr(ctx, "selected_ce", "") or "",
+                                incoming_pe or getattr(ctx, "selected_pe", "") or "",
+                                latest_symbols,
+                                completed_bars=_vwap_cached_bars,
+                                hydrate=_vwap_preload,
+                            )
+                            if _prewarm_symbols:
+                                LOGGER.info(
+                                    "VWAP_PREWARM_SCHEDULED symbols=%s target_bars=%d",
+                                    ",".join(_prewarm_symbols),
+                                    vwap_prewarmer.target_bars,
+                                )
+
                         # Universe summary + per-symbol pipeline status after
                         # a dynamic-universe mutation so operators can see
                         # where each option sits in the live lifecycle.
@@ -14027,6 +14220,14 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     pe_bars >= _symbol_history_requirement(ctx),
                                 )
                                 if committed_ce and committed_pe:
+                                    # Restore callback edges before readiness.
+                                    # Avoid waiting for the periodic rearm cycle.
+                                    _ensure_selected_option_runtime_delivery(
+                                        ctx,
+                                        selected_ce=committed_ce,
+                                        selected_pe=committed_pe,
+                                        reason="dynamic_basket_committed",
+                                    )
                                     await _recompute_and_push_runtime_readiness(
                                         ctx,
                                         reason="dynamic_basket_committed",

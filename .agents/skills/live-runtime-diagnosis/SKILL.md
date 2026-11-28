@@ -9,14 +9,14 @@ Production diagnosis is read-only by default. Do not redeploy, restart, change c
 
 ## Access rule
 
-Use the configured direct production health/status endpoints first when available.
+For **live logs, status, and trading investigations**, use existing authenticated Supabase tables first: `public.nifty_runtime_heartbeat` (age, host-local HTTP, SHA, release and session state) and, when needed, `public.nifty_daily_market_logs` (archive timestamp and bounded runner lines). See `docs/ops/PRODUCTION_HTTP_ACCESS.md` and `docs/runbooks/nifty-diagnostics-relay-fallback.md`; do not ask repeatedly for direct access when telemetry answers the question.
 
-If direct network access fails:
+For **explicit public HTTP reachability**, make one short direct external probe when this client's network supports it. After a tool-level refusal/timeout, do not repeat the same blocked path within the investigation; report public ingress as unverified from that client, then use Supabase for independent local-health evidence. Never equate public access, host-local liveness, trading readiness, or broker-authoritative state.
 
-- do **not** conclude that the bot is down;
-- use the repository/operator-approved relay or observability integration available in the current private environment;
-- never add private relay URLs, credentials, tokens, or operator-only endpoints to this public repository;
-- do not redeploy a healthy relay merely to read logs.
+- Do **not** conclude that the bot is down from a blocked client request.
+- AppDeploy `Backend not found` indicates a relay routing/backend fault, not an engine fault; no relay is required for logs. Preserve v15 and do not redeploy or add a substitute relay.
+- Never use SSH merely to recover diagnostics; use existing authenticated admin for immediate operational detail.
+- Do not expose private operator URLs, credentials, tokens, or account-only endpoints in this public repository.
 
 A TCP/connectivity failure from the current client is evidence about that path, not proof of engine failure.
 

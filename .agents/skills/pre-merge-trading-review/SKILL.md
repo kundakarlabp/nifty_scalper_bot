@@ -144,4 +144,4 @@ APPROVE | REQUEST CHANGES | NEEDS EVIDENCE
 - Explicit remaining uncertainty
 ```
 
-Never merge automatically. The user merges only after CI, tests, architecture review, and runtime evidence are acceptable.
+When the user has requested validation and merge, the agent may merge the PR after the required CI, tests, architecture review, and exact base/head verification pass; do not require the user to click merge again. Do not defer a validated GitHub merge based on NSE market hours. Keep production deployment separate and subject to existing broker-flat, terminal-order, entry-hold, and health safeguards. Without user authorization to merge, provide the review verdict without merging.

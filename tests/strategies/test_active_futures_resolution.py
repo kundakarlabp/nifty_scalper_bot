@@ -133,6 +133,33 @@ def test_futures_volume_ignores_trade_quantity_and_keeps_baseline() -> None:
     assert next_cumulative["futures_volume_ratio"] == 1.0
 
 
+def test_futures_quote_rereads_do_not_add_zero_volume_samples() -> None:
+    hub = _VolumeHub(
+        [
+            {"volume_cumulative": 1000.0, "quote_update_version": 1},
+            {"volume_cumulative": 1100.0, "quote_update_version": 2},
+            {"volume_cumulative": 1100.0, "quote_update_version": 2},
+            {"volume_cumulative": 1100.0, "quote_update_version": 3},
+            {"volume_cumulative": 1150.0, "quote_update_version": 4},
+        ]
+    )
+    manager = _manager(hub=hub)
+    manager._augment_futures_metrics({})
+    first: dict[str, Any] = {}
+    duplicate: dict[str, Any] = {}
+    quiet: dict[str, Any] = {}
+    advanced: dict[str, Any] = {}
+    manager._augment_futures_metrics(first)
+    manager._augment_futures_metrics(duplicate)
+    assert first["futures_volume_ratio"] == duplicate["futures_volume_ratio"] == 1.0
+    assert list(manager._futures_volume_history) == [100.0]
+    manager._augment_futures_metrics(quiet)
+    assert quiet["futures_volume_ratio"] == 0.0
+    manager._augment_futures_metrics(advanced)
+    assert list(manager._futures_volume_history) == [100.0, 0.0, 50.0]
+    assert advanced["futures_volume_ratio"] == 1.0
+
+
 def test_futures_volume_rejects_same_session_decrease_without_false_spike() -> None:
     symbol = "NFO:NIFTY26JUNFUT"
     hub = _VolumeHub(
@@ -466,3 +493,99 @@ def test_futures_vwap_provenance_reports_actual_consumed_quote(monkeypatch) -> N
     assert provenance[0][4] is not None
     assert output["futures_vwap"] == 24102.25
     assert hub.calls.count("NFO:NIFTY26JUNFUT") == 1
+
+
+def test_futures_completed_bar_source_carries_contract_identity() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+
+    class CompletedBarIndicatorEngine(_IE):
+        def get_history(self, sym, count=None, *, field="close"):
+            assert sym == symbol and count == 25 and field == "bars"
+            return [
+                {
+                    "timestamp": f"2026-11-19T10:{i:02d}:00+05:30",
+                    "volume": 250.0 if i == 20 else 100.0,
+                    "is_complete": True,
+                    "is_provisional": False,
+                }
+                for i in range(21)
+            ]
+
+    manager = _manager(
+        futures_symbol=symbol,
+        hub=_VolumeHub([{"volume_traded_today": 1000}], active=symbol),
+    )
+    manager._indicator_engine = CompletedBarIndicatorEngine()
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+    assert indicators["futures_completed_bar_volume_ready"] is True
+    assert indicators["futures_completed_bar_volume_symbol"] == symbol
+    assert indicators["futures_completed_bar_volume_ratio"] == 2.5
+    assert indicators["futures_volume_ratio"] is None
+
+
+def test_completed_futures_volume_cache_tracks_candle_revisions_and_contracts(
+    monkeypatch,
+) -> None:
+    """Identical windows avoid duplicate calculation; corrections always refresh."""
+    import nifty_scalper_bot.strategies.signal_generator as signal_generator
+
+    class _BarEngine(_IE):
+        def __init__(self) -> None:
+            self.bars = [
+                {
+                    "timestamp": f"2026-11-20T09:{minute:02d}:00+05:30",
+                    "volume": 100.0,
+                    "is_complete": True,
+                }
+                for minute in range(15, 22)
+            ]
+
+        def get_history(self, symbol: str, count: int, field: str):
+            assert count == 25 and field == "bars"
+            return self.bars
+
+    engine = _BarEngine()
+    hub = _Hub()
+    manager = StrategyManager([], engine, _PM(), data_hub=hub)
+    original = signal_generator.analyze_completed_futures_volume
+    calls: list[object] = []
+
+    def counting_quality(bars):
+        calls.append(bars)
+        return original(bars)
+
+    monkeypatch.setattr(
+        signal_generator, "analyze_completed_futures_volume", counting_quality
+    )
+
+    a: dict[str, Any] = {}
+    b: dict[str, Any] = {}
+    manager._augment_futures_metrics(a)
+    manager._augment_futures_metrics(b)
+    assert len(calls) == 1
+    assert a["futures_completed_bar_volume_ready"] is True
+    assert (
+        b["futures_completed_bar_volume_ratio"]
+        == a["futures_completed_bar_volume_ratio"]
+    )
+
+    engine.bars[-1]["volume"] = 2.0
+    corrected: dict[str, Any] = {}
+    manager._augment_futures_metrics(corrected)
+    assert len(calls) == 2
+    assert corrected["futures_completed_bar_volume_ratio"] == 0.02
+    provenance = corrected["futures_completed_bar_volume_provenance"]
+    assert provenance["extreme_low_relative_volume"] is True
+
+    engine.bars[-1]["volume_delta_untrusted"] = True
+    untrusted: dict[str, Any] = {}
+    manager._augment_futures_metrics(untrusted)
+    assert len(calls) == 3
+    assert untrusted["futures_completed_bar_volume_ratio"] == 1.0
+
+    hub._active = "NFO:NIFTY26JULFUT"
+    rolled: dict[str, Any] = {}
+    manager._augment_futures_metrics(rolled)
+    assert len(calls) == 4
+    assert rolled["futures_completed_bar_volume_symbol"] == "NFO:NIFTY26JULFUT"

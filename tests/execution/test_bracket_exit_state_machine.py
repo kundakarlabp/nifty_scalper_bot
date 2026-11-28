@@ -379,3 +379,137 @@ def test_status_only_complete_exit_is_not_treated_as_broker_fill() -> None:
     assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
     assert bracket.close_source != "broker_fill"
     assert manager.has_unresolved_exit() is True
+
+
+def test_distinct_same_second_prices_still_trigger_hard_stop() -> None:
+    """Kite exchange timestamps are seconds, not unique per received quote."""
+    om = _OrderManager()
+    manager = _active_manager(om)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.trailing_enabled = False
+    second = float(int(time.time()) + 1)
+
+    manager.on_tick(bracket.symbol, 160.65, exchange_ts=second)
+    manager.on_tick(bracket.symbol, 156.90, exchange_ts=second)
+
+    assert bracket.exit_pending is True
+    assert len(om.calls) == 1
+
+
+def test_distinct_same_second_depth_updates_still_trigger_profit_target(
+    monkeypatch,
+) -> None:
+    """A same-second new bid can cross TP without a change in option LTP."""
+    manager = _active_manager(_OrderManager())
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.trailing_enabled = False
+    second = float(int(time.time()) + 1)
+    calls: list[list[tuple[Any, dict[str, Any]]]] = []
+    monkeypatch.setattr(
+        manager,
+        "_fire_exits_batch",
+        lambda actions, **_kwargs: calls.append(actions),
+    )
+
+    for bid, ask in ((170.0, 170.1), (175.05, 175.1)):
+        manager.on_tick(
+            bracket.symbol,
+            170.0,
+            exchange_ts=second,
+            tick={
+                "symbol": bracket.symbol,
+                "ltp": 170.0,
+                "bid": bid,
+                "ask": ask,
+                "exchange_timestamp": second,
+            },
+        )
+
+    assert len(calls) == 1
+    assert calls[0][0][1]["type"] == "FINAL_TP"
+
+
+def test_exit_worker_survives_broker_state_exception_and_handles_next_item(
+    monkeypatch,
+) -> None:
+    """One failing broker read must not kill all subsequent queued exits."""
+    manager = _active_manager(_OrderManager())
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    first = threading.Event()
+    second = threading.Event()
+
+    def process(_bracket: Any, _action: Any, *, now: float) -> None:
+        if not first.is_set():
+            first.set()
+            raise RuntimeError("temporary broker orderbook outage")
+        second.set()
+
+    monkeypatch.setattr(manager, "_process_exit_state", process)
+    manager._exit_dispatch_queue.put((bracket, {"reason": "HARD_SL_BREACH"}))
+    assert first.wait(timeout=1.0)
+    manager._exit_dispatch_queue.put((bracket, {"reason": "HARD_SL_BREACH"}))
+    assert second.wait(timeout=1.0)
+    assert manager._exit_dispatch_thread.is_alive()
+    assert bracket.exit_pending is True
+
+
+@pytest.mark.parametrize("residual_qty", [35, 65])
+def test_complete_exit_order_does_not_close_nonflat_broker_position(
+    residual_qty: int,
+) -> None:
+    """A filled order is not proof that the whole symbol position is flat."""
+    broker = _Broker(
+        status="COMPLETE",
+        positions=[{"symbol": "NFO:NIFTY2660923100CE", "quantity": residual_qty}],
+    )
+    manager = _active_manager(_OrderManager(broker=broker))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    bracket.exit_order_id = "exit-1"
+    bracket.pending_exit_order_id = "exit-1"
+    bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.remaining_quantity > 0
+    assert bracket.exit_pending is True
+    assert bracket.exit_order_id == "exit-1"
+    assert bracket.position_flat_confirmed is False
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert manager.has_unresolved_exit() is True
+
+
+def test_complete_exit_order_requires_readable_broker_position_snapshot() -> None:
+    """Even a complete order with an average fill price needs net-position proof."""
+
+    class _UnknownPositionBroker(_Broker):
+        def get_positions(self) -> list[dict[str, Any]]:
+            raise RuntimeError("broker positions temporarily unavailable")
+
+    broker = _UnknownPositionBroker(status="COMPLETE")
+    manager = _active_manager(_OrderManager(broker=broker))
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_pending = True
+    bracket.exit_order_id = "exit-1"
+    bracket.pending_exit_order_id = "exit-1"
+    bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.exit_pending is True
+    assert bracket.position_flat_confirmed is False
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value

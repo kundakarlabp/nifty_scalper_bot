@@ -545,7 +545,12 @@ class VWAPProStrategy(EliteStrategy):
                     return None
 
             futures_vwap_slope = _optional_float(indicators.get("futures_vwap_slope"))
-            futures_volume_ratio = _optional_float(indicators.get("futures_volume_ratio"))
+            # Keep quote-counter deltas for diagnostics, never silently treat
+            # them as a verified completed-minute volume confirmation.
+            quote_counter_volume_ratio = _optional_float(indicators.get("futures_volume_ratio"))
+            futures_volume_ratio = quote_counter_volume_ratio
+            futures_volume_source = "legacy_quote_counter" if futures_volume_ratio is not None else "unavailable"
+            futures_completed_bar_age_s: float | None = None
             vwap_stddev = _optional_float(indicators.get("vwap_stddev"))
             if vwap_stddev is None:
                 vwap_stddev = _optional_float(indicators.get("vwap_std"))
@@ -575,6 +580,18 @@ class VWAPProStrategy(EliteStrategy):
             stale_data = bool(indicators.get("stale_data_used")) or float(
                 indicators.get("data_age_seconds") or 0.0
             ) > max_data_age
+            # A stale premium candle must not prime a VWAP thesis. The runner
+            # has a separate safety veto, but this strategy is responsible for
+            # qualifying its own evidence before creating a candidate.
+            if stale_data:
+                self._no_vote("stale_or_invalid_data")
+                return None
+            # The authoritative context resolver can explicitly mark otherwise
+            # recent snapshots unusable (e.g., stale source tick/provenance).
+            # Never override that negative verdict with a small numeric age.
+            if indicators.get("context_fresh") is False:
+                self._no_vote("underlying_context_stale")
+                return None
             atr_safe = max(atr, current_price * 0.01, 1.0)
             distance_points = abs(current_price - vwap)
             distance_pct = distance_points / max(vwap, 1e-9)
@@ -624,6 +641,52 @@ class VWAPProStrategy(EliteStrategy):
                 None,
             )
             symbol_scope = str(symbol or "").strip().upper()
+            if "futures_completed_bar_volume_ready" in indicators:
+                # This production contract supersedes the per-callback quote
+                # delta only when the futures identity, source, completed bar
+                # and its causal relationship to the option bar are verified.
+                futures_volume_ratio = None
+                futures_volume_source = "completed_bar_unavailable"
+                provenance = indicators.get("futures_completed_bar_volume_provenance")
+                volume_future = str(
+                    indicators.get("futures_completed_bar_volume_symbol") or ""
+                ).strip().upper()
+                active_future = str(
+                    indicators.get("active_futures_symbol") or ""
+                ).strip().upper()
+                if (
+                    indicators.get("futures_completed_bar_volume_ready") is True
+                    and isinstance(provenance, Mapping)
+                    and provenance.get("ready") is True
+                    and provenance.get("reason") == "verified"
+                    and provenance.get("source") == "completed_futures_1m_bars"
+                    and (provenance.get("baseline_count") or 0) >= 5
+                    and volume_future
+                    and (not active_future or volume_future == active_future)
+                    and bar_anchor is not None
+                ):
+                    try:
+                        future_bar_ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(provenance.get("bar_timestamp"))
+                        )
+                        option_bar_ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(bar_anchor)
+                        )
+                        futures_completed_bar_age_s = (
+                            option_bar_ts - future_bar_ts
+                        ).total_seconds()
+                        verified_ratio = _optional_float(provenance.get("ratio"))
+                        if (
+                            verified_ratio is not None
+                            and verified_ratio >= 0
+                            and 0 <= futures_completed_bar_age_s <= 120
+                        ):
+                            futures_volume_ratio = verified_ratio
+                            futures_volume_source = "verified_completed_futures_1m"
+                        else:
+                            futures_volume_source = "completed_bar_stale_or_future"
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        futures_volume_source = "completed_bar_timestamp_invalid"
             session_scope = _resolve_session_token(indicators, bar_anchor)
             thesis_scope = (symbol_scope, session_scope)
             thesis_recovered_from_history = False
@@ -684,7 +747,7 @@ class VWAPProStrategy(EliteStrategy):
                 log_throttled(
                     LOGGER,
                     f"vwap_distance_outside_band:{symbol_scope}",
-                    "VWAP_DISTANCE_REJECTED symbol=%s premium=%.4f vwap=%.4f distance_fraction=%.4f allowed_fraction=%.4f distance_atr=%.3f allowed_atr=%.3f fraction_failed=%s atr_failed=%s trend_confirmed=%s",
+                    "VWAP_DISTANCE_REJECTED symbol=%s premium=%.4f vwap=%.4f distance_fraction=%.4f allowed_fraction=%.4f distance_atr=%.3f allowed_atr=%.3f fraction_failed=%s atr_failed=%s trend_confirmed=%s futures_volume_source=%s completed_ratio=%s quote_counter_ratio=%s",
                     symbol_scope,
                     current_price,
                     vwap,
@@ -695,6 +758,9 @@ class VWAPProStrategy(EliteStrategy):
                     distance_pct > allowed_distance,
                     distance_atr > effective_quality_max_distance_atr,
                     strong_fresh_trend_context,
+                    futures_volume_source,
+                    _fmt_optional(futures_volume_ratio, 4),
+                    _fmt_optional(quote_counter_volume_ratio, 4),
                     interval_sec=60.0,
                     extra={
                         "event": "VWAP_DISTANCE_REJECTED",
@@ -709,6 +775,10 @@ class VWAPProStrategy(EliteStrategy):
                         "fraction_failed": distance_pct > allowed_distance,
                         "atr_failed": distance_atr > effective_quality_max_distance_atr,
                         "underlying_trend_confirmed": strong_fresh_trend_context,
+                        "futures_volume_source": futures_volume_source,
+                        "futures_completed_bar_ratio": futures_volume_ratio,
+                        "futures_completed_bar_age_s": futures_completed_bar_age_s,
+                        "futures_quote_counter_ratio": quote_counter_volume_ratio,
                         "retest_extension_enabled": self._trend_retest_extension_enabled,
                     },
                 )
@@ -799,6 +869,26 @@ class VWAPProStrategy(EliteStrategy):
                 futures_volume_ratio is not None
                 and futures_volume_ratio >= self._futures_volume_min_ratio
             )
+            log_throttled(
+                LOGGER,
+                f"vwap_futures_volume_evidence:{symbol_scope}",
+                "VWAP_FUTURES_VOLUME_EVIDENCE symbol=%s source=%s completed_ratio=%s quote_counter_ratio=%s completed_bar_age_s=%s option_volume_support=%s futures_volume_support=%s",
+                symbol_scope,
+                futures_volume_source,
+                _fmt_optional(futures_volume_ratio, 4),
+                _fmt_optional(quote_counter_volume_ratio, 4),
+                _fmt_optional(futures_completed_bar_age_s, 1),
+                vol_support,
+                fut_vol_support,
+                interval_sec=60.0,
+                extra={
+                    "event": "VWAP_FUTURES_VOLUME_EVIDENCE",
+                    "symbol": symbol_scope,
+                    "volume_source": futures_volume_source,
+                    "volume_confirmation_stage": "completed_bar_corroboration",
+                    "volume_confirmation_eligible": fut_vol_support,
+                },
+            )
             if vol_support and fut_vol_support:
                 volume_confirmation_source = "option_and_futures"
             elif vol_support:
@@ -844,8 +934,10 @@ class VWAPProStrategy(EliteStrategy):
             require_alignment_shadow = str(
                 os.getenv("VWAP_PRO_REQUIRE_UNDERLYING_ALIGNMENT_SHADOW", "false")
             ).lower() in {"1", "true", "yes", "on"}
-            context_fresh = context_age_seconds <= float(
-                os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
+            context_fresh = (
+                indicators.get("context_fresh") is not False
+                and context_age_seconds
+                <= float(os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120")
             )
             hard_conflict = bool(
                 (
@@ -1348,6 +1440,28 @@ class VWAPProStrategy(EliteStrategy):
                     "volume_confirmation",
                 ]
             )
+            structural_stop = None
+            structural_target = None
+            if live_neutral_slope_candidate and neutral_slope_admitted:
+                # Weak underlying slope requires the completed premium breakout
+                # to remain executable, not merely an earlier LTP above VWAP.
+                bid = _optional_float(indicators.get("bid"))
+                ask = _optional_float(indicators.get("ask"))
+                if (
+                    bid is None
+                    or ask is None
+                    or bid < confirmed_high
+                    or ask <= bid
+                ):
+                    self._no_vote("neutral_slope_breakout_bid_unconfirmed")
+                    return None
+                structural_stop = max(0.05, confirmed_low - 0.05)
+                # Preserve the original ATR-derived reward rather than create
+                # an increasingly distant target to justify chasing the ask.
+                structural_target = current_price + 2.0 * atr_safe
+                if not structural_stop < ask < structural_target:
+                    self._no_vote("neutral_slope_structural_geometry_invalid")
+                    return None
             metadata = {
                 "strategy": "VWAPPro",
                 "strategy_name": "VWAPPro",
@@ -1406,6 +1520,24 @@ class VWAPProStrategy(EliteStrategy):
                     "rolling_vwap" if vwap_source == "vwap"
                     else vwap_source or "unavailable"
                 ),
+                "vwap_reference_evidence": {
+                    "selected_source": vwap_source,
+                    "selected_value": vwap,
+                    "exchange_vwap": _optional_float(indicators.get("exchange_vwap")),
+                    "session_vwap": _optional_float(indicators.get("session_vwap")),
+                    "rolling_vwap": _optional_float(indicators.get("vwap")),
+                },
+                "vwap_signal_bar_evidence": (
+                    {
+                        "timestamp": str(confirmed_bar.get("timestamp")),
+                        "high": confirmed_high,
+                        "low": confirmed_low,
+                        "close": close,
+                        "range_atr": (confirmed_high - confirmed_low) / atr_safe,
+                    }
+                    if confirmed_bar is not None
+                    else None
+                ),
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
                 "vwap_stddev": vwap_stddev,
@@ -1445,6 +1577,9 @@ class VWAPProStrategy(EliteStrategy):
                 "underlying_alignment": trend_alignment,
                 "futures_alignment": slope_support,
                 "futures_volume_ratio": futures_volume_ratio,
+                "futures_volume_ratio_source": futures_volume_source,
+                "futures_quote_counter_ratio": quote_counter_volume_ratio,
+                "futures_completed_bar_age_s": futures_completed_bar_age_s,
                 "futures_volume_min_ratio": self._futures_volume_min_ratio,
                 "option_volume_ratio": option_volume_ratio,
                 "option_volume_min_ratio": self._option_volume_min_ratio,
@@ -1484,9 +1619,22 @@ class VWAPProStrategy(EliteStrategy):
                 "thesis_scope_symbol": symbol_scope,
                 "thesis_scope_session": session_scope,
                 "thesis_recovered_from_history": thesis_recovered_from_history,
-                "setup_invalidation_premium": current_price - atr_safe,
+                "setup_invalidation_premium": (
+                    structural_stop
+                    if structural_stop is not None
+                    else current_price - atr_safe
+                ),
+                "setup_target_premium": structural_target,
+                "vwap_structural_invalidation": structural_stop is not None,
+                "bracket_anchor_mode": (
+                    "absolute_level" if structural_stop is not None else "distance"
+                ),
                 "invalidation_level_domain": "option_premium",
-                "premium_stop_distance": atr_safe,
+                "premium_stop_distance": (
+                    current_price - structural_stop
+                    if structural_stop is not None
+                    else atr_safe
+                ),
                 "premium_target_rr": 2.0,
                 "direction_conflict_mode": "hard" if hard_conflict else "none",
             }
@@ -1500,8 +1648,8 @@ class VWAPProStrategy(EliteStrategy):
                 signal="BUY",
                 confidence=1.0,
                 entry_price=current_price,
-                stop_loss=None,
-                target=None,
+                stop_loss=structural_stop,
+                target=structural_target,
                 quantity=self._cfg.quantity or 1,
                 strategy_name="VWAPPro",
                 metadata=metadata,

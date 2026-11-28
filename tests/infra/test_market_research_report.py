@@ -11,6 +11,7 @@ from nifty_scalper_bot.infra.market_research_report import (
     _cost_model,
     _parity_summary,
     _sampled_markouts,
+    _session_decision_rows,
     build_session_research_report,
     research_report_log_lines,
 )
@@ -320,3 +321,577 @@ def test_postmarket_changed_archive_hash_invalidates_counterfactuals(
         (tmp_path / "research" / "markouts" / "2026-11-03.json").read_text()
     )
     assert persisted["status"] == "unavailable"
+
+
+def test_markouts_reject_tape_changed_during_excursion_pass(tmp_path, monkeypatch):
+    from scripts.reporting import rejected_setup_forward_markout as markout
+
+    path, _ = _session(tmp_path)
+    original = markout.load_excursion_quote_paths
+
+    def mutate_after_read(tape):
+        result = original(tape)
+        with tape.open("ab") as handle:
+            handle.write(b"\n")
+        return result
+
+    monkeypatch.setattr(markout, "load_excursion_quote_paths", mutate_after_read)
+    report = build_session_research_report(
+        session_date=DECISION.date(),
+        journal=_journal(),
+        replay_path=path,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "changed.json",
+    )
+    assert report["status"] == "unavailable"
+    assert report["blocker"] == "replay_archive_changed_between_passes"
+    assert report["sampled_observations"] == []
+    assert report["range_excursion_horizons"] == []
+    assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_session_decisions_are_scoped_by_ist_midnight_not_utc() -> None:
+    midnight_ist = datetime(2026, 11, 2, 18, 30, tzinfo=timezone.utc)
+    end_ist = midnight_ist + timedelta(days=1)
+    rows = [
+        {"timestamp": (midnight_ist - timedelta(seconds=1)).timestamp()},
+        {"timestamp": midnight_ist.timestamp()},
+        {"timestamp": DECISION.timestamp()},
+        {"timestamp": (end_ist - timedelta(seconds=1)).timestamp()},
+        {"timestamp": end_ist.timestamp()},
+        {"timestamp": None},
+        {"timestamp": float("nan")},
+    ]
+    scoped = _session_decision_rows(rows, date(2026, 11, 3))
+    assert scoped == rows[1:4]
+
+
+def test_postmarket_excludes_other_day_trade_decisions_before_markouts(
+    tmp_path, monkeypatch
+) -> None:
+    from nifty_scalper_bot.backtesting import setup_opportunity_analysis
+    from nifty_scalper_bot.journal import trade_ledger
+
+    replay_path, _run_id = _session(tmp_path)
+    trade_db = tmp_path / "trades.db"
+    trade_db.touch()
+    decisions = [
+        {"timestamp": (DECISION - timedelta(days=1)).timestamp()},
+        {"timestamp": DECISION.timestamp()},
+        {"timestamp": (DECISION + timedelta(days=1)).timestamp()},
+    ]
+    seen = []
+
+    monkeypatch.setattr(
+        trade_ledger, "load_candidate_decision_rows", lambda _path: decisions
+    )
+
+    def capture(rows):
+        seen.extend(rows)
+        return ()
+
+    monkeypatch.setattr(
+        setup_opportunity_analysis, "canonicalize_setup_opportunities", capture
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=_journal(),
+        replay_path=replay_path,
+        trade_db=trade_db,
+        output_path=tmp_path / "scope.json",
+    )
+    assert report["status"] == "analysed"
+    assert seen == [decisions[1]]
+    assert report["structural_decision_rows_scoped"] == 1
+    assert report["structural_decision_rows_excluded_non_session"] == 2
+    session_log = research_report_log_lines(report)[0]
+    assert '"structural_decision_rows_scoped":1' in session_log
+    assert '"structural_decision_rows_excluded_non_session":2' in session_log
+
+
+def _range_excursion_session(
+    tmp_path, *, bid_quantity: int = 65, catalog_lot: int | None = None
+):
+    future = "NFO:NIFTY26NOVFUT"
+    archive = ReplayArchive(tmp_path / "replay_archive")
+    archive.record(
+        "snapshot",
+        {
+            "basket": {
+                "selected_ce": CONTRACT,
+                "selected_pe": OTHER,
+                "futures_symbol": future,
+                "token_by_symbol": {CONTRACT: 111, OTHER: 112, future: 113},
+            },
+            "instruments": [
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": CONTRACT.split(":", 1)[1],
+                    "instrument_token": 111,
+                    "name": "NIFTY",
+                    "instrument_type": "CE",
+                    "lot_size": catalog_lot,
+                }
+            ],
+        },
+        DECISION - timedelta(seconds=2),
+    )
+    for second in [-1, *range(1, 901, 5)]:
+        instant = DECISION + timedelta(seconds=second)
+        archive.record(
+            "tick",
+            {
+                "symbol": future,
+                "instrument_token": 113,
+                "source": "ws_full",
+                "ltp": 25000.0 + 0.02 * second,
+            },
+            instant,
+        )
+        bid = 100.0 + 0.01 * second
+        ask = bid + 0.5
+        archive.record(
+            "tick",
+            {
+                "symbol": CONTRACT,
+                "instrument_token": 111,
+                "source": "ws_full",
+                "tradable_quote": True,
+                "depth_available": True,
+                "bid": bid,
+                "ask": ask,
+                "depth": {
+                    "buy": [{"price": bid, "quantity": bid_quantity}],
+                    "sell": [{"price": ask, "quantity": 75}],
+                },
+            },
+            instant,
+        )
+    archive.close()
+    first_bar = (DECISION - timedelta(minutes=1)).isoformat()
+    identity = f"{future}:CE:{first_bar}"
+    observation = {
+        "v": 1,
+        "decision_at": DECISION.isoformat(),
+        "excursion_id": identity,
+        "futures_symbol": future,
+        "excursion_first_bar": first_bar,
+        "side": "CE",
+        "symbol": CONTRACT,
+        "regime": "RANGE",
+        "structural_qualified": False,
+        "structural_reason": "session_rolling_center_disagree",
+        "session_vwap": 25012.0,
+        "rolling_center": 25030.0,
+        "center_gap_atr": 1.5,
+        "volatility_ratio": 1.2,
+        "quote": {
+            "bid": 99.99,
+            "ask": 100.49,
+            "lot_size": 65,
+            "tradable": True,
+        },
+    }
+    stage = {
+        "v": 1,
+        "decision_at": (DECISION + timedelta(milliseconds=150)).isoformat(),
+        "excursion_id": identity,
+        "reason": "session_rolling_center_disagree",
+        "symbol": CONTRACT,
+        "modeled_stop_risk": None,
+        "modeled_net_rr": None,
+    }
+    journal = (
+        f"RANGE_VWAP_EXCURSION_OBSERVED {json.dumps(observation)}\n"
+        f"RANGE_VWAP_EXCURSION_DECISION {json.dumps(stage)}"
+    )
+    tape = tmp_path / "replay_archive" / "2026-11-03.jsonl"
+    return tape, journal
+
+
+def test_excursion_report_uses_full_lot_exact_token_books_and_futures(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "range_report.json",
+    )
+    assert report["status"] == "analysed"
+    assert len(report["range_excursion_opportunities"]) == 1
+    assert (
+        report["cost_model_provenance"]["range_vwap_adverse_slippage_bps_per_side"]
+        == 25.0
+    )
+    assert all(
+        r["adverse_slippage_bps_per_side"] == 25.0
+        for r in report["range_excursion_horizons"]
+    )
+    assert [r["horizon_seconds"] for r in report["range_excursion_horizons"]] == [
+        300,
+        600,
+        900,
+    ]
+    assert all(
+        row["observed_book_and_futures_complete"]
+        for row in report["range_excursion_horizons"]
+    )
+    assert all(
+        row["option_cost_adjusted"]["terminal"]["fees_rupees"] > 0
+        for row in report["range_excursion_horizons"]
+    )
+    assert (
+        report["range_excursion_horizons"][0]["futures_markout"][
+            "signed_terminal_points"
+        ]
+        > 0
+    )
+    center = next(
+        row
+        for row in report["range_admission_comparisons"]
+        if row["policy"] == "ignore_center_disagreement_only"
+        and row["horizon_seconds"] == 300
+    )
+    assert center["unique_first_seen_excursions"] == 1
+    assert center["full_lot_bid_futures_labelled"] == 1
+    assert center["same_decision_cash_risk_unverified"] == 1
+    assert center["verified_risk_and_observed_horizon"] == 0
+    assert center["modeled_net_rupees_mean"] is None
+    assert center["comparison_not_causal_or_promotable"] is True
+    assert report["eligible_for_entry_filter_change"] is False
+    assert json.loads((tmp_path / "range_report.json").read_text())[
+        "range_excursion_opportunities"
+    ]
+
+
+def test_local_range_shadow_report_never_invents_risk(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, decision = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        regime="TREND",
+        regime_raw="trend",
+        regime_gate_allowed=True,
+        local_range_candidate=True,
+        local_range_session_vwap_setup=True,
+        structural_qualified=True,
+        structural_reason="qualified",
+    )
+    prefix_decision, payload_decision = decision.split(" ", 1)
+    event = json.loads(payload_decision)
+    event.update(
+        reason="strategy_regime_ineligible",
+        decision_at=row["decision_at"],
+    )
+    journal = f"{prefix} {json.dumps(row)}\n" f"{prefix_decision} {json.dumps(event)}"
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "local_range.json",
+    )
+    cohort = [
+        row
+        for row in report["range_admission_comparisons"]
+        if row["policy"] == "shadow_local_range_in_trend"
+    ]
+    assert len(cohort) == 3
+    assert all(row["unique_first_seen_excursions"] == 1 for row in cohort)
+    assert all(row["verified_risk_and_observed_horizon"] == 0 for row in cohort)
+    assert all(row["modeled_net_rupees_mean"] is None for row in cohort)
+    assert all(row["observed_full_lot_net_rupees_mean"] is None for row in cohort)
+    assert any(
+        '"kind":"range_admission"' in line
+        and '"policy":"shadow_local_range_in_trend"' in line
+        for line in research_report_log_lines(report)
+    )
+    assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_local_regime_clock_reference_is_prior_only_and_deduplicated(tmp_path) -> None:
+    from nifty_scalper_bot.infra.market_research_report import _local_regime_minutes
+
+    day = DECISION.date()
+    stamp = DECISION - timedelta(minutes=1)
+    sample = {
+        "v": 1,
+        "decision_at": DECISION.isoformat(),
+        "bar_timestamp": stamp.isoformat(),
+        "futures_symbol": "NFO:NIFTY26NOVFUT",
+        "source": "contiguous_session_futures_1m",
+        "futures_atr_bps": 4.0,
+        "local_range_state": "RANGE",
+        "local_reclaim_side": "CE",
+        "regime": "trend",
+        "regime_raw": "trend",
+        "regime_gate_allowed": True,
+        "session_vwap_setup_qualified": False,
+    }
+    for offset in (-5, -4, -3, -2, -1, 0, 1):
+        prior_date = day + timedelta(days=offset)
+        reference = dict(
+            sample,
+            bar_timestamp=(stamp + timedelta(days=offset)).isoformat(),
+            futures_atr_bps=2.0 if offset < 0 else 100.0,
+        )
+        (tmp_path / f"{prior_date}.json").write_text(
+            json.dumps(
+                {"date_ist": str(prior_date), "local_regime_minutes": [reference]}
+            )
+        )
+    rows, summary = _local_regime_minutes(
+        [sample, dict(sample, futures_atr_bps=99.0)],
+        session_date=day,
+        report_directory=tmp_path,
+    )
+    assert len(rows) == 1
+    assert rows[0]["clock_matched_prior_sessions"] == 5
+    assert rows[0]["atr_vs_clock_matched_median"] == 2.0
+    assert summary["confirmed_local_range_in_trend_minutes"] == 1
+    assert summary["local_reclaim_without_session_setup_minutes"] == 1
+    denied = dict(
+        sample,
+        regime="unknown",
+        regime_raw="unknown",
+        regime_gate_allowed=False,
+        shadow_transition_candidate="RANGE",
+    )
+    _, summary = _local_regime_minutes(
+        [denied], session_date=day, report_directory=tmp_path
+    )
+    assert summary["canonical_denied_observed_minutes"] == 1
+    assert summary["blocked_local_range_minutes"] == 1
+    assert summary["blocked_local_range_reclaim_minutes"] == 1
+    assert summary["blocked_local_range_without_reclaim_minutes"] == 0
+    assert summary["blocked_local_range_session_setup_minutes"] == 0
+    assert summary["unknown_with_confirmed_local_range_minutes"] == 1
+    assert summary["shadow_transition_counts"] == {"RANGE": 1}
+    assert summary["clock_matched_calibration_status"] == (
+        "reference_available_research_only"
+    )
+    no_reclaim = dict(
+        denied,
+        local_reclaim_side=None,
+        bar_timestamp=(stamp + timedelta(minutes=1)).isoformat(),
+        decision_at=(DECISION + timedelta(minutes=1)).isoformat(),
+    )
+    _, summary = _local_regime_minutes(
+        [denied, denied, no_reclaim], session_date=day, report_directory=tmp_path
+    )
+    assert summary["blocked_local_range_minutes"] == 2
+    assert summary["blocked_local_range_reclaim_minutes"] == 1
+    assert summary["blocked_local_range_without_reclaim_minutes"] == 1
+
+
+def test_excursion_reports_missing_full_lot_depth_without_invented_exit(
+    tmp_path,
+) -> None:
+    tape, journal = _range_excursion_session(tmp_path, bid_quantity=64)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "missing_depth_report.json",
+    )
+    assert report["status"] == "analysed"
+    assert all(
+        row["futures_markout"] is not None
+        and row["option_full_lot_markout"] is None
+        and row["option_cost_adjusted"] is None
+        for row in report["range_excursion_horizons"]
+    )
+    assert all(
+        row["verified_risk_and_observed_horizon"] == 0
+        for row in report["range_admission_comparisons"]
+    )
+
+
+def test_sampled_markouts_keep_regime_and_gate_evidence_separate() -> None:
+    samples = []
+    for offset, context in enumerate(
+        (
+            {"regime": "trend", "regime_raw": "TREND", "regime_gate_allowed": True},
+            {"regime": "trend", "regime_raw": "unknown", "regime_gate_allowed": False},
+            {},
+        )
+    ):
+        instant = DECISION + timedelta(minutes=offset)
+        samples.append(
+            {
+                "strategy": "SMC",
+                "symbol": CONTRACT,
+                "decision_at": instant.isoformat(),
+                "evaluation_minute": instant.isoformat(),
+                "reason": "strategy_regime_ineligible",
+                "context": context,
+            }
+        )
+    _, strata = _sampled_markouts(samples, {})
+    assert {
+        (row["regime"], row["regime_raw"], row["regime_gate_state"])
+        for row in strata
+        if row["horizon_seconds"] == 300
+    } == {
+        ("TREND", "TREND", "allowed"),
+        ("TREND", "UNKNOWN", "blocked"),
+        ("UNRECORDED", "UNRECORDED", "unrecorded"),
+    }
+    assert all(row["sampled_minutes"] == 1 for row in strata)
+    assert all(row["eligible_for_filter_change"] is False for row in strata)
+
+
+def test_unknown_local_reclaim_requires_separate_session_confirmation(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, decision = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        regime="UNKNOWN",
+        regime_raw="unknown",
+        regime_gate_allowed=False,
+        shadow_transition_candidate="RANGE",
+        local_range_state="RANGE",
+        local_reclaim_side="CE",
+        structural_qualified=False,
+    )
+    decision_prefix, decision_payload = decision.split(" ", 1)
+    event = json.loads(decision_payload)
+    event.update(
+        reason="canonical_regime_gate_block",
+        decision_at=row["decision_at"],
+    )
+    for qualified in (False, True):
+        row["structural_qualified"] = qualified
+        journal = (
+            f"{prefix} {json.dumps(row)}\n" f"{decision_prefix} {json.dumps(event)}"
+        )
+        report = build_session_research_report(
+            session_date=date(2026, 11, 3),
+            journal=journal,
+            replay_path=tape,
+            trade_db=tmp_path / "missing.db",
+            output_path=tmp_path / "unknown_range.json",
+        )
+        groups = {
+            item["policy"]: item
+            for item in report["range_admission_comparisons"]
+            if item["horizon_seconds"] == 300
+        }
+        local = groups["shadow_unknown_local_range"]
+        assert local["unique_first_seen_excursions"] == 1
+        strict = groups["shadow_unknown_session_reclaim"]
+        assert strict["unique_first_seen_excursions"] == int(qualified)
+        assert strict["verified_risk_and_observed_horizon"] == 0
+        assert strict["modeled_net_rupees_mean"] is None
+        assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_rolling_vwap_reclaim_is_separate_and_never_inherits_session_risk(
+    tmp_path,
+) -> None:
+    tape, journal = _range_excursion_session(tmp_path)
+    observed, _ = journal.splitlines()
+    prefix, payload = observed.split(" ", 1)
+    row = json.loads(payload)
+    row.update(
+        excursion_basis="rolling_vwap",
+        excursion_id=(
+            f"{row['futures_symbol']}:{row['side']}:LOCAL:{row['excursion_first_bar']}"
+        ),
+        local_range_state="RANGE",
+        local_reclaim_side="CE",
+        structural_reason="rolling_vwap_reclaim_shadow_only",
+        structural_qualified=False,
+    )
+    forged_risk = {
+        "v": 1,
+        "decision_at": row["decision_at"],
+        "excursion_id": row["excursion_id"],
+        "symbol": CONTRACT,
+        "reason": "signal_emitted",
+        "modeled_stop_risk": 500,
+        "modeled_net_rr": 2.0,
+    }
+    journal += (
+        f"\n{prefix} {json.dumps(row)}\n"
+        f"RANGE_VWAP_EXCURSION_DECISION {json.dumps(forged_risk)}"
+    )
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "rolling_only.json",
+    )
+    assert len(report["range_excursion_opportunities"]) == 2
+    local = [
+        item
+        for item in report["range_excursion_horizons"]
+        if item["excursion_basis"] == "rolling_vwap"
+    ]
+    assert len(local) == 3
+    assert all(item["observed_book_and_futures_complete"] for item in local)
+    assert all(not item["same_decision_risk_773_and_net_rr_verified"] for item in local)
+    assert all(not item["baseline_signal_emitted_at_first_decision"] for item in local)
+    assert report["eligible_for_entry_filter_change"] is False
+
+
+def test_missing_lot_recovers_only_from_matching_archived_catalog(tmp_path) -> None:
+    for catalog_lot in (None, 65, 75):
+        folder = tmp_path / str(catalog_lot)
+        tape, journal = _range_excursion_session(folder, catalog_lot=catalog_lot)
+        observed, decision = journal.splitlines()
+        prefix, payload = observed.split(" ", 1)
+        row = json.loads(payload)
+        row["quote"]["lot_size"] = None
+        journal = f"{prefix} {json.dumps(row)}\n{decision}"
+        report = build_session_research_report(
+            session_date=date(2026, 11, 3),
+            journal=journal,
+            replay_path=tape,
+            trade_db=folder / "missing.db",
+            output_path=folder / "catalog_recovery.json",
+        )
+        horizons = report["range_excursion_horizons"]
+        assert len(horizons) == 3
+        assert all(
+            horizon["quantity_units_from_observed_contract"] == catalog_lot
+            for horizon in horizons
+        )
+        assert all(
+            horizon["observed_book_and_futures_complete"] == (catalog_lot == 65)
+            for horizon in horizons
+        )
+        assert all(
+            horizon["quantity_evidence_source"]
+            == (
+                "prior_same_scope_instrument_catalog"
+                if catalog_lot is not None
+                else "unverified"
+            )
+            for horizon in horizons
+        )
+        assert all(
+            not horizon["same_decision_risk_773_and_net_rr_verified"]
+            for horizon in horizons
+        )
+
+
+def test_conflicting_observed_and_catalog_lot_is_not_costed(tmp_path) -> None:
+    tape, journal = _range_excursion_session(tmp_path, catalog_lot=75)
+    report = build_session_research_report(
+        session_date=date(2026, 11, 3),
+        journal=journal,
+        replay_path=tape,
+        trade_db=tmp_path / "missing.db",
+        output_path=tmp_path / "catalog_conflict.json",
+    )
+    assert all(
+        row["quantity_evidence_source"] == "decision_catalog_lot_conflict"
+        and row["option_cost_adjusted"] is None
+        for row in report["range_excursion_horizons"]
+    )

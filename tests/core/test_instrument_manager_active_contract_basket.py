@@ -64,6 +64,9 @@ def test_active_contract_basket_uses_independent_option_expiry_and_maps_tokens()
     assert set(basket.option_symbols) >= {basket.selected_ce, basket.selected_pe}
     assert dict(basket.token_by_symbol)[basket.selected_ce] == basket.selected_ce_token
     assert dict(basket.symbol_by_token)[basket.selected_pe_token] == basket.selected_pe
+    assert basket.metadata["option_lot_size_by_symbol"] == {
+        symbol: 65 for symbol in basket.option_symbols
+    }
 
 
 def test_active_contract_basket_future_missing_is_soft_but_atm_missing_is_hard():
@@ -176,3 +179,15 @@ def test_hysteresis_falls_back_when_held_pair_is_unavailable(monkeypatch):
     assert rolled.atm_strike == 25050
     assert rolled.selected_ce == "NFO:NIFTYM25050CE"
     assert rolled.selected_pe == "NFO:NIFTYM25050PE"
+
+
+def test_basket_lot_evidence_never_uses_default_or_other_contract():
+    rows, _, _ = _dump()
+    ce = next(row for row in rows if row["tradingsymbol"] == "NIFTYW25000CE")
+    pe = next(row for row in rows if row["tradingsymbol"] == "NIFTYW25000PE")
+    ce["lot_size"] = 75
+    pe.pop("lot_size")
+    basket = InstrumentManager(KiteDump(rows)).get_active_nifty_contracts(25000)
+    lots = basket.metadata["option_lot_size_by_symbol"]
+    assert lots[basket.selected_ce] == 75
+    assert basket.selected_pe not in lots

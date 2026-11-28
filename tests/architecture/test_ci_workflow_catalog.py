@@ -7,8 +7,11 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
     "agent-context.yml",
+    "breeze-auth-smoke.yml",
+    "breeze-history-archive.yml",
+    "breeze-2yr-sharded.yml",
+    "breeze-targeted-backfill.yml",
     "ci.yml",
-    "failure-memory-candidates.yml",
     "orb-historical-research.yml",
     "slow-suite-weekly.yml",
 }
@@ -93,15 +96,9 @@ def test_no_one_off_patch_or_branch_specific_ci_remains() -> None:
     assert "git push origin HEAD:fix/" not in combined
 
 
-def test_failure_memory_workflow_is_read_only() -> None:
-    text = (WORKFLOWS / "failure-memory-candidates.yml").read_text(encoding="utf-8")
-
-    assert "actions: read" in text
-    assert "contents: read" in text
-    assert "contents: write" not in text
-    assert "pull-requests: write" not in text
-    assert "issues: write" not in text
-    assert "agent_failure_learn.py" in text
+def test_failure_classification_does_not_start_separate_ci_workflow() -> None:
+    assert not (WORKFLOWS / "failure-memory-candidates.yml").exists()
+    assert (ROOT / "scripts" / "agent_failure_learn.py").exists()
 
 
 def test_ci_normal_test_shards_feed_final_validation_directly() -> None:

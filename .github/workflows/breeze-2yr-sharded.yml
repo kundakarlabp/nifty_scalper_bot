@@ -1,0 +1,133 @@
+# Read-only, bounded NIFTY research history collection. Never places orders.
+# Each date window is independently encrypted and uploaded; no broker rows in logs.
+name: Breeze two-year sharded history archive
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - deploy/breeze_two_year_request.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: breeze-two-year-sharded-archive
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        window:
+          - {first: "2024-11-06", stop: "2024-12-06"}
+          - {first: "2024-12-06", stop: "2025-01-05"}
+          - {first: "2025-01-05", stop: "2025-02-04"}
+          - {first: "2025-02-04", stop: "2025-03-06"}
+          - {first: "2025-03-06", stop: "2025-04-05"}
+          - {first: "2025-04-05", stop: "2025-05-05"}
+          - {first: "2025-05-05", stop: "2025-06-04"}
+          - {first: "2025-06-04", stop: "2025-07-04"}
+          - {first: "2025-07-04", stop: "2025-08-03"}
+          - {first: "2025-08-03", stop: "2025-09-02"}
+          - {first: "2025-09-02", stop: "2025-10-02"}
+          - {first: "2025-10-02", stop: "2025-11-01"}
+          - {first: "2025-11-01", stop: "2025-12-01"}
+          - {first: "2025-12-01", stop: "2025-12-31"}
+          - {first: "2025-12-31", stop: "2026-01-30"}
+          - {first: "2026-01-30", stop: "2026-03-01"}
+          - {first: "2026-03-01", stop: "2026-03-31"}
+          - {first: "2026-03-31", stop: "2026-04-30"}
+          - {first: "2026-04-30", stop: "2026-05-30"}
+          - {first: "2026-05-30", stop: "2026-06-29"}
+          - {first: "2026-06-29", stop: "2026-07-29"}
+          - {first: "2026-07-29", stop: "2026-08-28"}
+          - {first: "2026-08-28", stop: "2026-09-27"}
+          - {first: "2026-09-27", stop: "2026-10-27"}
+          - {first: "2026-10-27", stop: "2026-11-06"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated official SDK
+        run: python -m pip install --disable-pip-version-check 'breeze-connect==1.0.69'
+      - name: Validate public recipient certificate and create private workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/breeze-private" "$RUNNER_TEMP/breeze-export"
+          openssl x509 -in deploy/breeze_transport_recipient.pem -noout -checkend 7200
+      - name: Validate and configure bounded window
+        shell: bash
+        env:
+          WINDOW_FIRST: ${{ matrix.window.first }}
+          WINDOW_STOP: ${{ matrix.window.stop }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          from pathlib import Path
+
+          base = json.loads(Path("deploy/breeze_two_year_request.json").read_text())
+          if base.get("enabled") is not True:
+              raise SystemExit("Breeze sharded research run not enabled")
+          first = dt.date.fromisoformat(os.environ["WINDOW_FIRST"])
+          stop = dt.date.fromisoformat(os.environ["WINDOW_STOP"])
+          target_first = dt.date.fromisoformat(base["target_first"])
+          target_stop = dt.date.fromisoformat(base["target_stop_exclusive"])
+          if not (target_first <= first < stop <= target_stop):
+              raise SystemExit("Breeze research window outside approved bounds")
+          if (stop - first).days > 30 or int(base["max_requests_per_window"]) > 400:
+              raise SystemExit("Breeze research window exceeds its acquisition budget")
+          request = {
+              "request_id": f"breeze-research-{first}-{stop}",
+              "first": str(first),
+              "stop_exclusive": str(stop),
+              "max_requests": int(base["max_requests_per_window"]),
+          }
+          (Path(os.environ["RUNNER_TEMP"]) / "breeze_window.json").write_text(json.dumps(request))
+          PY
+      - name: Collect bounded market history
+        timeout-minutes: 100
+        env:
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_API_SECRET: ${{ secrets.BREEZE_API_SECRET }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python -m scripts.archive_breeze_bulk
+          --request "$RUNNER_TEMP/breeze_window.json"
+          --outdir "$RUNNER_TEMP/breeze-private"
+      - name: Encrypt all collected files and partial coverage
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -d "$RUNNER_TEMP/breeze-private" ]; then
+            tar -czf "$RUNNER_TEMP/breeze-private.tar.gz" -C "$RUNNER_TEMP/breeze-private" .
+            openssl cms -encrypt -binary -aes-256-gcm \
+              -in "$RUNNER_TEMP/breeze-private.tar.gz" \
+              -outform DER -out "$RUNNER_TEMP/breeze-export/history.cms" \
+              deploy/breeze_transport_recipient.pem
+            cd "$RUNNER_TEMP/breeze-export"
+            sha256sum history.cms > history.cms.sha256
+          fi
+      - name: Preserve encrypted transport only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: breeze-window-${{ matrix.window.first }}-${{ matrix.window.stop }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/breeze-export/
+          if-no-files-found: error
+          retention-days: 30

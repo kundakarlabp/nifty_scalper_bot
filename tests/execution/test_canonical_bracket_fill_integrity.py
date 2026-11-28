@@ -301,6 +301,7 @@ def test_tp1_residual_stop_arm_failure_blocks_entries_and_never_claims_proof(
     observed_events: list[str] = []
     manager.set_notifier(lambda event, _data: observed_events.append(event))
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    broker.positions[0]["product"] = "MIS"
     # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
     monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
@@ -338,6 +339,7 @@ def test_tp1_residual_stop_arm_exception_remains_fail_closed(
         average_price=110.0,
     )
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    broker.positions[0]["product"] = "MIS"
     # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
     monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
@@ -370,6 +372,7 @@ def test_tp1_verified_live_residual_stop_keeps_entries_unblocked(
     events: list[str] = []
     manager.set_notifier(lambda event, _payload: events.append(event))
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    broker.positions[0]["product"] = "MIS"
     # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
     monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
@@ -382,3 +385,106 @@ def test_tp1_verified_live_residual_stop_keeps_entries_unblocked(
     assert manager.has_unresolved_exit() is False
     assert "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED" not in events
     assert "PARTIAL_EXIT_CONFIRMED" in events
+
+
+@pytest.mark.parametrize("broker_product", ["NRML", ""])
+def test_live_tp1_does_not_resume_using_another_or_unlabeled_product(
+    monkeypatch: pytest.MonkeyPatch, broker_product: str
+) -> None:
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-product-ambiguous",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.0,
+    )
+    broker.positions[0]["product"] = broker_product
+    assert bracket.product == "MIS"
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._exchange_protective_stop_enabled = True
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.tp_levels[0].executed is False
+    # The inherited mismatch latch may retain the observed symbol-level
+    # residual, but it must never re-arm or mark this bracket as active.
+    assert bracket.remaining_quantity > 0
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.OPEN_ACTIVE.value
+    assert order_manager.place_calls == []
+
+
+def test_live_tp1_reconciles_mis_residual_despite_distinct_nrml_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-mixed-products",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.05,
+    )
+    broker.positions = [
+        {"symbol": SYMBOL, "quantity": 65, "product": "MIS"},
+        {"symbol": SYMBOL, "quantity": -65, "product": "NRML"},
+    ]
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", lambda _b: True)
+    manager._exchange_protective_stop_enabled = True
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.remaining_quantity == 65
+    assert bracket.tp_levels[0].executed is True
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exit_pending is False
+    assert order_manager.place_calls == []
+
+
+def test_live_partial_target_does_not_close_if_its_product_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-mis-absent",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=0,
+        average_price=110.05,
+    )
+    broker.positions = [{"symbol": SYMBOL, "quantity": 65, "product": "NRML"}]
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._filled_position_sync_grace_seconds = 0.0
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.tp_levels[0].executed is False
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert order_manager.place_calls == []
+
+
+def test_tp1_cannot_resume_long_protection_on_reversed_broker_short() -> None:
+    """A signed -65 net is not 65 long contracts for TP1 residual re-arming."""
+    manager, order_manager, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-reversed-position",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=-65,
+        average_price=110.05,
+    )
+
+    assert manager._reconcile_exit_state(bracket, requested_by="post_submit") is False
+    assert bracket.tp_levels[0].executed is False
+    assert bracket.exit_pending is True
+    assert bracket.exit_state != BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.position_flat_confirmed is False
+    assert manager.has_unresolved_exit() is True
+    assert order_manager.place_calls == []

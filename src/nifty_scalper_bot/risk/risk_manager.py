@@ -350,26 +350,25 @@ class RiskManager:
         return max(pct_cap, abs_cap)
 
     def _sync_daily_cap_from_verified_balance(self, balance: float) -> None:
-        """Establish today's loss cap from verified funds before any exposure.
+        """Freeze the cash-based day budget after exposure, but permit tighter ceilings.
 
-        Broker available cash is lower while option premium is deployed. That
-        debit is not an equity drawdown, so the daily loss allowance is frozen
-        after the first trade or open exposure, regardless of cash movements.
-        The separate affordability guard continues to use free cash.
+        Premium debits must never rebase the day loss allowance. A newly
+        configured positive absolute INR ceiling may still tighten an existing
+        intraday circuit; it must never increase the circuit allowance.
         """
         switches = getattr(self, "_switches", None)
         if switches is None:
             return
         updated = self._configured_daily_loss_cap(balance)
         previous = float(getattr(switches, "max_day_loss", 0.0) or 0.0)
-        if updated <= 0.0 or abs(updated - previous) < 1e-8:
+        if updated <= 0.0:
             return
         try:
             count = getattr(self.position_manager, "trades_today", None)
             positions = getattr(self.position_manager, "get_open_positions", None)
             if not callable(positions):
                 positions = getattr(self.position_manager, "get_all_positions", None)
-            if (
+            exposure_locked = (
                 self._breaker_tripped
                 or self._completed_trade_costs_today > 0
                 or abs(float(self._last_pnl_snapshot)) > 1e-8
@@ -381,9 +380,24 @@ class RiskManager:
                     updated > previous
                     and abs(float(switches.day_loss())) > 1e-8
                 )
-            ):
-                return
-        except (TypeError, ValueError, AttributeError, RuntimeError):
+            )
+            if exposure_locked:
+                # The balance percentage can fall merely because option
+                # premium is deployed. Only a positive explicit INR ceiling,
+                # never the current cash percentage, may reduce a frozen cap.
+                absolute_ceiling = max(
+                    float(getattr(self.settings, "max_daily_loss_absolute", 0.0)), 0.0
+                )
+                if (
+                    previous <= 0.0
+                    or absolute_ceiling <= 0.0
+                    or absolute_ceiling >= previous - 1e-8
+                ):
+                    return
+                updated = absolute_ceiling
+        except (TypeError, ValueError, OverflowError, AttributeError, RuntimeError):
+            return
+        if abs(updated - previous) < 1e-8:
             return
         switches.max_day_loss = updated
         self._persist_risk_circuit_state()
@@ -394,6 +408,7 @@ class RiskManager:
                 "previous": round(previous, 2),
                 "updated": round(updated, 2),
                 "verified_balance": round(float(balance), 2),
+                "cause": "absolute_ceiling_tightened" if exposure_locked else "pre_entry_balance",
             },
         )
 
@@ -813,6 +828,7 @@ class RiskManager:
         prospective_risk = stop_risk
         cost_reserve = 0.0
         effective_budget = remaining
+        stop_limit_risk = None
         if broker_live:
             with suppress(Exception):
                 economics = evaluate_final_net_rr(signal)
@@ -823,6 +839,9 @@ class RiskManager:
                     cost_reserve = max(
                         prospective_risk - float(stop_risk or 0.0), 0.0
                     )
+                    stop_limit_risk = economics.stop_limit_net_risk
+                    if stop_limit_risk is not None:
+                        prospective_risk = max(prospective_risk, stop_limit_risk)
             with suppress(TypeError, ValueError, AttributeError):
                 balance = max(float(self.account_balance or 0.0), 0.0)
                 risk_pct = max(float(self.settings.per_trade_risk_pct or 0.0), 0.0)
@@ -848,8 +867,9 @@ class RiskManager:
                 signal,
                 reason,
                 "DAILY_RISK_BUDGET",
-                risk_basis="stop_plus_round_trip_costs",
+                risk_basis="stop_limit_plus_round_trip_costs",
                 prospective_stop_risk=stop_risk,
+                prospective_stop_limit_risk=stop_limit_risk,
                 transaction_cost_reserve=cost_reserve,
                 prospective_loss_risk=prospective_risk,
                 effective_risk_budget=effective_budget,

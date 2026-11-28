@@ -13,8 +13,8 @@ exporter. Only completed calendar dates are requested, for at most 90 days.
 It also calls the existing canonical completed-trade analyzer with actual-cost
 requirements. Reports are stored in `data/research/<id>/`, with HTTP status and
 latest analysis at `/admin/research/status` and `/admin/research/report`.
-The existing `/trading/status` diagnostic also includes `research_job`, so the
-unchanged read-only AppDeploy relay can retrieve job status from ChatGPT.
+The existing `/trading/status` diagnostic also includes `research_job`; use
+approved AWS operator endpoints for current research-job status inspection.
 
 ## Evidence boundary
 
@@ -35,7 +35,7 @@ active basket leaves a failed status, never success. The immutable request ID
 prevents silent repeated retries. A fresh ID explicitly retries. The OS lock is
 held by the detached worker until exit; concurrent starts return busy. Removing
 the request manifest stops GitHub-initiated requests; dashboard requests remain
-explicit. No AppDeploy relay settings or version are changed.
+explicit. No external monitoring or live execution components are modified.
 
 Deployment and the real broker job must be observed separately from local tests.
 

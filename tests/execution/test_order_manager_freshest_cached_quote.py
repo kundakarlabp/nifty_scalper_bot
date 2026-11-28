@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 from nifty_scalper_bot.execution.order_manager import OrderManager, TradePlan
 
@@ -81,6 +82,98 @@ def _depth_quote(
             "sell": [{"price": 100.10, "quantity": ask_qty}],
         },
     }
+
+
+def test_stale_exchange_book_is_not_freshened_by_recent_receipt() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    quote["exchange_timestamp"] = datetime.now(timezone.utc) - timedelta(seconds=45)
+    quote["timestamp_quality"] = "exchange"
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+
+    diagnostics = manager._extract_quote_diagnostics(quote)
+    assert diagnostics["timestamp_key"] == "exchange_timestamp"
+    assert diagnostics["age_ms"] > 40_000
+
+
+def test_future_exchange_book_is_unusable_even_with_recent_receipt() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    quote["exchange_timestamp"] = datetime.now(timezone.utc) + timedelta(seconds=60)
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+    diagnostics = manager._extract_quote_diagnostics(quote)
+    plan = TradePlan(
+        symbol=symbol,
+        side="BUY",
+        quantity=65,
+        entry_price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+    )
+
+    assert diagnostics["age_ms"] is None
+    rejection = manager._validate_live_entry_quote(plan, diagnostics)
+    assert rejection is not None
+    assert rejection.reason == "entry_quote_timestamp_unusable"
+
+
+def test_explicit_invalid_or_receipt_only_source_cannot_authorize_live_book() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(data_hub=_TickProvider({}), mdm=_TickProvider({}))
+    for provenance in (
+        {"timestamp_quality": "synthetic"},
+        {"timestamp_quality": "received_at"},
+        {"source_timestamp_valid": False},
+        {"timestamp_source": "received_at", "source_timestamp_valid": True},
+        {"timestamp_source": "received_at_fallback", "source_timestamp_valid": True},
+    ):
+        quote = {**_depth_quote(symbol), **provenance}
+        diagnostics = manager._extract_quote_diagnostics(quote)
+        assert diagnostics["age_ms"] is None
+
+
+def test_legacy_receipt_only_quote_keeps_nonlive_age_compatibility() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    quote = _depth_quote(symbol)
+    manager = _manager(data_hub=_TickProvider(quote), mdm=_TickProvider(quote))
+
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] is not None
+
+
+def test_runtime_owns_quote_methods_without_facade_monkey_patching() -> None:
+    from nifty_scalper_bot.execution import order_manager_core
+    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
+
+    assert OrderManager is RuntimeOrderManager
+    for name in ("_extract_quote_diagnostics", "_get_latest_quote_safe"):
+        method = RuntimeOrderManager.__dict__[name]
+        assert method.__module__ == "nifty_scalper_bot.execution.runtime_order_manager"
+        assert method is not getattr(order_manager_core.OrderManager, name)
+
+
+def test_direct_runtime_quote_preflight_uses_cached_full_book_without_pull() -> None:
+    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
+
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = object.__new__(RuntimeOrderManager)
+    manager._data_hub = data_hub
+    manager.data_hub = None
+    manager._market_data = None
+    manager._market_data_manager = _TickProvider(
+        _depth_quote(symbol, bid_qty=130, ask_qty=195)
+    )
+    manager.market_data_manager = None
+
+    selected = manager._get_latest_quote_safe(symbol)
+    assert selected is not None
+    assert selected["depth"]["sell"][0]["quantity"] == 195
+    diagnostics = manager._extract_quote_diagnostics(selected)
+    assert diagnostics["bid"] == 99.90
+    assert diagnostics["ask"] == 100.10
+    assert diagnostics["bid_qty"] == 130
+    assert diagnostics["ask_qty"] == 195
+    assert data_hub.pull_attempts == 0
 
 
 def test_order_preflight_uses_freshest_cached_provider_quote() -> None:
@@ -265,3 +358,52 @@ def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
     assert slippage == 0.0
     assert historical is None
     assert data_hub.pull_attempts == 0
+
+
+def test_expired_full_depth_cannot_outrank_fresh_executable_quote() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    stale = _depth_quote(symbol, marker="stale_full")
+    stale["exchange_timestamp"] = datetime.now(timezone.utc) - timedelta(seconds=45)
+    stale["timestamp_quality"] = "exchange"
+    fresh = _quote(symbol, marker="fresh_executable", age_s=0.02)
+    fresh.pop("ask_quantity")
+    manager = _manager(data_hub=_TickProvider(stale), mdm=_TickProvider(fresh))
+
+    quote = manager._get_latest_quote_safe(symbol)
+
+    assert quote is not None
+    assert quote["marker"] == "fresh_executable"
+
+
+def test_attested_canonical_time_is_used_without_reinterpreting_raw_time() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(data_hub=_TickProvider({}), mdm=_TickProvider({}))
+    now = datetime.now(timezone.utc)
+    quote = {
+        **_depth_quote(symbol),
+        "timestamp": now - timedelta(seconds=45),
+        "exchange_timestamp": now,
+        "timestamp_source": "exchange_timestamp",
+        "source_timestamp_valid": True,
+    }
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] > 40_000
+    quote["timestamp"] = now + timedelta(milliseconds=500)
+    assert manager._extract_quote_diagnostics(quote)["age_ms"] is None
+
+
+def test_quote_selection_extracts_diagnostics_once_per_provider(monkeypatch) -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(
+        data_hub=_TickProvider(_depth_quote(symbol)),
+        mdm=_TickProvider(_depth_quote(symbol)),
+    )
+    original = manager._extract_quote_diagnostics
+    calls = []
+
+    def track(quote):
+        calls.append(quote)
+        return original(quote)
+
+    monkeypatch.setattr(manager, "_extract_quote_diagnostics", track)
+    assert manager._get_latest_quote_safe(symbol) is not None
+    assert len(calls) == 2

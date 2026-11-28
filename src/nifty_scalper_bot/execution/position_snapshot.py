@@ -4,10 +4,12 @@
 Key responsibilities:
     - Reject missing, malformed, partial, cached, or ambiguous exposure data.
     - Normalize symbols and net quantities once for every execution subsystem.
-    - Provide deterministic symbol and account-flat queries.
+    - Provide product-qualified signed quantities and account-flat queries.
+    - Refuse symbol-only quantities when distinct MIS/NRML rows coexist.
 
 Operational constraints:
     - Only a valid complete snapshot may prove flatness.
+    - Missing product identity never authorizes a reducing order.
     - ``day`` rows and stale cache payloads are never exposure authority.
     - Malformed rows invalidate the complete snapshot rather than being skipped.
 """
@@ -59,26 +61,46 @@ class PositionSnapshot:
     source: str
     fetched_at: float
 
-    def quantity_for(self, symbol: str) -> int:
-        """Return signed net quantity for ``symbol``; absent complete rows are zero."""
-        target = normalize_symbol(symbol)
-        for row in self.rows:
-            if row.symbol == target:
-                return row.quantity
-        return 0
+    def quantity_for(self, symbol: str, *, product: str | None = None) -> int:
+        """Return signed quantity without netting distinct broker products.
 
-    def exposure_state_for(self, symbol: str) -> BrokerExposureState:
-        """Return symbol exposure while distinguishing explicit flat from absent."""
+        A symbol-only request is ambiguous when multiple broker products exist.
+        An explicit product never treats a missing product label as a match.
+        """
         target = normalize_symbol(symbol)
-        for row in self.rows:
-            if row.symbol != target:
-                continue
-            return (
-                BrokerExposureState.FLAT
-                if row.quantity == 0
-                else BrokerExposureState.NONZERO
+        matches = [row for row in self.rows if row.symbol == target]
+        if not matches:
+            return 0
+        if product is not None:
+            expected = str(product).strip().upper()
+            if not expected or any(
+                not str(row.raw.get("product") or "").strip() for row in matches
+            ):
+                raise PositionSnapshotError(
+                    f"broker position product unavailable for {target}"
+                )
+            matches = [
+                row
+                for row in matches
+                if str(row.raw.get("product") or "").strip().upper() == expected
+            ]
+        elif len(matches) > 1:
+            raise PositionSnapshotError(
+                f"broker position product ambiguous for {target}"
             )
-        return BrokerExposureState.ABSENT
+        return matches[0].quantity if matches else 0
+
+    def exposure_state_for(
+        self, symbol: str, *, product: str | None = None
+    ) -> BrokerExposureState:
+        """Return product-specific exposure, never a cross-product net."""
+        target = normalize_symbol(symbol)
+        if not any(row.symbol == target for row in self.rows):
+            return BrokerExposureState.ABSENT
+        quantity = self.quantity_for(symbol, product=product)
+        return (
+            BrokerExposureState.FLAT if quantity == 0 else BrokerExposureState.NONZERO
+        )
 
     @property
     def all_flat(self) -> bool:
@@ -152,7 +174,8 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
     """Validate and normalize a complete broker net-position snapshot."""
     raw_rows, source = _extract_rows(payload)
     validated: list[PositionSnapshotRow] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    products_by_symbol: dict[str, set[str]] = {}
     for index, item in enumerate(raw_rows):
         if not isinstance(item, Mapping):
             raise PositionSnapshotError(f"position row {index} is not an object")
@@ -164,9 +187,14 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
         symbol = normalize_symbol(str(raw_symbol))
         if not symbol:
             raise PositionSnapshotError(f"position row {index} has an empty symbol")
-        if symbol in seen:
-            raise PositionSnapshotError(f"duplicate broker position row for {symbol}")
-        seen.add(symbol)
+        product = str(item.get("product") or "").strip().upper()
+        key = (symbol, product)
+        if key in seen:
+            raise PositionSnapshotError(
+                f"duplicate broker position row for {symbol} product={product}"
+            )
+        seen.add(key)
+        products_by_symbol.setdefault(symbol, set()).add(product)
         validated.append(
             PositionSnapshotRow(
                 symbol=symbol,
@@ -174,6 +202,10 @@ def decode_position_snapshot(payload: object) -> PositionSnapshot:
                 raw=dict(item),
             )
         )
+    if any(
+        len(products) > 1 and "" in products for products in products_by_symbol.values()
+    ):
+        raise PositionSnapshotError("broker position product ambiguous or missing")
     return PositionSnapshot(
         rows=tuple(validated),
         source=source,

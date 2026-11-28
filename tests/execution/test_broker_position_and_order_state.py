@@ -56,14 +56,14 @@ def test_partial_position_is_non_flat():
     assert evidence.net_quantity == 25
 
 
-def test_multiple_position_rows_are_net_aggregated():
+def test_multiple_broker_products_never_prove_flatness():
     rows = [
         {"tradingsymbol": "NIFTY2670124000CE", "quantity": 65, "product": "MIS"},
         {"tradingsymbol": "NIFTY2670124000CE", "quantity": -65, "product": "NRML"},
     ]
     evidence = evidence_from_positions("NFO:NIFTY2670124000CE", rows)
-    assert evidence.state is BrokerPositionState.FLAT_CONFIRMED
-    assert evidence.net_quantity == 0
+    assert evidence.state is BrokerPositionState.UNKNOWN
+    assert evidence.net_quantity is None
 
 
 def test_negative_quantity_is_non_flat():
@@ -73,6 +73,15 @@ def test_negative_quantity_is_non_flat():
     )
     assert evidence.state is BrokerPositionState.NON_FLAT_CONFIRMED
     assert evidence.net_quantity == -65
+
+
+def test_missing_quantity_never_proves_flatness():
+    evidence = evidence_from_positions(
+        "NFO:NIFTY2670124000CE",
+        [{"tradingsymbol": "NIFTY2670124000CE", "product": "MIS"}],
+    )
+    assert evidence.state is BrokerPositionState.UNKNOWN
+    assert evidence.net_quantity is None
 
 
 def test_malformed_positions_are_unknown_not_flat():

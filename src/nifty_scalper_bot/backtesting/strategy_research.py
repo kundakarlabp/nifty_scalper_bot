@@ -410,7 +410,9 @@ def _research_orb_structural_context(
         "underlying_direction_confidence": (
             observation.confidence if observation else 0.0
         ),
-        "context_fresh": bool(spot_observation or futures_observation),
+        # Both completed underlying histories must exist; a neutral or
+        # conflicting direction estimate does not make an observed bar stale.
+        "context_fresh": bool(spot_payload) and bool(futures_payload),
         # Closed minute bars establish bar-order causality, NOT live tick age.
         "context_age_seconds": 0.0,
         "research_context_age_proxy": "completed_bar_same_step",
@@ -1269,6 +1271,7 @@ def _scenario(
                 future,
                 {
                     "price": bars[future]["close"],
+                    "completed_bar_timestamp": timestamp.timestamp(),
                     "price_series": engine.get_history(future, count=20),
                     "ema_fast": engine.get_ema(future, 12),
                     "ema_slow": engine.get_ema(future, 26),
@@ -2441,8 +2444,22 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
             None,
         ),
         (
+            "early_entry_30",
+            {"ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "30"},
+            None,
+            1.5,
+            None,
+        ),
+        (
             "early_entry_60",
             {"ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "60"},
+            None,
+            1.5,
+            None,
+        ),
+        (
+            "extended_entry_180_research",
+            {"ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "180"},
             None,
             1.5,
             None,
@@ -2526,8 +2543,61 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         ),
         reverse=True,
     )
+    # Same archive and costs, but different window lengths can cause different
+    # trades/holding state. These are descriptive matched-entry identities,
+    # not a causal value assigned to every suppressed signal.
+    by_name = {candidate["name"]: candidate for candidate in candidates}
+    timing_comparisons = []
+    reference = by_name["cost_gated_reference"]
+    for name in (
+        "early_entry_30",
+        "early_entry_60",
+        "extended_entry_180_research",
+    ):
+        proposed = by_name[name]
+        for baseline, variant in zip(
+            reference["scenarios"], proposed["scenarios"], strict=True
+        ):
+            if baseline["slippage_bps_per_side"] != variant["slippage_bps_per_side"]:
+                raise ValueError("orb_timing_slippage_alignment_failed")
+            original_fills = {
+                (str(t["entry_time"]), str(t["symbol"]))
+                for t in baseline.get("trades", ())
+            }
+            variant_fills = {
+                (str(t["entry_time"]), str(t["symbol"]))
+                for t in variant.get("trades", ())
+            }
+            if len(original_fills) != len(baseline.get("trades", ())) or len(
+                variant_fills
+            ) != len(variant.get("trades", ())):
+                raise ValueError("orb_timing_duplicate_entry_identity")
+            timing_comparisons.append(
+                {
+                    "control": "cost_gated_reference",
+                    "treatment": name,
+                    "slippage_bps_per_side": baseline["slippage_bps_per_side"],
+                    "shared_resolved_entry_count": len(original_fills & variant_fills),
+                    "treatment_only_resolved_entry_count": len(
+                        variant_fills - original_fills
+                    ),
+                    "control_only_resolved_entry_count": len(
+                        original_fills - variant_fills
+                    ),
+                    "control_unresolved_exit_count": len(
+                        baseline.get("unresolved_trades", ())
+                    ),
+                    "treatment_unresolved_exit_count": len(
+                        variant.get("unresolved_trades", ())
+                    ),
+                    "same_market_archive": True,
+                    "different_admitted_trade_cohorts": True,
+                    "profitability_inference_allowed": False,
+                }
+            )
     return {
         "scope": "bounded_orb_active_contract_component_comparison",
+        "timing_window_comparisons": timing_comparisons,
         "evidence_label": "RESEARCH_CANDIDATE",
         "live_equivalent": False,
         "data_sha256": digest,

@@ -5,14 +5,17 @@ adds only fill-integrity invariants:
 
 * confirmed entry slippage re-anchors every unexecuted target;
 * a broker FILLED exit cannot close local state while broker exposure remains;
-* a confirmed TP1 fill resumes protection for the residual position;
-* any other FILLED/non-flat mismatch fails closed and blocks new entries.
+* a confirmed TP1 fill resumes protection only for a broker-verified,
+  direction-matched residual position;
+* any other FILLED/non-flat mismatch fails closed and blocks new entries;
+* rescued exits retain broker-order identity until terminal cancellation and
+  signed residual checks establish safe replacement quantity.
 
 Responsibility: Reconcile TP1 fills, residual positions and broker-flat truth.
 Ownership: Core bracket manager owns virtual stops and exchange-resident SLs;
 this layer enforces canonical broker-position and residual-stop proof.
 Safety: Unverified residual broker protection blocks new live entries rather
-than being reported as protected.
+than being reported as protected. LIVE reconciliation is product-qualified.
 
 The compatibility inheritance is temporary. Later stages will fold these
 invariants into the single explicit bracket implementation and remove runtime
@@ -70,10 +73,17 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
         super().__init__(*args, **kwargs)
 
-    def _broker_position_quantity(self, symbol: str) -> int | None:
-        """Return absolute broker quantity, or ``None`` when exposure is unknown."""
+    def _broker_position_quantity(
+        self, symbol: str, *, product: str | None = None
+    ) -> int | None:
+        """Return product-qualified quantity, or ``None`` when exposure is unknown."""
         try:
-            return self._authoritative_position_quantity(symbol)
+            quantity = (
+                self._authoritative_position_quantity(symbol)
+                if product is None
+                else self._authoritative_position_quantity(symbol, product=product)
+            )
+            return normalize_authoritative_quantity(quantity)
         except Exception as exc:  # noqa: BLE001
             _core.LOGGER.error(
                 "BROKER_POSITION_QUANTITY_UNKNOWN symbol=%s error=%s",
@@ -171,6 +181,42 @@ class CanonicalBracketManager(HardenedBracketManager):
             residual_quantity >= previous_remaining
             or residual_quantity > expected_residual
         ):
+            return False
+
+        # A reversed short or a different broker product must never count as
+        # the surviving TP1 residual. Non-live simulation keeps legacy fixtures.
+        try:
+            signed_residual = int(
+                self._authoritative_position_snapshot().quantity_for(
+                    bracket.symbol,
+                    product=(
+                        (bracket.product or "") if self._is_live_execution() else None
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown direction is not proof
+            _core.LOGGER.critical(
+                "PARTIAL_EXIT_RESIDUAL_DIRECTION_UNVERIFIED "
+                "bracket_id=%s symbol=%s error_type=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                type(exc).__name__,
+            )
+            return False
+        expected_signed = (
+            residual_quantity if bracket.side == "BUY" else -residual_quantity
+        )
+        if signed_residual != expected_signed:
+            _core.LOGGER.critical(
+                "PARTIAL_EXIT_RESIDUAL_DIRECTION_MISMATCH "
+                "bracket_id=%s symbol=%s side=%s broker_signed_qty=%s "
+                "expected_signed_qty=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                bracket.side,
+                signed_residual,
+                expected_signed,
+            )
             return False
 
         fill_price = self._extract_status_price(status_payload)
@@ -378,7 +424,10 @@ class CanonicalBracketManager(HardenedBracketManager):
             )
 
         if mismatch_latched and not order_id:
-            residual = self._broker_position_quantity(bracket.symbol)
+            residual = self._broker_position_quantity(
+                bracket.symbol,
+                product=bracket.product if self._is_live_execution() else None,
+            )
             if residual == 0:
                 self._clear_fill_sync_state(bracket)
                 self._close_bracket(
@@ -400,7 +449,10 @@ class CanonicalBracketManager(HardenedBracketManager):
 
             mapped_status = map_broker_order_status(status)
             if mapped_status.state is not DomainOrderState.FILLED:
-                flat_evidence = self._broker_position_evidence(bracket.symbol)
+                flat_evidence = self._broker_position_evidence(
+                    bracket.symbol,
+                    product=bracket.product if self._is_live_execution() else None,
+                )
                 if flat_evidence.state is not BrokerPositionState.FLAT_CONFIRMED:
                     bracket.flat_nonterminal_since_monotonic = None
                     bracket.flat_nonterminal_since_utc = None
@@ -503,17 +555,23 @@ class CanonicalBracketManager(HardenedBracketManager):
                     return False
 
             if mapped_status.state is DomainOrderState.FILLED:
-                residual = self._broker_position_quantity(bracket.symbol)
-                if residual == 0:
+                residual = self._broker_position_quantity(
+                    bracket.symbol,
+                    product=bracket.product if self._is_live_execution() else None,
+                )
+                target = self._matching_partial_target(bracket)
+                if residual == 0 and (
+                    target is None
+                    or int(target.quantity or 0) >= int(bracket.remaining_quantity or 0)
+                ):
                     self._clear_fill_sync_state(bracket)
                     return super()._reconcile_exit_state(
                         bracket,
                         requested_by=requested_by,
                     )
-
-                target = self._matching_partial_target(bracket)
                 if (
                     residual is not None
+                    and residual > 0
                     and target is not None
                     and self._resume_after_partial_target(
                         bracket,
@@ -568,11 +626,17 @@ class CanonicalBracketManager(HardenedBracketManager):
             return
         super()._process_exit_state(bracket, action, now=now)
 
-    def _broker_position_evidence(self, symbol: str) -> BrokerPositionEvidence:
+    def _broker_position_evidence(
+        self, symbol: str, *, product: str | None = None
+    ) -> BrokerPositionEvidence:
         """Return typed broker-position truth; unknown/API errors fail closed."""
         now = datetime.now(timezone.utc)
         try:
-            qty = self._authoritative_position_quantity(symbol)
+            qty = (
+                self._authoritative_position_quantity(symbol)
+                if product is None
+                else self._authoritative_position_quantity(symbol, product=product)
+            )
         except Exception as exc:  # noqa: BLE001 - broker boundary
             _core.LOGGER.error(
                 "BROKER_POSITION_EVIDENCE_API_ERROR symbol=%s error_type=%s",
@@ -628,9 +692,9 @@ class CanonicalBracketManager(HardenedBracketManager):
             "authoritative_position_quantity",
         )
 
-    def _safe_position_flat(self, symbol: str) -> bool:
+    def _safe_position_flat(self, symbol: str, *, product: str | None = None) -> bool:
         return (
-            self._broker_position_evidence(symbol).state
+            self._broker_position_evidence(symbol, product=product).state
             is BrokerPositionState.FLAT_CONFIRMED
         )
 
@@ -644,7 +708,10 @@ class CanonicalBracketManager(HardenedBracketManager):
     ) -> None:
         """Cancel/replace stale exits without treating a non-flat fill as closure."""
 
-        flat_evidence = self._broker_position_evidence(bracket.symbol)
+        flat_evidence = self._broker_position_evidence(
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        )
         strict_live = bool(getattr(self, "_is_live_execution", lambda: True)())
         if strict_live and flat_evidence.state not in {
             BrokerPositionState.FLAT_CONFIRMED,
@@ -735,11 +802,21 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
 
         cancel_requested = self._cancel_exit_order(order_id)
-        terminal = (
-            self._wait_for_cancel_or_fill(order_id)
-            if cancel_requested
-            else "unconfirmed"
-        )
+        try:
+            terminal = (
+                self._wait_for_cancel_or_fill(order_id)
+                if cancel_requested
+                else "unconfirmed"
+            )
+        except Exception as exc:  # noqa: BLE001 - broker outcome unknown
+            _core.LOGGER.error(
+                "EXIT_RESCUE_CANCEL_STATUS_UNAVAILABLE bracket_id=%s "
+                "order_id=%s error_type=%s",
+                bracket.bracket_id,
+                order_id,
+                type(exc).__name__,
+            )
+            terminal = "unconfirmed"
         if terminal == "filled":
             with self._lock:
                 bracket.exit_in_progress = False
@@ -748,8 +825,14 @@ class CanonicalBracketManager(HardenedBracketManager):
                 requested_by="stale_rescue_filled",
             )
             return
-        flat_evidence = self._broker_position_evidence(bracket.symbol)
-        if flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED:
+        flat_evidence = self._broker_position_evidence(
+            bracket.symbol,
+            product=bracket.product if self._is_live_execution() else None,
+        )
+        if (
+            terminal == "cancelled"
+            and flat_evidence.state is BrokerPositionState.FLAT_CONFIRMED
+        ):
             with self._lock:
                 bracket.exit_in_progress = False
             self._close_bracket(
@@ -769,9 +852,8 @@ class CanonicalBracketManager(HardenedBracketManager):
 
         with self._lock:
             bracket.exit_in_progress = False
-            bracket.exit_order_id = None
-            bracket.pending_exit_order_id = None
-            bracket.last_exit_error = None
+        # Preserve the cancelled order identity until the inherited rescue
+        # submit helper independently validates signed broker residual.
         self._submit_rescue_exit(
             bracket,
             qty=qty,

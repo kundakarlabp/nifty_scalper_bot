@@ -1,8 +1,14 @@
 """Utility classes for calculating technical indicators.
 
-This module provides a :class:`PriceHistory` container for efficiently storing
-OHLCV (open, high, low, close, volume) data and an :class:`IndicatorEngine`
-that calculates common technical indicators from the stored price history.
+Responsibility: store canonical symbol-scoped OHLCV history in PriceHistory and
+calculate indicator snapshots through IndicatorEngine. The named EMA9/EMA21
+contract is owned here rather than duplicated in strategy or regime callers.
+The completed-regime snapshot uses one contiguous, verified session history
+and publishes causal 30-bar structural features for transition research.
+
+Safety: missing or insufficient underlying bar history must never be turned
+into fabricated indicator evidence; live broker execution and risk guards live
+outside this module.
 """
 
 from __future__ import annotations
@@ -722,6 +728,123 @@ class IndicatorEngine:
             LOGGER.error("Failure in IndicatorEngine.get_history: %s", e, exc_info=True)
             return []
 
+    def get_completed_regime_inputs(
+        self, symbol: str, *, now: datetime
+    ) -> dict[str, float | list[float]]:
+        """Calculate regime features from one verified completed session snapshot."""
+        if now.tzinfo is None:
+            return {}
+        local_now = now.astimezone(_INDIA_TZ)
+        session_open = local_now.replace(hour=9, minute=15, second=0, microsecond=0)
+        session_close = local_now.replace(hour=15, minute=30, second=0, microsecond=0)
+        observed: dict[datetime, tuple[float, float, float, float, float]] = {}
+        try:
+            for row in self.get_history(symbol, count=400, field="bars"):
+                if (
+                    row.get("is_complete") is not True
+                    or row.get("is_provisional") is True
+                ):
+                    continue
+                raw_stamp = row.get("timestamp")
+                stamp = (
+                    raw_stamp
+                    if isinstance(raw_stamp, datetime)
+                    else datetime.fromisoformat(str(raw_stamp).replace("Z", "+00:00"))
+                )
+                if stamp.tzinfo is None:
+                    return {}
+                stamp = stamp.astimezone(_INDIA_TZ)
+                if not session_open <= stamp < session_close:
+                    continue
+                if stamp.second or stamp.microsecond:
+                    return {}
+                if (local_now - stamp).total_seconds() < 60:
+                    continue
+                values = (
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["volume"]),
+                )
+                opening, high, low, close, volume = values
+                if (
+                    not all(np.isfinite(value) for value in values)
+                    or not 0 < low <= min(opening, close) <= max(opening, close) <= high
+                    or volume < 0
+                ):
+                    return {}
+                if stamp in observed and observed[stamp] != values:
+                    return {}
+                observed[stamp] = values
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return {}
+        ordered = sorted(observed)
+        if not ordered or (local_now - ordered[-1]).total_seconds() > 180:
+            return {}
+        start = len(ordered) - 1
+        while start > 0:
+            if ordered[start] - ordered[start - 1] != timedelta(minutes=1):
+                break
+            start -= 1
+        stamps = ordered[start:]
+        if len(stamps) < 6:
+            return {}
+        rows = [observed[stamp] for stamp in stamps]
+        highs = [row[1] for row in rows]
+        lows = [row[2] for row in rows]
+        closes = [row[3] for row in rows]
+        volumes = [row[4] for row in rows]
+        features: dict[str, float | list[float]] = {
+            "completed_bar_timestamp": stamps[-1].timestamp(),
+            "verified_completed_bars": float(len(stamps)),
+            "price": closes[-1],
+            "close": closes[-1],
+            "price_series": closes[-16:],
+        }
+        if len(closes) >= 15:
+            atr = self._calculate_atr(highs, lows, closes, 14)
+            features["atr"] = atr
+            features["atr_bps"] = atr / closes[-1] * 10000.0
+            if len(closes) >= 30 and atr > 0:
+                local = closes[-30:]
+                move = local[-1] - local[0]
+                travel = sum(abs(b - a) for a, b in zip(local, local[1:]))
+                # The midpoint of the observed window is descriptive, not
+                # a historic entry level or a retrospectively executable signal.
+                center = sum(local) / len(local)
+                signs = [1 if x > center else -1 for x in local if x != center]
+                features["local_30bar_center_crossings"] = float(
+                    sum(a != b for a, b in zip(signs, signs[1:]))
+                )
+                features["local_30bar_displacement_atr"] = move / atr
+                if travel > 0:
+                    features["local_30bar_directional_efficiency"] = abs(move) / travel
+        if len(closes) >= 21:
+            features["ema_fast"] = self._calculate_ema(closes, 9)
+            features["ema_slow"] = self._calculate_ema(closes, 21)
+        if len(closes) >= 28:
+            features["adx"] = self._calculate_adx(highs, lows, closes, 14)
+        if len(closes) >= 60:
+            broad = closes[-60:]
+            displacement = broad[-1] - broad[0]
+            travel = sum(abs(b - a) for a, b in zip(broad, broad[1:]))
+            features["broader_60bar_displacement_bps"] = displacement / broad[0] * 10000
+            if travel > 0:
+                features["broader_60bar_directional_efficiency"] = (
+                    abs(displacement) / travel
+                )
+        # An index has no directly traded volume. Only a traded futures
+        # contract can supply the corroborating volume ratio.
+        if (
+            symbol.upper().endswith("FUT")
+            and len(volumes) >= 21
+            and all(value > 0 for value in volumes[-21:])
+        ):
+            baseline = sum(volumes[-21:-1]) / 20
+            features["volume_spike_ratio"] = volumes[-1] / baseline
+        return features
+
     def get_indicators(
         self, symbol: str, names: Iterable[str] | None = None
     ) -> dict[str, float | tuple[float, float, float] | None]:
@@ -854,6 +977,16 @@ class IndicatorEngine:
             context = self._runtime_context.get(symbol, {})
             for key, value in context.items():
                 requested.setdefault(key, value)
+            # The generic "ema" is EMA(20), not the fast/slow pair requested
+            # by regime and strategy consumers. Resolve missing named inputs
+            # from this symbol's existing history; never invent short history.
+            # Preserve any explicitly supplied runtime context values.
+            for ema_name, period in (("ema_fast", 9), ("ema_slow", 21)):
+                if ema_name not in all_names or requested.get(ema_name) is not None:
+                    continue
+                computed = self.get_ema(symbol, period=period)
+                if computed is not None and np.isfinite(computed):
+                    requested[ema_name] = float(computed)
             if "tick_direction" in all_names or "tick_direction" in requested:
                 runtime_tick = str(context.get("tick_direction") or "").upper()
                 if runtime_tick:
@@ -1055,9 +1188,10 @@ class IndicatorEngine:
                     )
                     if not bool(provisional)
                 ]
-                if filtered_pairs:
-                    prices = [pair[0] for pair in filtered_pairs]
-                    volumes = [pair[1] for pair in filtered_pairs]
+                if not filtered_pairs:
+                    return None
+                prices = [pair[0] for pair in filtered_pairs]
+                volumes = [pair[1] for pair in filtered_pairs]
 
             # Pre-check: skip calculation if all volumes are zero
             if not volumes or all(v == 0 for v in volumes):
@@ -1168,48 +1302,39 @@ class IndicatorEngine:
         return cumulative_turnover / cumulative_volume
 
     def get_session_vwap(self, symbol: str) -> float | None:
-        """Return the session-anchored VWAP for *symbol*. NEVER raises.
+        """Return a complete-session, finalized typical-price VWAP or None.
 
-        get_vwap() is a rolling `period`-bar volume-weighted mean, which is not
-        VWAP. This anchors at the session open, matching the exchange figure.
+        A short mid-session tail is not a session VWAP. Reuse the existing
+        as-of owner to require the 09:15 opening minute, contiguous finalized
+        candles and the exact timestamp. Never substitute rolling VWAP.
         """
         try:
             with self._lock:
                 history = self._histories.get(symbol)
             if history is None or len(history) == 0:
                 return None
-            timestamps = history.get_timestamps()
-            if not timestamps:
-                return None
-            session_open, _session_close = self._session_bounds(timestamps[-1])
-            closes = history.get_closes()
-            highs = history.get_highs()
-            lows = history.get_lows()
-            volumes = history.get_volumes()
+            stamps = history.get_timestamps()
+            complete = history.get_completeness()
             provisional = history.get_provisional_flags()
-            cum_pv = 0.0
-            cum_vol = 0.0
-            for index, stamp in enumerate(timestamps):
-                if stamp is None or stamp < session_open:
-                    continue
-                if provisional and index < len(provisional) and provisional[index]:
-                    continue
-                if index >= len(volumes) or index >= len(closes):
-                    continue
-                volume = float(volumes[index] or 0.0)
-                if volume <= 0:
-                    continue
-                high = (
-                    float(highs[index]) if index < len(highs) else float(closes[index])
-                )
-                low = float(lows[index]) if index < len(lows) else float(closes[index])
-                typical = (high + low + float(closes[index])) / 3.0
-                cum_pv += typical * volume
-                cum_vol += volume
-            if cum_vol <= 0:
+            if (
+                not stamps
+                or len(complete) != len(stamps)
+                or len(provisional) != len(stamps)
+            ):
                 return None
-            value = cum_pv / cum_vol
-            return value if value > 0 else None
+            session_open, session_close = self._session_bounds(stamps[-1])
+            for index in range(len(stamps) - 1, -1, -1):
+                stamp = stamps[index]
+                if not session_open <= stamp < session_close:
+                    break
+                if complete[index] and not provisional[index]:
+                    # The current live minute is frequently unfinished. Use
+                    # its immediately preceding closed bar, never an older
+                    # stale bar or a prior day's VWAP.
+                    if stamps[-1] - stamp > timedelta(minutes=1):
+                        return None
+                    return self.get_session_vwap_at(symbol, stamp)
+            return None
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 
@@ -2088,7 +2213,11 @@ class IndicatorEngine:
         adx = sum(dx_values[:period]) / period
         for value in dx_values[period:]:
             adx += (value - adx) / period
-        return float(adx)
+        # Wilder's formula is mathematically bounded; contain floating-point
+        # roundoff at the indicator owner instead of accepting invalid external ADX.
+        if not np.isfinite(adx):
+            raise ValueError("Non-finite ADX calculation")
+        return min(100.0, max(0.0, float(adx)))
 
     def _calculate_vwap(self, prices: list[float], volumes: list[int]) -> float | None:
         """Internal VWAP calculation.

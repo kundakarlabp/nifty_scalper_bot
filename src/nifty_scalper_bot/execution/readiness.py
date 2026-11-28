@@ -3,13 +3,15 @@
 Responsibilities: Resolve finite bid/ask, spread, quote age and tradability;
 provide arming and gate diagnostics without inventing market evidence.
 Boundaries: Trading strategy and broker submission remain with their owners.
-Safety: Non-finite prices and crossed quote books cannot prove tradability.
+Safety: Non-finite prices, crossed books and future-dated quotes cannot prove
+tradability.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from math import isfinite
@@ -18,7 +20,13 @@ from typing import Mapping
 from nifty_scalper_bot.config.env_utils import parse_float_env
 
 LOGGER = logging.getLogger(__name__)
-_UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
+_UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+    "received_at_fallback",
+}
 _TRUTHY = {"1", "true", "yes", "y", "on"}
 _PNL_DIAGNOSTIC_REASONS = {
     "pnl_baseline_uninitialized",
@@ -504,7 +512,7 @@ class HistoryReadinessPolicy:
 def _quote_getter(payload: dict | object):
     return (
         payload.get
-        if isinstance(payload, dict)
+        if isinstance(payload, Mapping)
         else lambda key, default=None: getattr(payload, key, default)
     )
 
@@ -520,7 +528,18 @@ def quote_timestamp_quality_allows_hard_readiness(quote: dict | object | None) -
         return True
     getter = _quote_getter(quote)
     quality = str(getter("timestamp_quality", "") or "").strip().lower()
-    return quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
+    source = str(getter("timestamp_source", "") or "").strip().lower()
+    return (
+        getter("source_timestamp_valid", None) is not False
+        and quality not in _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES
+        and source
+        not in {
+            "received_at",
+            "received_ts",
+            "received_time",
+            "received_at_fallback",
+        }
+    )
 
 
 def _quote_float(payload: dict | object, *keys: str) -> float | None:
@@ -565,6 +584,11 @@ def resolve_max_quote_age_seconds(
 
 
 def resolve_quote_age_seconds(payload: dict | object) -> float | None:
+    """Prefer event-time evidence to cached age; never clamp future time to zero."""
+    timestamp_ms = _quote_float(payload, "last_tick_ts_ms", "timestamp_ms")
+    if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
+        event_age_ms = time.time() * 1000.0 - timestamp_ms
+        return event_age_ms / 1000.0 if event_age_ms >= 0.0 else None
     age_ms = _quote_float(
         payload,
         "tick_age_ms",
@@ -573,7 +597,7 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
         "market_data_age_ms",
     )
     if age_ms is not None:
-        return max(0.0, age_ms / 1000.0)
+        return age_ms / 1000.0 if age_ms >= 0.0 else None
     age_s = _quote_float(
         payload,
         "tick_age_s",
@@ -585,7 +609,7 @@ def resolve_quote_age_seconds(payload: dict | object) -> float | None:
         "market_data_age_s",
     )
     if age_s is not None:
-        return max(0.0, age_s)
+        return age_s if age_s >= 0.0 else None
     return None
 
 
@@ -715,7 +739,11 @@ def evaluate_quote_readiness(
     ltp = _quote_float(quote, "ltp", "last_price", "last_traded_price")
     ltp_ready = bool(ltp is not None and ltp > 0)
     depth = getter("depth", None)
-    depth_available = bool(getter("depth_available", False) or depth)
+    depth_available = (
+        bool(depth.get("buy") and depth.get("sell"))
+        if isinstance(depth, Mapping)
+        else bool(getter("depth_available", False))
+    )
     bid, ask, spread_pct, source = resolve_quote_bid_ask_spread(quote)
     bid_ask_available = bool(
         bid is not None and ask is not None and bid > 0 and ask > bid
@@ -738,14 +766,15 @@ def evaluate_quote_readiness(
             reason = "bid_ask_crossed"
         else:
             reason = "bid_ask_missing"
+    elif (
+        getter("tradable_quote", None) is False
+        or getter("hard_readiness_eligible", None) is False
+    ):
+        reason = "quote_not_tradable"
     else:
         reason = "ready"
     if reason == "ready" and require_fresh:
         age = resolve_quote_age_seconds(quote)
-        if age is None:
-            ts = _quote_float(quote, "timestamp_ms", "last_tick_ts_ms")
-            if ts and ts > 10_000_000_000:
-                age = max(0.0, datetime.now(timezone.utc).timestamp() - (ts / 1000.0))
         if age is None:
             reason = "quote_age_unknown"
         elif max_age_s is not None and age > max_age_s:

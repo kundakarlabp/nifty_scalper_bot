@@ -328,3 +328,171 @@ def test_smc_does_not_invent_event_timestamp_for_external_structure_flag() -> No
     )
     assert enriched["bos_confirmed"] is True
     assert enriched.get("bos_ts_epoch") is None
+
+
+class _EmptyIndicatorEngine:
+    def history_count(self, _symbol):
+        return 0
+
+    def get_history(self, _symbol):
+        return []
+
+    def get_indicators(self, _symbol, _names=None):
+        return {}
+
+
+class _DeniedRegime:
+    def can_trade(self, **_kwargs):
+        return False
+
+    def get_filter_reasons(self):
+        return ("regime_unknown",)
+
+    def get_latest_snapshot(self):
+        return None
+
+
+def test_adaptive_regime_mode_cannot_override_explicit_canonical_veto() -> None:
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
+    )
+    manager._use_regime_adaptive = True
+
+    symbol = "NFO:NIFTY26NOV25700CE"
+    assert manager.generate_signal(symbol, 100.0, trace_id="regime-denial") is None
+    assert manager._observability_counters["signals_blocked_by_regime"] == 1
+    assert manager._observability_counters["regime_gate_denials_observed"] == 1
+    decision = manager.get_last_no_signal_decision(symbol)
+    assert decision is not None
+    assert decision.category == "strategy_regime_blocked"
+    assert decision.reason == "regime_unknown"
+    assert decision.final_block_reason == "regime_gate_block"
+    assert decision.trace_id == "regime-denial"
+
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._strategy_manager = manager
+    assert runner._classify_no_trade_decision(
+        symbol=symbol,
+        signal=None,
+        indicators_ctx={},
+        option_count=100,
+        option_required=20,
+        trace_id="regime-denial",
+    ) == ("strategy_regime_blocked", "regime_unknown")
+
+
+def test_regime_provider_failure_never_generates_option_signal() -> None:
+    class FailingRegime(_DeniedRegime):
+        def can_trade(self, **_kwargs):
+            raise RuntimeError("unavailable")
+
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=FailingRegime()
+    )
+    manager._use_regime_adaptive = True
+
+    symbol = "NFO:NIFTY26NOV25700CE"
+    assert manager.generate_signal(symbol, 100.0, trace_id="regime-error") is None
+    assert manager._observability_counters["signals_blocked_by_regime"] == 1
+    decision = manager.get_last_no_signal_decision(symbol)
+    assert decision is not None
+    assert decision.category == "strategy_error"
+    assert decision.reason == "regime_gate_error"
+    assert decision.trace_id == "regime-error"
+
+
+def test_canonical_regime_denial_still_observes_selected_contract() -> None:
+    from types import SimpleNamespace
+
+    symbol = "NFO:NIFTY26NOV25700CE"
+    observed = []
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
+    )
+    manager._data_hub = SimpleNamespace(
+        get_active_contract_basket=lambda: {
+            "selected_ce": symbol,
+            "selected_pe": "NFO:NIFTY26NOV25700PE",
+            "futures_symbol": "NFO:NIFTY26NOVFUT",
+        },
+        get_option_contract_metadata=lambda _symbol: {
+            "name": "NIFTY",
+            "instrument_type": "CE",
+            "lot_size": 65,
+        },
+        indicators_ready=False,
+    )
+    manager._strategies = [
+        SimpleNamespace(
+            name="RangeVWAPReclaim",
+            observe_research_excursion=lambda sym, ctx, **kw: observed.append(
+                (sym, ctx, kw)
+            ),
+        )
+    ]
+    assert manager.generate_signal(symbol, 100.0) is None
+    assert len(observed) == 1
+    sym, context, kwargs = observed[0]
+    assert sym == symbol
+    assert context["regime_gate_allowed"] is False
+    assert context["active_futures_symbol"] == "NFO:NIFTY26NOVFUT"
+    assert context["decision_at"].tzinfo is not None
+    assert kwargs["blocked_reason"] == "canonical_regime_gate_block"
+    assert "bid" not in context
+    assert context["lot_size"] == 65
+    manager._observe_denied_range_research(
+        "NFO:NIFTY26NOV25800CE", manager._regime_manager
+    )
+    assert len(observed) == 1
+    trend = SimpleNamespace(regime="trend")
+    regime = SimpleNamespace(
+        get_latest_snapshot=lambda: trend, get_raw_snapshot=lambda: trend
+    )
+    manager._observe_denied_range_research(
+        symbol,
+        regime,
+        blocked_reason="strategy_regime_ineligible",
+        regime_gate_allowed=True,
+    )
+    assert len(observed) == 2
+    _, context, kwargs = observed[1]
+    assert context["regime"] == "trend"
+    assert context["regime_gate_allowed"] is True
+    assert context["lot_size"] == 65
+    assert kwargs["blocked_reason"] == "strategy_regime_ineligible"
+
+
+def test_denied_range_observation_uses_authoritative_basket_lot() -> None:
+    from types import SimpleNamespace
+
+    symbol = "NFO:NIFTY26D0125650CE"
+    observed = []
+    manager = StrategyManager(
+        [], _EmptyIndicatorEngine(), None, market_regime_manager=_DeniedRegime()
+    )
+    basket = {
+        "selected_ce": symbol,
+        "selected_pe": "NFO:NIFTY26D0125650PE",
+        "futures_symbol": "NFO:NIFTY26DECFUT",
+        "metadata": {
+            "source": "instrument_manager",
+            "option_lot_size_by_symbol": {symbol: 75},
+        },
+    }
+    manager._data_hub = SimpleNamespace(
+        get_active_contract_basket=lambda: basket,
+        get_option_contract_metadata=lambda _: None,
+    )
+    manager._strategies = [
+        SimpleNamespace(
+            name="RangeVWAPReclaim",
+            observe_research_excursion=lambda sym, ctx, **kw: observed.append(ctx),
+        )
+    ]
+    manager._observe_denied_range_research(symbol, manager._regime_manager)
+    assert observed[-1]["lot_size"] == 75
+    basket["metadata"]["option_lot_size_by_symbol"] = {"NFO:NIFTY26D0125650PE": 65}
+    manager._observe_denied_range_research(symbol, manager._regime_manager)
+    assert "lot_size" not in observed[-1]

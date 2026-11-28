@@ -5,6 +5,8 @@ Key responsibilities:
     - Apply unresolved-exit entry blocking before broker submission.
     - Run bounded entry recovery and finalize partial-entry reconciliation.
     - Reject costly VWAP continuation retries against durable first-attempt prices.
+    - Own bracket-anchor provenance and execution preflight quote selection directly;
+      extract cached quote diagnostics once per candidate.
     - Delegate unchanged order operations to ``order_manager_core``.
 
 Operational constraints:
@@ -28,6 +30,7 @@ from typing import Any, Callable, Mapping
 
 import nifty_scalper_bot.execution.operator_control as _operator_control
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.execution.affordability import _risk_budget_snapshot
 from nifty_scalper_bot.execution.entry_geometry import (
     release_prebroker_entry_reservation,
 )
@@ -43,7 +46,9 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     block_result,
     configure_provider,
 )
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.risk.cost_model import (
+    estimate_protective_stop_limit_loss,
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
 )
@@ -329,6 +334,21 @@ def _maybe_reprice_open_entry(
     )
     if anchor_mode != "distance":
         return False
+    strategy = (
+        str(
+            provenance.get("strategy_name")
+            or provenance.get("strategy")
+            or getattr(order, "strategy_name", "")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
+    if strategy == "VWAPPRO":
+        # An order callback has no fresh strategy qualification. A new higher
+        # limit must not silently move the original reclaim thesis/target.
+        # Keep the original order's normal timeout/reconciliation unchanged.
+        return False
     count = _positive_int(provenance.get("entry_open_reprice_count"))
     try:
         max_modifications = max(
@@ -381,15 +401,18 @@ def _maybe_reprice_open_entry(
         or ask is None
         or ask < bid
         or age is None
+        or not math.isfinite(age)
+        or age < 0.0
         or age > max_age_ms
         or ask <= current_price
     ):
         return False
 
-    anchor_price = (
-        _positive_float(provenance.get("entry_open_reprice_anchor_price"))
-        or current_price
-    )
+    # Legacy/recovered orders without the original broker-limit identity
+    # cannot prove correct stop reanchoring after a modified-order fill.
+    anchor_price = _positive_float(provenance.get("entry_order_original_limit_price"))
+    if anchor_price is None:
+        return False
     try:
         max_deviation_pct = max(
             0.0,
@@ -451,6 +474,34 @@ def _maybe_reprice_open_entry(
             )
         return False
 
+    # Re-read canonical remaining risk before changing an accepted broker
+    # order. The earlier preflight cannot authorize higher stop-limit loss.
+    risk_owner = getattr(manager, "_risk_manager", None)
+    lot_size = _positive_int(getattr(order, "resolved_lot_size", 0))
+    try:
+        balance = float(getattr(risk_owner, "account_balance", 0.0) or 0.0)
+        budget = _risk_budget_snapshot(
+            manager,
+            lot_size,
+            available_balance=balance,
+            refresh_risk=True,
+        )[2]
+        risk_at_limit = estimate_protective_stop_limit_loss(
+            entry_price=new_price,
+            stop_price=stop_price + delta,
+            quantity=quantity,
+            half_spread=max(0.0, (ask - bid) / 4.0),
+        )
+        if (
+            budget is None
+            or not math.isfinite(float(budget))
+            or float(budget) <= 0.0
+            or risk_at_limit > float(budget) + 1e-9
+        ):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+
     modifier = getattr(manager, "modify_order", None)
     if not callable(modifier):
         return False
@@ -494,7 +545,14 @@ def _maybe_reprice_open_entry(
 
 
 def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
-    """Persist lot-aligned TP1/trailing inputs in TradePlan provenance."""
+    """Persist one canonical bracket-anchor and TP1/trailing provenance."""
+    provenance = getattr(plan, "trade_provenance", {})
+    enriched = dict(provenance) if isinstance(provenance, Mapping) else {}
+    enriched.setdefault(
+        "bracket_anchor_mode",
+        str(getattr(plan, "bracket_anchor_mode", "distance") or "distance"),
+    )
+    setattr(plan, "trade_provenance", enriched)
     if str(getattr(plan, "intent", "ENTRY") or "ENTRY").upper() not in {
         "ENTRY",
         "SCALE_IN",
@@ -502,8 +560,6 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     }:
         return plan
 
-    provenance = getattr(plan, "trade_provenance", {})
-    enriched = dict(provenance) if isinstance(provenance, Mapping) else {}
     quantity = _positive_int(getattr(plan, "quantity", 0))
     lot_size = _positive_int(getattr(plan, "resolved_lot_size", 0))
     entry = _positive_float(getattr(plan, "entry_price", None))
@@ -767,8 +823,173 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
     return result
 
 
+def _depth_top_quantity(quote: Any, side: str) -> int:
+    """Return positive top-level executable quantity from Zerodha FULL depth."""
+    if not isinstance(quote, Mapping):
+        return 0
+    depth = quote.get("depth")
+    if not isinstance(depth, Mapping):
+        return 0
+    levels = depth.get(side)
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return 0
+    top = levels[0]
+    if not isinstance(top, Mapping):
+        return 0
+    for key in ("quantity", "qty"):
+        value = top.get(key)
+        try:
+            parsed = int(float(value or 0))
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return 0
+
+
+def _cached_quote(provider: Any, symbol: str) -> Mapping[str, Any] | None:
+    """Read cached quote evidence without triggering broker/HTTP pulls."""
+    getter = getattr(provider, "get_latest_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_quote", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol, allow_pull=False)
+        except TypeError:
+            quote = None
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+    return None
+
+
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
+
+    def _extract_quote_diagnostics(self, quote: Mapping[str, Any]) -> dict[str, Any]:
+        """Extend core diagnostics with existing Zerodha FULL depth fields."""
+        diagnostics = dict(_core.OrderManager._extract_quote_diagnostics(self, quote))
+        if not isinstance(quote, Mapping):
+            return diagnostics
+
+        current_bid = float(diagnostics.get("bid") or 0.0)
+        current_ask = float(diagnostics.get("ask") or 0.0)
+        if current_bid <= 0.0 or current_ask <= 0.0:
+            bid, ask, spread_pct, _source = resolve_quote_bid_ask_spread(dict(quote))
+            if bid is not None and ask is not None and bid > 0.0 and ask > bid:
+                diagnostics["bid"] = float(bid)
+                diagnostics["ask"] = float(ask)
+                diagnostics["spread"] = float(ask - bid)
+                if spread_pct is not None:
+                    diagnostics["spread_pct"] = float(spread_pct)
+
+        try:
+            bid_qty = int(diagnostics.get("bid_qty") or 0)
+        except (TypeError, ValueError):
+            bid_qty = 0
+        try:
+            ask_qty = int(diagnostics.get("ask_qty") or 0)
+        except (TypeError, ValueError):
+            ask_qty = 0
+        if bid_qty <= 0:
+            bid_qty = _depth_top_quantity(quote, "buy")
+            diagnostics["bid_qty"] = bid_qty
+        if ask_qty <= 0:
+            ask_qty = _depth_top_quantity(quote, "sell")
+            diagnostics["ask_qty"] = ask_qty
+        diagnostics["depth_qty"] = max(0, bid_qty) + max(0, ask_qty)
+        return diagnostics
+
+    def _get_latest_quote_safe(self, symbol: str) -> dict[str, Any] | None:
+        """Prefer executable cached evidence, then freshness; never pull implicitly."""
+        best = None
+        best_age = None
+        best_rank = 0
+        best_fresh = False
+        # A stale full book cannot defeat a current executable top-of-book.
+        fresh_limit_ms = float(_core.app_settings.ORDER_MAX_QUOTE_AGE_MS)
+        normalized_symbol = _core.normalize_symbol(symbol)
+        seen_providers: set[int] = set()
+
+        for attr in (
+            "_market_data_manager",
+            "market_data_manager",
+            "_market_data",
+            "_data_hub",
+            "data_hub",
+        ):
+            provider = getattr(self, attr, None)
+            if provider is None or id(provider) in seen_providers:
+                continue
+            seen_providers.add(id(provider))
+            candidate = _cached_quote(provider, symbol)
+            if not isinstance(candidate, Mapping) or not candidate:
+                continue
+            candidate_symbol = str(candidate.get("symbol") or "").strip()
+            if (
+                candidate_symbol
+                and _core.normalize_symbol(candidate_symbol) != normalized_symbol
+            ):
+                continue
+            try:
+                diagnostics = self._extract_quote_diagnostics(candidate)
+                candidate_ltp = float(diagnostics.get("ltp") or 0.0)
+                age = diagnostics.get("age_ms")
+                candidate_age = float(age) if age is not None else None
+                bid = float(diagnostics.get("bid") or 0.0)
+                ask = float(diagnostics.get("ask") or 0.0)
+                bid_qty = int(diagnostics.get("bid_qty") or 0)
+                ask_qty = int(diagnostics.get("ask_qty") or 0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if (
+                candidate_ltp <= 0.0
+                or candidate_age is None
+                or not math.isfinite(candidate_age)
+                or candidate_age < 0.0
+            ):
+                continue
+            candidate_rank = 0
+            if 0.0 < bid < ask:
+                candidate_rank = 2 if bid_qty > 0 and ask_qty > 0 else 1
+            candidate_fresh = candidate_age <= fresh_limit_ms
+            if (
+                best is None
+                or (candidate_fresh and not best_fresh)
+                or (
+                    candidate_fresh == best_fresh
+                    and (
+                        candidate_rank > best_rank
+                        or (
+                            candidate_rank == best_rank
+                            and (best_age is None or candidate_age < best_age)
+                        )
+                    )
+                )
+            ):
+                best = candidate
+                best_age = candidate_age
+                best_rank = candidate_rank
+                best_fresh = candidate_fresh
+
+        return dict(best) if isinstance(best, Mapping) else None
 
     def emergency_stop(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Pause entries, cancel pending orders and flatten open exposure."""

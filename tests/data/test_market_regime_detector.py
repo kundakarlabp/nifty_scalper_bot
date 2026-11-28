@@ -13,12 +13,34 @@ def test_market_regime_detector_identifies_trend() -> None:
     assert snapshot.adjustments["display_regime"] == "trending"
 
 
-def test_market_regime_detector_range_on_low_atr() -> None:
+def test_low_atr_alone_cannot_authorize_a_tradeable_range() -> None:
     detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
-    snapshot = detector.evaluate("NIFTY", {"atr": 4.0}, {"atr": 4.0})
+    snapshot = detector.evaluate("NIFTY", {"atr": 4.0})
+    assert snapshot.regime == "unknown"
+    assert snapshot.reason == "range_evidence_unverified"
+    assert snapshot.confidence == 0.0
+
+    adx_only = detector.evaluate("NIFTY", {"atr": 4.0, "adx": 10.0})
+    assert adx_only.regime == "unknown"
+
+
+def test_low_adx_with_independent_flat_price_history_proves_range() -> None:
+    detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
+    snapshot = detector.evaluate(
+        "NIFTY",
+        {"atr": 4.0, "adx": 10.0, "price_series": [100.0, 100.02, 100.01, 100.0]},
+    )
     assert snapshot.regime == "range"
     assert snapshot.adjustments["bias"] == "neutral"
-    assert snapshot.adjustments["display_regime"] == "ranging/choppy"
+    assert snapshot.adjustments["display_regime"] == "ranging"
+
+
+def test_low_adx_with_converged_emas_proves_range_without_history() -> None:
+    detector = MarketRegimeDetector(RegimeParameters(atr_range_threshold=8.0))
+    snapshot = detector.evaluate(
+        "NIFTY", {"atr": 4.0, "adx": 10.0, "ema_fast": 100.01, "ema_slow": 100.0}
+    )
+    assert snapshot.regime == "range"
 
 
 def test_market_regime_detector_broadcasts_events() -> None:
@@ -113,3 +135,116 @@ def test_missing_regime_features_are_unknown_not_range() -> None:
     assert snapshot.regime == "unknown"
     assert snapshot.confidence == 0.0
     assert snapshot.reason == "insufficient_regime_features"
+
+
+def test_quiet_tape_requires_low_volume_and_flat_trend_proof() -> None:
+    detector = MarketRegimeDetector(RegimeParameters())
+    quiet = detector.evaluate(
+        "NIFTY",
+        {"adx": 10.0, "volume_ratio": 0.4, "price_series": [100.0, 100.01]},
+    )
+    assert quiet.regime == "low_activity"
+    assert quiet.reason == "low_volume_flat_trend_confirmed"
+    assert quiet.adjustments["display_regime"] == "low activity"
+    assert quiet.adjustments["sizing_multiplier"] <= 1.0
+
+    # Low volume without independent trend/momentum evidence is not enough.
+    insufficient = detector.evaluate("NIFTY", {"volume_ratio": 0.4})
+    assert insufficient.regime != "low_activity"
+
+
+def test_choppy_and_normal_labels_do_not_authorize_mean_reversion() -> None:
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+
+    assert normalize_regime("CHOPPY") is MarketRegime.UNKNOWN
+    assert normalize_regime("NORMAL") is MarketRegime.UNKNOWN
+
+
+def test_canonical_adx_units_and_volume_are_not_directional_proof() -> None:
+    detector = MarketRegimeDetector()
+    quiet = detector.evaluate(
+        "NIFTY",
+        {"adx": 0.75, "atr": 4.0, "price_series": [25000.0, 25000.5, 25000.0]},
+    )
+    assert quiet.regime == "range"
+    assert detector.evaluate("NIFTY", {"volume_ratio": 1.2}).regime == "unknown"
+
+
+def test_nonfinite_and_boolean_features_cannot_manufacture_regime() -> None:
+    detector = MarketRegimeDetector()
+    for features in (
+        {"adx": float("inf"), "atr": float("nan")},
+        {"adx": True, "atr": False},
+        {"price_series": [25000.0, float("nan"), 25500.0]},
+    ):
+        assert detector.evaluate("NIFTY", features).regime == "unknown"
+
+
+def test_independent_volatility_hazard_cannot_be_hidden_by_trend_score() -> None:
+    from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector)
+    snapshot = detector.evaluate(
+        "NIFTY",
+        {
+            "adx": 60.0,
+            "price_series": [25000.0, 25300.0],
+            "realized_volatility": 100.0,
+        },
+    )
+    assert snapshot.regime == "trend"
+    assert snapshot.adjustments["volatility_risk_confidence"] >= 0.95
+    assert not manager.can_trade()
+    assert "regime_block_independent_volatile" in manager.get_filter_reasons()
+
+
+def test_normalised_atr_cannot_weaken_original_volatility_protection() -> None:
+    detector = MarketRegimeDetector()
+    for price, expected in ((20000.0, 25.0), (30000.0, 20.0)):
+        snapshot = detector.evaluate(
+            "NIFTY",
+            {
+                "price": price,
+                "atr": 20.0,
+                "completed_bar_timestamp": 60.0,
+                "verified_completed_bars": 28.0,
+            },
+        )
+        assert snapshot.adjustments["effective_atr_reference_points"] == expected
+
+    legacy = detector.evaluate(
+        "NIFTY", {"price": 100.0, "atr": 14.0, "completed_bar_timestamp": 0.0}
+    )
+    assert legacy.adjustments["effective_atr_reference_points"] == 14.0
+
+
+def test_intermediate_adx_structural_candidates_do_not_authorize_live_regime() -> None:
+    detector = MarketRegimeDetector()
+    inputs = {
+        "adx": 20.0,
+        "atr": 6.0,
+        "price": 25000.0,
+        "price_series": [24998.0, 25000.0],
+        "ema_fast": 25005.0,
+        "ema_slow": 25000.0,
+        "completed_bar_timestamp": 60.0,
+        "verified_completed_bars": 35.0,
+        "local_30bar_directional_efficiency": 0.2,
+        "local_30bar_displacement_atr": 0.5,
+        "local_30bar_center_crossings": 4.0,
+    }
+    result = detector.evaluate("NIFTY", inputs)
+    assert result.regime == "unknown"
+    assert result.adjustments["shadow_transition_candidate"] == "RANGE"
+    directional = dict(inputs)
+    directional.update(
+        local_30bar_directional_efficiency=0.7,
+        local_30bar_displacement_atr=2.5,
+    )
+    result = detector.evaluate("NIFTY", directional)
+    assert result.regime == "unknown"
+    assert result.adjustments["shadow_transition_candidate"] == "TREND"
+    directional["verified_completed_bars"] = 10
+    result = detector.evaluate("NIFTY", directional)
+    assert result.adjustments["shadow_transition_candidate"] is None

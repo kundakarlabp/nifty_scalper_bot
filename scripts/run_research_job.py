@@ -6,6 +6,8 @@ Responsibilities:
 - Persist per-session ORB opening-futures gaps, strategy component comparisons
   and completed-trade evidence under the canonical research output location.
 - Report source, missing-data and exit limitations without trading-policy edits.
+- Audit an original SHA-pinned replay tape and journal using the same isolated
+  off-market SHADOW worker; never download or replace production evidence.
 
 Modeled component research never proves live-pipeline parity or profitability.
 No order placement, automatic LIVE promotion or parallel research collector.
@@ -41,6 +43,17 @@ def safe_error_code(exc: Exception) -> str:
         "active_option_basket_unavailable": "active_option_basket_unavailable",
         "active_nifty_future_unavailable": "active_nifty_future_unavailable",
         "operator_env_file_unavailable": "operator_env_file_unavailable",
+        "epoch_audit_original_tape_missing": "epoch_audit_original_tape_missing",
+        "epoch_audit_canonical_trade_db_missing": (
+            "epoch_audit_canonical_trade_db_missing"
+        ),
+        "epoch_audit_canonical_data_dir_missing": (
+            "epoch_audit_canonical_data_dir_missing"
+        ),
+        "epoch_audit_pinned_uncompressed_sha256_mismatch": (
+            "epoch_audit_source_sha256_mismatch"
+        ),
+        "epoch_audit_off_market_only": "epoch_audit_off_market_only",
         "Not in current instrument master:": "current_instrument_unavailable",
         "Not a NIFTY option/context instrument:": "invalid_nifty_instrument",
         "Invalid current instrument token:": "invalid_instrument_token",
@@ -88,7 +101,94 @@ def load_active_basket() -> dict[str, Any]:
 
 
 def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
-    """Use broker read methods and the canonical completed-trade analyzer only."""
+    """Use fixed bounded offline research without entering broker order paths."""
+    if request.get("mode") == "epoch_audit":
+        from datetime import datetime
+
+        from scripts.validate_epoch_structural_markouts import audit_original_session
+
+        from nifty_scalper_bot.ops.research_jobs import (
+            IST,
+            require_epoch_audit_offmarket,
+        )
+
+        if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
+            raise ValueError("epoch_audit_requires_shadow")
+        require_epoch_audit_offmarket(datetime.now(IST))
+        day = request["session_date"]
+        # Never allow the general writable-data fallback to substitute a
+        # different session or journal when canonical evidence is unavailable.
+        recorded_dir = os.environ.get("DATA_DIR", "")
+        if not recorded_dir or not Path(recorded_dir).is_absolute():
+            raise ValueError("epoch_audit_canonical_data_dir_missing")
+        data_dir = Path(recorded_dir).resolve()
+        if not data_dir.is_dir():
+            raise ValueError("epoch_audit_canonical_data_dir_missing")
+        folder = data_dir / "replay_archive"
+        compacted = folder / f"{day}.jsonl.gz"
+        plain = folder / f"{day}.jsonl"
+        if compacted.is_file():
+            tape = compacted
+        elif plain.is_file():
+            tape = plain
+        else:
+            raise ValueError("epoch_audit_original_tape_missing")
+        source_db = data_dir / "trades.db"
+        if not source_db.is_file():
+            raise ValueError("epoch_audit_canonical_trade_db_missing")
+        report = audit_original_session(
+            tape,
+            source_db,
+            expected_uncompressed_sha256=request["expected_uncompressed_sha256"],
+        )
+        output = ROOT / "data/research" / request["id"] / "epoch_audit.json"
+        if output.exists():
+            raise ValueError("epoch_audit_existing_result_refused")
+        write_json(output, report)
+        return {
+            **request,
+            "state": "completed",
+            "stage": "finished",
+            "requested_work_completed": True,
+            "backtest_completed": False,
+            "runtime_replay_completed": False,
+            "epoch_audit_completed": True,
+            "epoch_audit_report": "epoch_audit.json",
+            "epoch_audit": {
+                "session_date_ist": report["session_date_ist"],
+                "source_uncompressed_sha256": report["source_uncompressed_sha256"],
+                "original_epoch_count": report["original_epoch_count"],
+                "original_writer_integrity_verified": report[
+                    "original_writer_integrity_verified"
+                ],
+                "journal_same_day_decision_rows": report[
+                    "journal_same_day_decision_rows"
+                ],
+                "journal_assigned_same_epoch_decision_rows": report[
+                    "journal_assigned_same_epoch_decision_rows"
+                ],
+                "independent_same_epoch_setups": report[
+                    "independent_same_epoch_setups"
+                ],
+                "grouped_outcomes": report["grouped_outcomes"],
+                "epochs": [
+                    {
+                        "event_count": epoch["event_count"],
+                        "snapshot_count": epoch["snapshot_count"],
+                        "writer_integrity_verified": epoch["writer_integrity_verified"],
+                        "full_book_token_verified_ticks": epoch[
+                            "full_book_token_verified_ticks"
+                        ],
+                        "full_book_tick_reasons": epoch["full_book_tick_reasons"],
+                    }
+                    for epoch in report["epochs"]
+                ],
+                "actual_broker_fills_verified": False,
+                "promotion_eligible": False,
+            },
+            "live_equivalent": False,
+            "promotion_eligible": False,
+        }
     if request.get("mode") == "runtime":
         runtime = run_recorded_replays(ROOT, request)
         completed = runtime["state"] == "completed"
@@ -399,7 +499,7 @@ def main() -> int:
     directory = ROOT / "data/research" / args.request_id
     request = json.loads((directory / "status.json").read_text())
     try:
-        if request.get("mode") != "runtime" and (
+        if request.get("mode") not in {"runtime", "epoch_audit"} and (
             args.env_file is None or not args.env_file.is_file()
         ):
             raise FileNotFoundError("operator_env_file_unavailable")

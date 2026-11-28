@@ -767,6 +767,8 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
         assert signal is None
         if regime == "TREND":
             assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
+        elif regime == "CHOPPY":
+            assert strategy.last_no_vote_reason == "smc_regime_unverified_or_inactive"
         else:
             assert strategy.last_no_vote_reason == (
                 "smc_range_correlated_structure_only"
@@ -1269,3 +1271,91 @@ def test_trend_smc_rejects_untimed_structure_without_volume(monkeypatch) -> None
     ctx["latest_bar_ts"] = rows[-1]["timestamp"]
     assert strategy.generate_signal(CE, ctx, 103.0) is None
     assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
+
+
+def test_live_smc_rotation_preserves_setup_id_and_stale_quote_blocks(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rotated = CE[:-7] + "24150CE"
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    rows.append(sweep)
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
+    assert (FUTURES, "CE") in strategy._events
+
+    confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    rows.append(confirm)
+    stale = _indicators(latest_bar_ts=confirm["timestamp"], stale_data_used=True)
+    assert strategy.generate_signal(rotated, stale, 138.60) is None
+    assert strategy.last_no_vote_reason == "stale_or_invalid_data"
+    assert (FUTURES, "CE") in strategy._events
+
+    fresh = _indicators(latest_bar_ts=confirm["timestamp"])
+    signal = strategy.generate_signal(rotated, fresh, 138.60)
+    assert signal is not None
+    assert signal.symbol == rotated
+    assert signal.metadata["setup_id"] == strategy._setup_id(
+        FUTURES, "CE", sweep["timestamp"]
+    )
+    # The same underlying setup cannot turn into a second independent trade
+    # merely because a different option contract is currently selected.
+    repeated = strategy.generate_signal(CE, fresh, 138.60)
+    assert repeated is not None
+    assert repeated.metadata["setup_id"] == signal.metadata["setup_id"]
+
+
+def test_live_smc_rotation_keeps_opposing_context_veto(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rotated = CE[:-7] + "24150CE"
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    rows.append(sweep)
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
+    confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    rows.append(confirm)
+    opposite = _indicators(
+        latest_bar_ts=confirm["timestamp"],
+        direction_bias="PE",
+        underlying_direction_bias="PE",
+    )
+    assert strategy.generate_signal(rotated, opposite, 138.60) is None
+    assert strategy.last_no_vote_reason == "smc_direction_conflict"
+
+
+def test_live_smc_rotated_option_cannot_rescue_invalidated_sweep(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rotated = CE[:-7] + "24150CE"
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    rows.append(sweep)
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 138.60
+        )
+        is None
+    )
+    invalidation = _bar(
+        31, open_=23984, high=23987, low=23970, close=23972, volume=2200
+    )
+    rows.append(invalidation)
+    assert (
+        strategy.generate_signal(
+            rotated, _indicators(latest_bar_ts=invalidation["timestamp"]), 138.60
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "smc_sweep_invalidated"

@@ -26,6 +26,12 @@ from nifty_scalper_bot.core.strategy_context_builder import (
 )
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.strategies.futures_volume_quality import (
+    analyze_completed_futures_volume,
+)
+from nifty_scalper_bot.strategies.quote_update_identity import (
+    resolve_quote_update_identity,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 logger = get_logger(__name__)
@@ -1118,6 +1124,9 @@ class StrategyManager:
         self._last_futures_volume: float | None = None
         self._last_futures_volume_date: dt.date | None = None
         self._last_futures_volume_symbol: str | None = None
+        self._last_futures_volume_version: int | None = None
+        self._last_futures_volume_ratio: float | None = None
+        self._last_futures_volume_avg: float | None = None
         self._last_index_ltp: float | None = None
         self._last_index_vwap: float | None = None
         self._last_index_update_ts: float | None = None
@@ -1684,6 +1693,11 @@ class StrategyManager:
         indicators.setdefault("futures_volume_ratio", None)
         indicators.setdefault("futures_volume_source", None)
         indicators.setdefault("futures_volume_trusted", False)
+        indicators.setdefault("futures_volume_ratio_source", "quote_counter_delta")
+        indicators.setdefault("futures_completed_bar_volume_ratio", None)
+        indicators.setdefault("futures_completed_bar_volume_ready", False)
+        indicators.setdefault("futures_completed_bar_volume_provenance", None)
+        indicators.setdefault("futures_completed_bar_volume_symbol", None)
         indicators.setdefault("nifty_index_ltp", None)  # ✅ NEW
         indicators.setdefault("nifty_index_vwap", None)  # ✅ NEW
 
@@ -1693,6 +1707,86 @@ class StrategyManager:
         # Resolve the active contract *before* the first quote fetch, then
         # share one observation between its volume, LTP and VWAP metrics.
         active_future = self._resolve_active_futures_symbol_for_metrics()
+
+        # Distinct, causal completed-bar volume evidence; never overwrite the
+        # legacy quote-counter ratio or silently make a second broker request.
+        # IndicatorEngine.get_history is the canonical in-memory history owner.
+        history_getter = getattr(self._indicator_engine, "get_history", None)
+        if active_future and callable(history_getter):
+            try:
+                completed_bars = history_getter(active_future, count=25, field="bars")
+                # The callback can run thousands of times per session. A full
+                # bar-window fingerprint (including revisions and trust flags)
+                # avoids reparsing the same immutable completed-bar evidence.
+                # Never use a time-only TTL: corrected candle volume must
+                # invalidate the cache even during the same minute.
+                cache_key = None
+                if isinstance(completed_bars, (list, tuple)):
+                    cache_key = (
+                        active_future,
+                        tuple(
+                            (
+                                (
+                                    bar.get("timestamp")
+                                    or bar.get("datetime")
+                                    or bar.get("time")
+                                ),
+                                bar.get("volume"),
+                                bar.get("is_complete"),
+                                bar.get("is_provisional"),
+                                bar.get("volume_delta_untrusted"),
+                            )
+                            for bar in completed_bars
+                            if isinstance(bar, Mapping)
+                        ),
+                    )
+                cached = getattr(self, "_futures_completed_bar_quality_cache", None)
+                if (
+                    cache_key is not None
+                    and cached is not None
+                    and cached[0] == cache_key
+                ):
+                    volume_quality = cached[1]
+                else:
+                    volume_quality = analyze_completed_futures_volume(completed_bars)
+                    self._futures_completed_bar_quality_cache = (
+                        (cache_key, volume_quality) if cache_key is not None else None
+                    )
+                    log_throttled(
+                        self._logger,
+                        f"futures_bar_volume_quality:{active_future}",
+                        "FUTURES_COMPLETED_BAR_VOLUME_QUALITY symbol=%s "
+                        "ready=%s ratio=%s baseline=%s last_bar=%s reason=%s "
+                        "latest_volume=%s baseline_mean=%s baseline_min=%s "
+                        "baseline_max=%s extreme_low_relative_volume=%s",
+                        active_future,
+                        volume_quality["ready"],
+                        volume_quality["ratio"],
+                        volume_quality["baseline_count"],
+                        volume_quality["bar_timestamp"],
+                        volume_quality["reason"],
+                        volume_quality.get("latest_volume"),
+                        volume_quality.get("baseline_mean"),
+                        volume_quality.get("baseline_min"),
+                        volume_quality.get("baseline_max"),
+                        volume_quality.get("extreme_low_relative_volume", False),
+                        interval_sec=60.0,
+                    )
+                indicators["futures_completed_bar_volume_provenance"] = volume_quality
+                indicators["futures_completed_bar_volume_symbol"] = active_future
+                indicators["futures_completed_bar_volume_ready"] = bool(
+                    volume_quality["ready"]
+                )
+                indicators["futures_completed_bar_volume_ratio"] = volume_quality[
+                    "ratio"
+                ]
+            except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                self._futures_completed_bar_quality_cache = None
+                self._logger.debug(
+                    "FUTURES_COMPLETED_BAR_VOLUME_UNAVAILABLE symbol=%s error=%s",
+                    active_future,
+                    type(exc).__name__,
+                )
 
         # ═══════════════════════════════════════════════════════════
         # 1. FUTURES VOLUME DATA
@@ -1738,15 +1832,36 @@ class StrategyManager:
                 )
                 volume_delta: float | None = None
                 trusted = True
+                version, _ = resolve_quote_update_identity(("futures_quote", quote))
+                duplicate = bool(
+                    same_stream
+                    and volume == self._last_futures_volume
+                    and version is not None
+                    and version == self._last_futures_volume_version
+                )
 
                 if not same_stream or self._last_futures_volume is None:
                     self._futures_volume_history.clear()
                     self._last_futures_volume = volume
                     self._last_futures_volume_symbol = active_future
                     self._last_futures_volume_date = current_date
+                    self._last_futures_volume_version = version
+                    self._last_futures_volume_ratio = None
+                    self._last_futures_volume_avg = None
+                elif duplicate:
+                    # Multiple option/context evaluations read the same quote.
+                    # Reuse its measurement without appending synthetic zeroes.
+                    indicators["futures_volume_avg"] = self._last_futures_volume_avg
+                    indicators["futures_volume_ratio"] = self._last_futures_volume_ratio
                 elif volume >= self._last_futures_volume:
-                    volume_delta = volume - self._last_futures_volume
+                    # An unversioned unchanged counter does not prove a new
+                    # observation. Preserve the baseline without inventing a delta.
+                    if volume > self._last_futures_volume or version is not None:
+                        volume_delta = volume - self._last_futures_volume
                     self._last_futures_volume = volume
+                    self._last_futures_volume_version = version
+                    self._last_futures_volume_ratio = None
+                    self._last_futures_volume_avg = None
                 else:
                     trusted = False
                     self._logger.warning(
@@ -1775,9 +1890,11 @@ class StrategyManager:
                         self._futures_volume_history
                     )
                     indicators["futures_volume_avg"] = avg
+                    self._last_futures_volume_avg = avg
                     if avg > 0:
                         indicators["futures_volume_ratio"] = volume_delta / avg
-                        self._logger.info(
+                        self._last_futures_volume_ratio = volume_delta / avg
+                        self._logger.debug(
                             "Condition met: futures_volume_ratio_updated",
                             extra={
                                 "event": "futures_volume_ratio_updated",

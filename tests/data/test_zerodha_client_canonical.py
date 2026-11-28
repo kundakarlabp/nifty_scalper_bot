@@ -75,8 +75,14 @@ def test_get_order_status_returns_latest_history_state(
         },
     )
 
+    history = client.get_order_history("123")
     status = client.get_order_status("123")
 
+    assert [row["status"] for row in history] == [
+        "OPEN PENDING",
+        "OPEN",
+        "COMPLETE",
+    ]
     assert status["status"] == "COMPLETE"
     assert status["average_price"] == 113.45
     client.close()

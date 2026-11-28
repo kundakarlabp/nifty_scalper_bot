@@ -1,8 +1,9 @@
 """Read-only, spread-aware forward observations for canonical setup decisions.
 
-Responsibilities: Deduplicate approved/blocked setup identities from the
-canonical decision ledger; compare the SAME observed option contract's
-point-in-time ask with future bid quotes from an integrity-checked replay.
+Responsibilities: Deduplicate setup identities; compare observed option
+ask/bid quotes and load selected, exact-token FULL-depth option books and
+futures WS price paths for the canonical session-excursion research report.
+load_excursion_quote_paths also returns causal, scope-specific contract lots.
 Optionally reuse validated chronological quote-time indexes for large sessions.
 Boundaries: No broker calls, strategy overrides, or new setup identity owner.
 Safety: Missing/rotated contracts, untradable quotes, and archive gaps are
@@ -16,7 +17,7 @@ import bisect
 import json
 import math
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -126,6 +127,211 @@ def load_archive_quotes(
     return dict(quotes), archive_fingerprint(path), count
 
 
+def load_excursion_quote_paths(
+    path: Path,
+) -> tuple[
+    dict[str, list[tuple[float, float, str]]],
+    dict[str, list[tuple[float, float, float, int, int, str]]],
+    dict[tuple[str, str], int],
+]:
+    """Observe selected futures, exact-token FULL books and causal catalog lots.
+
+    The ReplayArchive remains the sole capture owner. Missing token, selected
+    contract, full-depth, or best-level quantity does not become a fill.
+    """
+    from nifty_scalper_bot.instruments.active_contracts import (
+        canonical_nifty_future_symbol,
+    )
+    from nifty_scalper_bot.storage.replay_archive import iter_session
+    from nifty_scalper_bot.utils.symbols import normalize_symbol
+
+    futures: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
+    books: dict[str, list[tuple[float, float, float, int, int, str]]] = defaultdict(
+        list
+    )
+    selected: dict[str, str] = {}
+    tokens: dict[str, int] = {}
+    scope_lots: dict[tuple[str, str], int] = {}
+    phase = 0
+    previous_phase_key: tuple[str, ...] | None = None
+    for event in iter_session(path):
+        payload = event["payload"]
+        if event["kind"] == "snapshot":
+            basket = payload.get("basket")
+            if not isinstance(basket, Mapping):
+                selected = {}
+                previous_phase_key = None
+                continue
+            selected = {
+                side: normalize_symbol(
+                    str(basket.get(f"selected_{side.lower()}") or "")
+                )
+                for side in ("CE", "PE")
+            }
+            selected["FUT"] = normalize_symbol(str(basket.get("futures_symbol") or ""))
+            # Each snapshot owns its own identity evidence; never carry stale
+            # catalog rows across a restart or basket replacement.
+            tokens.clear()
+            catalog_lots: dict[str, tuple[int, int]] = {}
+            conflicting_lots: set[str] = set()
+            catalog = payload.get("instruments")
+            if isinstance(catalog, list):
+                for item in catalog:
+                    if not isinstance(item, Mapping):
+                        continue
+                    symbol = normalize_symbol(
+                        f"{item.get('exchange')}:{item.get('tradingsymbol')}"
+                    )
+                    token = item.get("instrument_token")
+                    if type(token) is int and token > 0:
+                        tokens[symbol] = token
+                        lot = item.get("lot_size")
+                        if (
+                            type(lot) is int
+                            and 0 < lot < 10000
+                            and str(item.get("name") or "").upper() == "NIFTY"
+                            and str(item.get("instrument_type") or "").upper()
+                            == symbol[-2:]
+                            and symbol in (selected["CE"], selected["PE"])
+                        ):
+                            previous_lot = catalog_lots.get(symbol)
+                            evidence = (token, lot)
+                            if previous_lot is not None and previous_lot != evidence:
+                                conflicting_lots.add(symbol)
+                            catalog_lots[symbol] = evidence
+            mapping = basket.get("token_by_symbol")
+            if isinstance(mapping, Mapping):
+                for raw_symbol, token in mapping.items():
+                    if type(token) is int and token > 0:
+                        tokens[normalize_symbol(str(raw_symbol))] = token
+            selected_lots = {
+                symbol: evidence[1]
+                for symbol, evidence in catalog_lots.items()
+                if symbol not in conflicting_lots and evidence[0] == tokens.get(symbol)
+            }
+            phase_key = (
+                str(event["run_id"]),
+                selected.get("CE", ""),
+                selected.get("PE", ""),
+                selected.get("FUT", ""),
+                *(
+                    str(tokens.get(selected.get(k, "")) or "")
+                    for k in ("CE", "PE", "FUT")
+                ),
+                *(str(selected_lots.get(selected[k]) or "") for k in ("CE", "PE")),
+            )
+            if phase_key != previous_phase_key:
+                phase += 1
+                previous_phase_key = phase_key
+            scope = f"{event['run_id']}:{phase}"
+            for symbol, lot in selected_lots.items():
+                scope_lots[(scope, symbol)] = lot
+            continue
+        if str(payload.get("source") or "").lower() not in {"ws", "ws_full"}:
+            continue
+        symbol = normalize_symbol(str(payload.get("symbol") or ""))
+        scope = f"{event['run_id']}:{phase}"
+        at = datetime.fromisoformat(event["available_at"]).timestamp()
+        if not math.isfinite(at):
+            continue
+        if canonical_nifty_future_symbol(symbol) is not None and symbol == selected.get(
+            "FUT"
+        ):
+            price = _positive(payload.get("ltp") or payload.get("last_price"))
+            if price is not None and type(payload.get("instrument_token")) is int:
+                if payload["instrument_token"] == tokens.get(symbol):
+                    futures[symbol].append((at, price, scope))
+            continue
+        side = symbol[-2:]
+        if (
+            side not in {"CE", "PE"}
+            or symbol != selected.get(side)
+            or str(payload.get("source") or "").lower() != "ws_full"
+            or payload.get("tradable_quote") is not True
+            or payload.get("depth_available") is not True
+            or type(payload.get("instrument_token")) is not int
+            or payload["instrument_token"] != tokens.get(symbol)
+        ):
+            continue
+        depth = payload.get("depth")
+        if not isinstance(depth, Mapping):
+            continue
+        buy = depth.get("buy")
+        sell = depth.get("sell")
+        if not isinstance(buy, list) or not isinstance(sell, list):
+            continue
+        if (
+            not buy
+            or not sell
+            or not isinstance(buy[0], Mapping)
+            or not isinstance(sell[0], Mapping)
+        ):
+            continue
+        bid = _positive(buy[0].get("price"))
+        ask = _positive(sell[0].get("price"))
+        bid_qty = buy[0].get("quantity")
+        ask_qty = sell[0].get("quantity")
+        top_bid = _positive(payload.get("bid"))
+        top_ask = _positive(payload.get("ask"))
+        if (
+            bid is None
+            or ask is None
+            or bid >= ask
+            or type(bid_qty) is not int
+            or type(ask_qty) is not int
+            or bid_qty <= 0
+            or ask_qty <= 0
+            or top_bid is None
+            or top_ask is None
+            or not math.isclose(bid, top_bid, abs_tol=1e-6)
+            or not math.isclose(ask, top_ask, abs_tol=1e-6)
+        ):
+            continue
+        books[symbol].append((at, bid, ask, bid_qty, ask_qty, scope))
+    for rows in futures.values():
+        rows.sort(key=lambda row: row[0])
+    for rows in books.values():
+        rows.sort(key=lambda row: row[0])
+    return dict(futures), dict(books), scope_lots
+
+
+def observed_futures_markout(
+    ticks: Sequence[tuple[float, float]],
+    *,
+    decision_ts: float,
+    horizon_s: int,
+    side: str,
+) -> tuple[dict[str, float | int] | None, str]:
+    """Require a dense same-futures, causal observed WS path to the horizon."""
+    if side not in {"CE", "PE"} or horizon_s <= 0 or not math.isfinite(decision_ts):
+        raise ValueError("invalid_futures_markout_request")
+    if not ticks:
+        return None, "futures_ws_path_unavailable"
+    times = [row[0] for row in ticks]
+    prior = bisect.bisect_right(times, decision_ts) - 1
+    end = bisect.bisect_right(times, decision_ts + horizon_s)
+    if prior < 0 or not 0 <= decision_ts - times[prior] <= 3:
+        return None, "futures_entry_price_unavailable"
+    path = ticks[prior:end]
+    if len(path) < 4:
+        return None, "futures_forward_path_sparse"
+    if decision_ts + horizon_s - path[-1][0] > 5:
+        return None, "futures_terminal_price_stale"
+    if any(b[0] - a[0] > 10 or b[0] < a[0] for a, b in zip(path, path[1:])):
+        return None, "futures_forward_path_gapped"
+    initial = path[0][1]
+    direction = 1 if side == "CE" else -1
+    moves = [(price - initial) * direction for _, price in path[1:]]
+    return {
+        "entry_futures_price": round(initial, 4),
+        "terminal_futures_price": round(path[-1][1], 4),
+        "signed_terminal_points": round(moves[-1], 4),
+        "favorable_points": round(max(0.0, *moves), 4),
+        "adverse_points": round(min(0.0, *moves), 4),
+        "quote_count": len(path),
+    }, "observed_futures_ws_not_a_trade"
+
+
 def evaluate_opportunities(
     opportunities: Sequence[Any],
     quotes: Mapping[str, Sequence[tuple[float, float, float]]],
@@ -191,6 +397,11 @@ def summarize_groups(
             if isinstance(row.get("markout"), Mapping)
         ]
         sufficient = len(valid) >= min_labelled
+        unlabelled_statuses = Counter(
+            str(row.get("status") or "missing_status")[:64]
+            for row in observations
+            if not isinstance(row.get("markout"), Mapping)
+        )
         result.append(
             {
                 "group": group,
@@ -199,6 +410,7 @@ def summarize_groups(
                 "independent_setups": len(observations),
                 "labelled": len(valid),
                 "unlabelled": len(observations) - len(valid),
+                "unlabelled_status_counts": dict(sorted(unlabelled_statuses.items())),
                 "label_coverage_fraction": round(len(valid) / len(observations), 4),
                 "mean_gross_markout_pct": (
                     round(statistics.mean(valid), 5) if sufficient else None

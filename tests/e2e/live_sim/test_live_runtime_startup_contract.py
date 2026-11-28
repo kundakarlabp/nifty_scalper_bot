@@ -750,14 +750,17 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             ctx.order_manager.apply_broker_order_update
         )
 
+        # Keep synthetic tick event time causal relative to the frozen clock.
+        # The previous +15s/+30s future books were correctly rejected by
+        # order-preflight exchange-event freshness, masking the intended E2E.
         base_tick_time = pd.Timestamp(
             datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)
-        ).tz_convert("UTC")
+        ).tz_convert("UTC") - pd.Timedelta(seconds=1)
         startup_ticks = (
-            ("NSE:NIFTY", basket.spot_token, 25000.0, 1),
-            (basket.futures_symbol, basket.futures_token, 25020.0, 2),
-            (basket.selected_ce, basket.selected_ce_token, 112.0, 3),
-            (basket.selected_pe, basket.selected_pe_token, 96.0, 4),
+            ("NSE:NIFTY", basket.spot_token, 25000.0, 0.1),
+            (basket.futures_symbol, basket.futures_token, 25020.0, 0.2),
+            (basket.selected_ce, basket.selected_ce_token, 112.0, 0.3),
+            (basket.selected_pe, basket.selected_pe_token, 96.0, 0.4),
         )
         for sym, tok, price, offset_seconds in startup_ticks:
             assert core_app._register_and_subscribe_live_symbol(  # noqa: SLF001 - production app subscribe helper
@@ -781,6 +784,19 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
                 failure_message=f"startup tick did not reach DataHub for {sym}",
             )
         _pump_runtime(loop, ctx, iterations=20)
+        # Hydrated spot/futures history contains the previous two closed
+        # minutes. Exercise the real production regime gate, never bypass it.
+        manager = ctx.market_regime_manager
+        assert manager is not None
+        now = pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo))
+        with freeze_time(
+            (now - pd.Timedelta(minutes=1)).to_pydatetime(),
+            real_asyncio=True,
+        ):
+            loop.run_until_complete(manager.refresh_from_indicators())
+        assert not manager.can_trade(), manager.build_diagnostics()
+        loop.run_until_complete(manager.refresh_from_indicators())
+        assert manager.can_trade(), manager.build_diagnostics()
         # Runtime ownership is established by explicit registration above; start only after it.
         ctx.strategy_runner.start()
         _pump_runtime(loop, ctx, iterations=2)
@@ -797,7 +813,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce,
             basket.selected_ce_token,
             116.0,
-            timestamp=base_tick_time + pd.Timedelta(seconds=15),
+            timestamp=pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)),
             buy_qty=1800,
             sell_qty=500,
             tick_direction="UP",
@@ -860,7 +876,7 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce,
             basket.selected_ce_token,
             200.0,
-            timestamp=base_tick_time + pd.Timedelta(seconds=30),
+            timestamp=pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)),
         )
         _wait_until(
             loop,

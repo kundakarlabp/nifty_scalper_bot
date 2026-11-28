@@ -1,3 +1,10 @@
+## Task identity and PR reuse
+
+Task-Key: <!-- stable issue number or short lowercase slug, e.g. `nifty-ws-reconnect`; keep unchanged on follow-up commits -->
+
+- [ ] I searched existing open/draft PRs for this task and **updated the original PR** if one exists.
+- [ ] This PR remains draft during iterative fixes; ready-for-review will run the full final CI suite.
+
 ## Objective
 
 <!-- One sentence: what observable problem/change does this PR address? -->

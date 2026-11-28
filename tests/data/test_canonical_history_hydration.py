@@ -144,6 +144,9 @@ async def test_option_hydration_retains_opening_range_after_mid_session_restart(
         row["timestamp"] == session_open + timedelta(minutes=30) for row in retained
     )
     assert retained[-1]["timestamp"] == rows[-1]["timestamp"]
+    # VWAP needs every intermediate minute, not just the ORB anchor + tail.
+    assert len(retained) == len(rows)
+    assert retained[150]["timestamp"] == session_open + timedelta(minutes=150)
 
 
 @pytest.mark.asyncio

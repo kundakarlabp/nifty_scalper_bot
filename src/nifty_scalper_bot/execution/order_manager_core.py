@@ -5,6 +5,9 @@ Runtime role:
   broker (Kite), handling retries, idempotency, and lifecycle transitions.
 - Coordinates with the bracket manager (SL/TP), position manager, and risk
   guardrails around each order.
+- on_broker_stream_update journals Kite account order-state evidence and sends
+  tracked orders through the existing update owner; unknown orders are not
+  auto-adopted from the account-wide WebSocket.
 
 Position in the pipeline:
     strategies/runner.py -> THIS FILE (order_manager_core.py)
@@ -23,6 +26,9 @@ Safe-edit notes:
   do not confuse the two.
 - Reference midpoints and live entry depth require finite, uncrossed bid/ask
   evidence; malformed depth quantities cannot bypass entry preflight.
+- Quote age uses the shared NSE timestamp contract, preferring attested event
+  time. Explicit invalid, receipt-only, or future timestamps cannot prove LIVE
+  entry freshness.
 - Fast fill confirmation accepts only matching broker order identity (when
   present), positive filled quantity and finite positive execution price.
 - Out-of-order broker statuses cannot reopen terminal orders. Genuine
@@ -31,6 +37,10 @@ Safe-edit notes:
   the existing entry gate stays blocked pending broker reconciliation.
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
+- Selected-option bid/ask admission applies to entry, not protective reductions;
+  an attached canonical bracket exclusively owns stop-triggered exits.
+- LIVE reducing quantities require fresh signed broker net and authoritative
+  instrument-lot proof; an acknowledged low-level order needs a real order ID.
 - Parent-level broker margin screens reuse the existing PositionManager and
   RiskManager. They never place linked children or authorize LIVE baskets.
 - The legacy two-leg "atomic" helper is a sequential simulator-only mechanism;
@@ -87,6 +97,10 @@ from nifty_scalper_bot.data.persistent_state import (
     BracketDict,
     PersistentStateManager,
 )
+from nifty_scalper_bot.data.time_contract import (
+    coerce_market_timestamp,
+    normalize_market_tick_timestamp,
+)
 from nifty_scalper_bot.execution import exceptions as execution_exceptions
 from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingController
 from nifty_scalper_bot.execution.broker_rejects import BrokerReject
@@ -104,6 +118,7 @@ from nifty_scalper_bot.execution.margin_engine import (
     SizingResult,
 )
 from nifty_scalper_bot.execution.options_policy import OptionsExecutionPolicy
+from nifty_scalper_bot.execution.position_snapshot import decode_position_snapshot
 from nifty_scalper_bot.execution.position_manager import (
     OrderIntent,
     PositionManager,
@@ -111,6 +126,9 @@ from nifty_scalper_bot.execution.position_manager import (
     normalize_broker_order_status,
 )
 
+from nifty_scalper_bot.execution.readiness import (
+    quote_timestamp_quality_allows_hard_readiness,
+)
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -3171,6 +3189,7 @@ class OrderManager:
             raise RuntimeError("Blocked non-NIFTY instrument")
         if (
             self._execution_mode_env() == "LIVE"
+            and normalized_intent not in {"EXIT", "REDUCE"}
             and self._is_selected_option_for_live_execution(normalized_symbol)
         ):
             quote = self._get_latest_quote_safe(normalized_symbol) or {}
@@ -3248,7 +3267,11 @@ class OrderManager:
         )
         if is_option_exit:
             exit_validation = self._validate_option_exit_quantity(
-                normalized_symbol, normalized_side, int(quantity), normalized_intent
+                normalized_symbol,
+                normalized_side,
+                int(quantity),
+                normalized_intent,
+                product,
             )
             if exit_validation is not None:
                 _log_order_decision(
@@ -3273,28 +3296,83 @@ class OrderManager:
                 if o.symbol == normalized_symbol
                 and o.side == side
                 and o.status in [OrderStatus.PENDING, OrderStatus.SUBMITTED]
-                # TIMEOUT SAFETY: Only block if order is fresh (< 45 seconds old)
-                # This prevents getting stuck forever if an order is lost in limbo
-                and (current_time - self._timestamp_seconds(o.timestamp) < 45)
+                # Old local entry intents expire from dedup after 45 seconds.
+                # A reducing order remains blocked on broker working reduction
+                # or a completed, still-unreconciled same-side exit.
+                and (
+                    is_system_exit
+                    or current_time - self._timestamp_seconds(o.timestamp) < 45
+                )
             ]
 
+            # A broker COMPLETE can precede its position-snapshot update.
+            # Keep that exact local pending exit frozen until it reconciles.
+            # Also inspect LIVE broker orders when local memory has no pending
+            # record (restart, lost callback, or externally submitted reduction).
+            pending_ids = {
+                str(getattr(order, "order_id", "") or "") for order in pending_orders
+            }
             broker_has_live_pending = False
-            if pending_orders and hasattr(self._broker, "get_orders"):
-                try:
-                    broker_orders = self._broker.get_orders() or []
-                    broker_has_live_pending = any(
-                        isinstance(order, Mapping)
-                        and str(order.get("status") or "").upper()
-                        in {"OPEN", "TRIGGER PENDING", "PENDING"}
-                        and (
-                            str(order.get("tradingsymbol") or "").upper()
-                            == normalized_symbol.split(":", 1)[-1]
-                            or str(order.get("symbol") or "").upper()
-                            == normalized_symbol
+            if pending_orders or (is_system_exit and self.is_live_mode()):
+                broker_orders_fetch = getattr(self._broker, "get_orders", None)
+                if callable(broker_orders_fetch):
+                    try:
+                        broker_orders = broker_orders_fetch()
+                        if not isinstance(broker_orders, list) or any(
+                            not isinstance(row, Mapping) for row in broker_orders
+                        ):
+                            raise ValueError("broker_orderbook_unavailable")
+                        broker_has_live_pending = any(
+                            isinstance(order, Mapping)
+                            and (
+                                str(order.get("status") or "").upper()
+                                in {
+                                    "OPEN",
+                                    "OPEN PENDING",
+                                    "TRIGGER PENDING",
+                                    "PENDING",
+                                    "VALIDATION PENDING",
+                                    "PUT ORDER REQ RECEIVED",
+                                    "MODIFY PENDING",
+                                    "MODIFY VALIDATION PENDING",
+                                    "CANCEL PENDING",
+                                    "PARTIALLY FILLED",
+                                    "",
+                                    "UNKNOWN",
+                                }
+                                or (
+                                    is_system_exit
+                                    and str(order.get("status") or "").upper()
+                                    in {"COMPLETE", "FILLED"}
+                                    and str(order.get("order_id") or "") in pending_ids
+                                )
+                            )
+                            and (
+                                str(order.get("tradingsymbol") or "").upper()
+                                == normalized_symbol.split(":", 1)[-1]
+                                or str(order.get("symbol") or "").upper()
+                                == normalized_symbol
+                            )
+                            and (
+                                not is_system_exit
+                                or (
+                                    str(
+                                        order.get("transaction_type")
+                                        or order.get("side")
+                                        or ""
+                                    ).upper()
+                                    == normalized_side
+                                    and str(order.get("product") or "").upper()
+                                    in {"", str(product or "").upper()}
+                                )
+                            )
+                            for order in broker_orders
                         )
-                        for order in broker_orders
-                    )
-                except Exception:
+                    except Exception:
+                        broker_has_live_pending = True
+                elif is_system_exit and self.is_live_mode():
+                    # No complete broker book means no proof that an independent
+                    # reducing order is absent.  Do not send a second exit.
                     broker_has_live_pending = True
 
             if pending_orders and broker_has_live_pending and not is_system_exit:
@@ -3310,13 +3388,22 @@ class OrderManager:
                     allowed=False, block_reason="fresh_pending_order_exists"
                 )
                 return None
-            elif pending_orders and is_system_exit:
-                self._logger.warning(
-                    "⚠️ PENDING exit order already exists for %s — allowing new exit attempt "
-                    "(dedup bypassed for system exit to prevent position bleed).",
+            elif is_system_exit and broker_has_live_pending:
+                # A second SELL/BUY exit can reverse a still-working reduction.
+                # Retry only after broker-confirmed terminal cancellation or fill.
+                self._logger.critical(
+                    "EXIT_SUBMISSION_HELD symbol=%s reason=broker_reduction_working",
                     normalized_symbol,
-                    extra={"event": "exit_dedup_bypass", "symbol": normalized_symbol},
+                    extra={
+                        "event": "EXIT_SUBMISSION_HELD",
+                        "symbol": normalized_symbol,
+                        "reason": "broker_reduction_working",
+                    },
                 )
+                _log_order_decision(
+                    allowed=False, block_reason="broker_reduction_working"
+                )
+                return None
 
             # ── SINGLE-POSITION GATE (cross-strike, atomic at the choke point) ──
             # One NIFTY option exposure at a time. Reject a second ENTRY while
@@ -4117,7 +4204,17 @@ class OrderManager:
                         contract_expiry=contract_expiry,
                         requested_lots=requested_lots,
                         resolved_lot_size=resolved_lot_size,
-                        trade_provenance=dict(trade_provenance or {}),
+                        trade_provenance={
+                            **dict(trade_provenance or {}),
+                            **(
+                                {"entry_order_original_limit_price": float(price)}
+                                if normalized_intent == "ENTRY"
+                                and side == "BUY"
+                                and normalized_symbol.endswith(("CE", "PE"))
+                                and price is not None
+                                else {}
+                            ),
+                        },
                     )
                     self._register_order(details)
                     # Sync PositionManager's pending-order registry so the
@@ -4691,81 +4788,47 @@ class OrderManager:
         ref = ask if ask > 0 else ltp if ltp > 0 else 1.0
         spread_pct = (spread / ref) * 100.0 if ref > 0 else 999.0
         age_ms = None
-        ts_raw = None
         ts_key = None
-        for key in (
-            "received_at",
-            "wallclock",
-            "exchange_timestamp",
-            "timestamp",
-            "ts",
-            "last_trade_time",
-        ):
-            val = quote.get(key)
-            if val not in (None, ""):
-                ts_raw = val
-                ts_key = key
-                break
-
-        try:
-            parsed_ts = None
-            if isinstance(ts_raw, datetime):
-                if ts_raw.tzinfo is None:
-                    ts_utc = ts_raw.replace(tzinfo=timezone.utc).timestamp()
-                    ts_ist = ts_raw.replace(tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
-                    now = time.time()
-                    if ts_key in ("received_at", "wallclock"):
-                        if (
-                            abs(now - ts_ist) < abs(now - ts_utc)
-                            and abs(now - ts_ist) < 60.0
-                        ):
-                            parsed_ts = ts_ist
-                        else:
-                            parsed_ts = ts_utc
-                    else:
-                        if (
-                            abs(now - ts_utc) < abs(now - ts_ist)
-                            and abs(now - ts_utc) < 60.0
-                        ):
-                            parsed_ts = ts_utc
-                        else:
-                            parsed_ts = ts_ist
+        if quote_timestamp_quality_allows_hard_readiness(quote):
+            # Use MDM's attested canonical time instead of guessing whether a
+            # raw naive broker datetime is UTC or IST from its apparent age.
+            source = str(quote.get("timestamp_source") or "").strip().lower()
+            try:
+                if quote.get("source_timestamp_valid") is True and source:
+                    stamp = coerce_market_timestamp(quote.get("timestamp"))
+                    ts_key = source
                 else:
-                    parsed_ts = ts_raw.timestamp()
-            elif isinstance(ts_raw, (int, float)):
-                raw_val = float(ts_raw)
-                parsed_ts = raw_val / 1000.0 if raw_val > 1_000_000_000_000 else raw_val
-            elif isinstance(ts_raw, str) and ts_raw.strip():
-                iso = ts_raw.strip().replace("Z", "+00:00")
-                parsed_dt = datetime.fromisoformat(iso)
-                if parsed_dt.tzinfo is None:
-                    ts_utc = parsed_dt.replace(tzinfo=timezone.utc).timestamp()
-                    ts_ist = parsed_dt.replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata")
-                    ).timestamp()
-                    now = time.time()
-                    if ts_key in ("received_at", "wallclock"):
-                        if (
-                            abs(now - ts_ist) < abs(now - ts_utc)
-                            and abs(now - ts_ist) < 60.0
-                        ):
-                            parsed_ts = ts_ist
-                        else:
-                            parsed_ts = ts_utc
-                    else:
-                        if (
-                            abs(now - ts_utc) < abs(now - ts_ist)
-                            and abs(now - ts_utc) < 60.0
-                        ):
-                            parsed_ts = ts_utc
-                        else:
-                            parsed_ts = ts_ist
-                else:
-                    parsed_ts = parsed_dt.timestamp()
-            if parsed_ts is not None:
-                age_ms = max(0.0, (time.time() - float(parsed_ts)) * 1000.0)
-        except Exception:
-            age_ms = None
+                    payload = dict(quote)
+                    if payload.get("timestamp") is None:
+                        payload["timestamp"] = payload.get("timestamp_ms")
+                    normalized = normalize_market_tick_timestamp(payload)
+                    stamp = normalized.timestamp
+                    ts_key = normalized.source
+                    # A malformed supplied event clock must not be rescued by
+                    # recent transport receipt. Preserve legacy receipt-only
+                    # diagnostics when there was no event clock at all.
+                    if ts_key.startswith("received_") and any(
+                        payload.get(key) not in (None, "")
+                        for key in (
+                            "exchange_timestamp",
+                            "last_trade_time",
+                            "last_traded_time",
+                            "last_trade_timestamp",
+                            "exchange_update_time",
+                            "last_price_time",
+                            "timestamp",
+                            "timestamp_ms",
+                            "ts",
+                            "date",
+                            "datetime",
+                        )
+                    ):
+                        raise ValueError("unusable market event timestamp")
+                event_age_ms = (time.time() - stamp.timestamp()) * 1000.0
+                if math.isfinite(event_age_ms) and event_age_ms >= 0.0:
+                    age_ms = event_age_ms
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
         return {
             "bid": bid,
             "ask": ask,
@@ -4776,6 +4839,7 @@ class OrderManager:
             "ask_qty": ask_qty,
             "depth_qty": bid_qty + ask_qty,
             "age_ms": age_ms,
+            "timestamp_key": ts_key,
         }
 
     def _trade_plan_rejection_details(
@@ -5121,6 +5185,25 @@ class OrderManager:
         quote = self._get_latest_quote_safe(symbol)
         if quote is None:
             return OrderPreflightResult(False, "quote_unavailable", {})
+        if live_entry and plan.instrument_token is not None:
+            quote_token = quote.get("instrument_token")
+            if quote_token is None:
+                quote_token = quote.get("token")
+            if quote_token is not None:
+                try:
+                    token_matches = int(quote_token) == int(plan.instrument_token)
+                except (TypeError, ValueError, OverflowError):
+                    token_matches = False
+                if not token_matches:
+                    return OrderPreflightResult(
+                        False,
+                        "quote_instrument_token_mismatch",
+                        {"symbol": symbol, "expected_token": plan.instrument_token},
+                    )
+        if live_entry and quote.get("quote_identity_token_mismatch") is True:
+            return OrderPreflightResult(
+                False, "quote_instrument_token_mismatch", {"symbol": symbol}
+            )
         qd = self._extract_quote_diagnostics(quote)
         if qd.get("age_ms") is not None and qd["age_ms"] > plan.max_quote_age_ms:
             return OrderPreflightResult(
@@ -6719,6 +6802,20 @@ class OrderManager:
             sl_price = float(order.stop_loss or 0.0)
             tp_price = float(order.take_profit or 0.0)
             side = str(order.side).upper()
+            provenance = order.trade_provenance or {}
+            anchor_mode = str(
+                provenance.get("bracket_anchor_mode") or "distance"
+            ).lower()
+            original_limit = _positive_exit_provenance_value(
+                provenance.get("entry_order_original_limit_price")
+            )
+            # BracketManager owns the only fill reanchoring. Register at the
+            # broker order's original limit and confirm at its actual fill.
+            bracket_reference_price = (
+                original_limit
+                if anchor_mode == "distance" and original_limit is not None
+                else entry_price
+            )
             if sl_price <= 0:
                 sl_price = round(entry_price * (0.90 if side == "BUY" else 1.10), 1)
             if tp_price <= 0:
@@ -6754,7 +6851,7 @@ class OrderManager:
                     symbol=order.symbol,
                     side=side,
                     qty=qty,
-                    price=entry_price,
+                    price=bracket_reference_price,
                     sl=sl_price,
                     tp=tp_price,
                     tag=order.tag or source,
@@ -7931,12 +8028,91 @@ class OrderManager:
         self._apply_broker_order_update(payload)
 
     def on_order_update(self, order_update: dict) -> None:
-        """Compatibility wrapper for broker websocket order updates."""
+        """Compatibility wrapper for existing broker reconciliation callers."""
 
         order_id = order_update.get("order_id")
         if not order_id:
             return
         self.apply_broker_order_update(str(order_id), order_update)
+
+    def on_broker_stream_update(self, order_update: Mapping[str, Any]) -> None:
+        """Journal Kite WS broker evidence; mutate only orders this owner tracks.
+
+        Kite emits account-wide updates, including external/manual orders and
+        exchange SLs not registered in this manager. Those remain observations;
+        only the existing REST/position/bracket owners may adopt or reconcile them.
+        """
+        if not isinstance(order_update, Mapping):
+            return
+        order_id = str(order_update.get("order_id") or "").strip()
+        status = str(order_update.get("status") or "").strip().upper()
+        if not order_id or not status:
+            return
+        try:
+            qty = int(float(order_update.get("quantity") or 0))
+            price = float(order_update.get("price") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            self._logger.warning(
+                "BROKER_WS_ORDER_UPDATE_INVALID_NUMBERS order_id=%s", order_id
+            )
+            return
+        if qty < 0 or not math.isfinite(price) or price < 0:
+            return
+
+        # Existing asynchronous journal is the only persistence owner.
+        # Preserve actual broker timestamps as supplied; receipt time is not
+        # represented as an exchange event time.
+        evidence_fields = (
+            "exchange",
+            "tradingsymbol",
+            "product",
+            "variety",
+            "order_type",
+            "tag",
+            "status_message",
+            "status_message_raw",
+            "exchange_order_id",
+            "cancelled_quantity",
+            "quantity",
+            "filled_quantity",
+            "pending_quantity",
+            "trigger_price",
+            "price",
+            "average_price",
+            "order_timestamp",
+            "exchange_timestamp",
+            "exchange_update_timestamp",
+            "fill_timestamp",
+        )
+        meta: dict[str, object] = {
+            "event_name": "broker.order_update.observed",
+            "source": "kite_websocket",
+            "broker_status": status,
+            **{
+                key: order_update[key] for key in evidence_fields if key in order_update
+            },
+        }
+        symbol = str(order_update.get("tradingsymbol") or "")
+        exchange = str(order_update.get("exchange") or "")
+        if symbol and exchange and ":" not in symbol:
+            symbol = f"{exchange}:{symbol}"
+        self._log_trade_event(
+            "BROKER_ORDER_STREAM_OBSERVED",
+            symbol=symbol,
+            side=str(order_update.get("transaction_type") or ""),
+            qty=qty,
+            price=price,
+            order_id=order_id,
+            meta=meta,
+        )
+
+        # Never auto-adopt an unrelated account-wide stream event as an entry.
+        # A websocket event can precede local registration; existing broker
+        # reconciliation remains authoritative for that race and for stops.
+        with self._lock:
+            if order_id not in self._orders:
+                return
+            self.apply_broker_order_update(order_id, order_update)
 
     def _is_stale_broker_order_update(
         self, order: OrderDetails, payload: Mapping[str, Any]
@@ -9689,7 +9865,12 @@ class OrderManager:
         self._logger.info("Order monitoring thread stopped")
 
     def _check_force_stop_losses(self) -> None:
-        """Args: None. Returns: None. Raises: Exception."""
+        """Legacy stop fallback; canonical brackets alone own protected exits."""
+        # The bracket manager evaluates executable stops and reconciles exchange
+        # protection. A second LTP-only owner can race the resting stop.
+        canonical = getattr(self, "_bracket_manager", None)
+        if callable(getattr(canonical, "register_virtual_bracket", None)):
+            return
         self._logger.debug(
             "Entered OrderManager._check_force_stop_losses",
             extra={"event": "order_manager_force_sl_enter"},
@@ -9705,7 +9886,10 @@ class OrderManager:
                 stop_loss = getattr(pos, "stop_loss", None)
                 if qty <= 0 or stop_loss is None or float(stop_loss) <= 0:
                     continue
-                if getattr(pos, "state", None) == "force_closed_by_sl":
+                if getattr(pos, "state", None) in {
+                    "force_closed_by_sl",
+                    "force_exit_submitted",
+                }:
                     continue
                 ltp = None
                 _src = self._data_hub or self._market_data
@@ -9724,19 +9908,6 @@ class OrderManager:
                 )
                 if not sl_hit:
                     continue
-                pos.state = "force_closed_by_sl"
-                try:
-                    self._positions.save_state()
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in OrderManager._check_force_stop_losses: %s",
-                        exc,
-                        extra={
-                            "event": "order_manager_force_sl_state_error",
-                            "symbol": symbol,
-                        },
-                        exc_info=exc,
-                    )
                 self._logger.info(
                     f"❌ STOP LOSS HIT → FORCE EXIT | symbol={symbol} "
                     f"entry={float(getattr(pos, 'entry_price', 0.0)):.2f} "
@@ -9753,13 +9924,28 @@ class OrderManager:
                 )
                 exit_side = "SELL" if side == "LONG" else "BUY"
                 try:
-                    self._place_exit_order(
+                    exit_details = self._place_exit_order(
                         symbol=symbol,
                         side=exit_side,
                         quantity=abs(qty),
                         product=getattr(pos, "product", "MIS"),
                         tag="FORCE_SL_EXIT",
                     )
+                    if not str(getattr(exit_details, "order_id", "") or "").strip():
+                        self._logger.error(
+                            "LEGACY_FORCE_SL_NO_BROKER_ORDER_ID symbol=%s", symbol
+                        )
+                        continue
+                    # Broker acknowledgement is not a fill or a flat position.
+                    pos.state = "force_exit_submitted"
+                    try:
+                        self._positions.save_state()
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.error(
+                            "LEGACY_FORCE_SL_PENDING_PERSIST_FAILED symbol=%s error=%s",
+                            symbol,
+                            exc,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self._logger.error(
                         "Failure in OrderManager._check_force_stop_losses: %s",
@@ -11692,9 +11878,14 @@ class OrderManager:
         if payload_overrides:
             payload.update(payload_overrides)
         response = self._submit_order_with_retry(payload)
-        order_id = str(response.get("order_id"))
-        if not order_id:
+        broker_order_id = response.get("order_id")
+        if (
+            broker_order_id is None
+            or isinstance(broker_order_id, bool)
+            or str(broker_order_id).strip().lower() in {"", "none", "null", "0"}
+        ):
             raise OrderPlacementError("Broker response missing order_id")
+        order_id = str(broker_order_id).strip()
         status = self._parse_status(response.get("status"))
         message = response.get("message") or response.get("status_message")
         timestamp = datetime.now(timezone.utc)
@@ -12089,6 +12280,16 @@ class OrderManager:
         )
         if quantity <= 0:
             raise OrderPlacementError("Exit quantity must be positive")
+        # Legacy panic/force-stop/reduce-only routes call _place_single_order
+        # directly. Apply the same broker-backed guard as public place_order.
+        if normalize_symbol(symbol).endswith(("CE", "PE")):
+            blocked = self._validate_option_exit_quantity(
+                symbol, side, quantity, "EXIT", product or "MIS"
+            )
+            if blocked is not None:
+                raise OrderPlacementError(
+                    f"Exit preflight blocked ({blocked['reason']})"
+                )
 
         refresh: Callable[[str], None] | None = None
         market_data = self._market_data
@@ -12111,50 +12312,36 @@ class OrderManager:
             planned_product: str, validity: str, variety: str
         ) -> tuple[bool, str | None, str | None]:
             nonlocal last_details
-            overrides = {
-                "product": planned_product,
-                "validity": validity,
-                "variety": variety,
-            }
+            # The public owner alone holds the durable exit reservation and
+            # broker-state deduplication. The old direct _place_single_order
+            # call bypassed those cross-path protections.
             try:
-                last_details = self._place_single_order(
+                order_id = self.place_order(
                     symbol=symbol,
                     side=side,
                     quantity=quantity,
                     order_type=OrderType.MARKET,
                     price=None,
                     product=planned_product,
+                    variety=variety,
                     tag=tag,
-                    payload_overrides=overrides,
+                    check_risk=False,
+                    intent="EXIT",
+                    strategy_name="legacy_protective_exit",
                 )
-            except OrderPlacementError as exc:
+            except Exception as exc:  # noqa: BLE001 - uncertain stays reserved
                 self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_attempt_failed",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                        "product": planned_product,
-                        "validity": validity,
-                        "variety": variety,
-                    },
+                    "LEGACY_EXIT_NATIVE_SUBMISSION_ERROR symbol=%s error_type=%s",
+                    symbol,
+                    type(exc).__name__,
                 )
                 return False, None, str(exc)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _place_exit_order: %s",
-                    exc,
-                    extra={
-                        "event": "place_exit_order_unexpected",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": quantity,
-                    },
-                )
-                return False, None, str(exc)
-            return True, last_details.order_id, None
+            if not order_id:
+                return False, None, "native_exit_owner_blocked"
+            last_details = self._orders.get(str(order_id))
+            if last_details is None:
+                return False, None, "native_exit_order_not_registered"
+            return True, str(order_id), None
 
         try:
             result = plan_and_send_exit(
@@ -14456,7 +14643,12 @@ class OrderManager:
         return True
 
     def _validate_option_exit_quantity(
-        self, symbol: str, side: str, quantity: int, intent: str
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        intent: str,
+        product: str | None = None,
     ) -> dict[str, Any] | None:
         getter = getattr(self._positions, "get_position", None)
         position = None
@@ -14469,7 +14661,62 @@ class OrderManager:
                     break
         open_units = abs(int(getattr(position, "quantity", 0) or 0))
         position_side = str(getattr(position, "side", "") or "").upper()
-        if open_units <= 0:
+        try:
+            live = bool(self.is_live_mode())
+        except AttributeError:
+            # Partially initialized recovery/test owners have no live authority.
+            live = False
+        if live:
+            # A locally held one-lot position can already be flat at Kite.
+            # Read the signed broker NET position before any reducing order.
+            fetcher = getattr(self._broker, "get_positions", None)
+            if not callable(fetcher):
+                fetcher = getattr(self._broker, "positions", None)
+            try:
+                if not callable(fetcher):
+                    raise ValueError("broker_position_fetcher_unavailable")
+                snapshot = decode_position_snapshot(fetcher())
+                matching_rows = [
+                    row
+                    for row in snapshot.rows
+                    if row.symbol == normalize_symbol(symbol)
+                ]
+                expected_product = str(product or "").strip().upper()
+                broker_products = {
+                    str(row.raw.get("product") or "").strip().upper()
+                    for row in matching_rows
+                }
+                if matching_rows and (not expected_product or "" in broker_products):
+                    return {
+                        "reason": "exit_broker_product_unavailable",
+                        "symbol": symbol,
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                if matching_rows and expected_product not in broker_products:
+                    return {
+                        "reason": "exit_broker_product_mismatch",
+                        "symbol": symbol,
+                        "broker_product": ",".join(sorted(broker_products)),
+                        "requested_product": expected_product,
+                        "requested_exit_units": quantity,
+                        "intent": intent,
+                    }
+                net_qty = snapshot.quantity_for(
+                    symbol, product=expected_product or None
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown is not flat
+                return {
+                    "reason": "exit_broker_position_unavailable",
+                    "symbol": symbol,
+                    "requested_exit_units": quantity,
+                    "error_type": type(exc).__name__,
+                    "intent": intent,
+                }
+            open_units = abs(net_qty)
+            position_side = "LONG" if net_qty > 0 else ("SHORT" if net_qty < 0 else "")
+        elif open_units <= 0:
             broker_positions = getattr(self._broker, "query_positions", None)
             if callable(broker_positions):
                 broker_qty = int((broker_positions() or {}).get(symbol, 0) or 0)
@@ -14494,7 +14741,28 @@ class OrderManager:
             try:
                 lot_size = self._lot_size_for_symbol(symbol)
             except OrderPlacementError:
-                if quantity != open_units:
+                # Preserve a previously broker-instrument-validated entry lot
+                # across transient resolver outages. Never trust position size
+                # itself as proof that 35 or 66 is a valid exchange lot.
+                entry_id = str(getattr(position, "order_id", "") or "")
+                entry = self._orders.get(entry_id)
+                try:
+                    remembered = int(getattr(entry, "resolved_lot_size", 0) or 0)
+                except (TypeError, ValueError):
+                    remembered = 0
+                if (
+                    live
+                    and entry is not None
+                    and normalize_symbol(str(getattr(entry, "symbol", "")))
+                    == normalize_symbol(symbol)
+                    and str(getattr(entry, "side", "")).upper() == "BUY"
+                    and str(getattr(entry, "intent", "")).upper() == "ENTRY"
+                    and remembered > 0
+                ):
+                    lot_size = remembered
+                    if quantity % lot_size != 0:
+                        reason = "exit_quantity_not_lot_multiple"
+                elif live or quantity != open_units:
                     reason = "exit_lot_size_unresolved"
             else:
                 if lot_size <= 0:

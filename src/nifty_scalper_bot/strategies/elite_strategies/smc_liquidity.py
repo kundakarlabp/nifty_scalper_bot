@@ -28,6 +28,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     SMCStrategyConfig,
 )
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
+from nifty_scalper_bot.strategies.smc_entry_quality import assess_smc_entry_extension
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     resolve_context_age_seconds,
 )
@@ -1259,9 +1260,14 @@ class SMCStrategy(EliteStrategy):
                     if present
                 ]
                 local_support_present = bool(local_support_sources)
-                regime = normalize_regime(
-                    indicators.get("regime") or indicators.get("market_regime")
-                )
+                raw_regime = indicators.get("regime") or indicators.get("market_regime")
+                regime = normalize_regime(raw_regime)
+                if raw_regime is not None and regime in {
+                    MarketRegime.UNKNOWN,
+                    MarketRegime.LOW_ACTIVITY,
+                }:
+                    self._no_vote("smc_regime_unverified_or_inactive")
+                    return None
                 # A single BOS/CHOCH generated from the option premium is
                 # correlated with the same option's flow/price observation.
                 # In RANGE it cannot independently validate the futures sweep.
@@ -1344,6 +1350,23 @@ class SMCStrategy(EliteStrategy):
                     1 for name in feature_names if indicators.get(name) is not None
                 ) / float(len(feature_names))
                 context_age_seconds = resolve_context_age_seconds(indicators)
+                # Observational only: a confirmed sweep can still be very late
+                # or premium-extended. Do not transplant the VWAP entry veto.
+                vwap_source, option_vwap = next(
+                    (
+                        (key, indicators[key])
+                        for key in ("exchange_vwap", "session_vwap", "vwap")
+                        if indicators.get(key) is not None
+                    ),
+                    ("unavailable", None),
+                )
+                smc_extension_audit = assess_smc_entry_extension(
+                    premium=current_price,
+                    premium_vwap=option_vwap,
+                    option_atr=option_atr,
+                    sweep_age_minutes=age_minutes,
+                    vwap_source=vwap_source,
+                )
                 capacity_rejection_retry = isinstance(
                     event.get("retry_after_confirmation_ts"),
                     datetime,
@@ -1431,6 +1454,7 @@ class SMCStrategy(EliteStrategy):
                     "smc_regime": regime.value,
                     "smc_quality_corroborated": quality_corroborated,
                     "sweep_age_minutes": round(age_minutes, 4),
+                    "smc_entry_extension_audit": smc_extension_audit,
                     "smc_block_reason": "",
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
@@ -1457,6 +1481,15 @@ class SMCStrategy(EliteStrategy):
                         current_price,
                         max(1.0, option_atr * 1.5, current_price * 0.03),
                     ),
+                )
+                log_throttled(
+                    LOGGER,
+                    f"smc_extension_audit:{symbol}:{metadata['setup_id']}",
+                    "SMC_ENTRY_EXTENSION_AUDIT symbol=%s setup_id=%s result=%s",
+                    symbol,
+                    metadata["setup_id"],
+                    smc_extension_audit,
+                    interval_sec=30.0,
                 )
                 LOGGER.info(
                     "STRATEGY_EVIDENCE strategy=SMC side=%s source=%s "

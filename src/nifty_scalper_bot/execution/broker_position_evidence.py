@@ -1,4 +1,13 @@
-"""Typed broker-position evidence for fail-closed reconciliation."""
+"""Purpose: Return conservative, typed broker-position evidence for reconciliation.
+
+Responsibilities:
+- Validate integer broker quantities and normalize contract symbols.
+- Preserve unknown state for duplicate or cross-product exposures.
+- Distinguish complete empty-position responses from ambiguous payloads.
+
+Boundaries: Canonical live placement uses product-qualified position_snapshot.
+Safety: Opposing broker products must never prove that a position is flat.
+"""
 
 from __future__ import annotations
 
@@ -63,7 +72,7 @@ def normalize_authoritative_quantity(value: object) -> int | None:
 
 
 def _row_qty(row: Mapping[str, Any]) -> int | None:
-    value = row.get("quantity", row.get("net_quantity", row.get("net", 0)))
+    value = row.get("quantity", row.get("net_quantity", row.get("net")))
     return normalize_authoritative_quantity(value)
 
 
@@ -114,8 +123,12 @@ def evidence_from_positions(
             parsed_qty = _row_qty(row)
             if parsed_qty is None:
                 raise ValueError("position quantity is not an integer")
+            # A symbol can have independent MIS and NRML exposures.  Never
+            # convert a positive position and an opposing negative one to flat.
+            if matched:
+                raise ValueError("multiple broker position rows for symbol")
             matched = True
-            net += parsed_qty
+            net = parsed_qty
     except (TypeError, ValueError) as exc:
         return BrokerPositionEvidence(
             BrokerPositionState.UNKNOWN,

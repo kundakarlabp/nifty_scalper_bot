@@ -128,3 +128,56 @@ def test_funds_delegate_failure_does_not_resurrect_cached_balance() -> None:
 def test_real_zero_cash_overrides_stale_positive_snapshot() -> None:
     hub = DataHub(_AsyncAccountMDM(live=0.0))
     assert hub.get_available_balance(force=True) == 0.0
+
+
+def test_quote_identity_never_relabels_old_basket_token_as_current() -> None:
+    old_tick = _tick(0.2)
+    old_token = old_tick["instrument_token"]
+    new_token = old_token + 1
+    hub = _hub(mdm_tick=old_tick, cached_tick=old_tick)
+    hub._token_by_symbol[_SYMBOL] = new_token
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+
+    assert quote is not None
+    assert quote["instrument_token"] == old_token
+    assert quote["quote_identity_token_mismatch"] is True
+    assert quote["tradable_quote"] is False
+    assert quote["hard_readiness_eligible"] is False
+
+
+def test_zero_broker_token_is_invalid_not_missing_identity() -> None:
+    hub = _hub(mdm_tick=None, cached_tick={})
+    hub._token_by_symbol[_SYMBOL] = 12345
+
+    quote = hub._stamp_quote_identity(_SYMBOL, {"instrument_token": 0, "ltp": 100.0})
+
+    assert quote["instrument_token"] == 0
+    assert quote["quote_identity_token_mismatch"] is True
+    assert quote["tradable_quote"] is False
+
+
+def test_quote_identity_prefers_current_mdm_mapping_over_old_facade_token() -> None:
+    old_tick = _tick(0.2)
+    current_token = _TOKEN + 1
+    current_tick = {
+        **old_tick,
+        "instrument_token": current_token,
+        "token": current_token,
+    }
+    hub = _hub(mdm_tick=current_tick, cached_tick=old_tick)
+    hub._token_by_symbol[_SYMBOL] = _TOKEN
+    hub._mdm._token_by_symbol = {_SYMBOL: current_token}
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["instrument_token"] == current_token
+    assert not quote.get("quote_identity_token_mismatch")
+
+    hub._mdm.tick = old_tick
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["instrument_token"] == _TOKEN
+    assert quote["quote_identity_token_mismatch"] is True
+    assert quote["hard_readiness_eligible"] is False
+    hub.close()

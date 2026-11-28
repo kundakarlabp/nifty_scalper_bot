@@ -44,8 +44,8 @@ Protective exits and reconciliation continue independently of new-entry approval
 - **Data:** `InstrumentManager` selects symbols; `MarketDataManager` owns live quote/history quality and subscriptions; `CandleEngine` constructs bars; `DataHub` is a read facade.
 - **Decision:** `StrategyManager` establishes underlying direction; `StrategyRunner` evaluates candidate option entries. Missing/stale evidence fails closed.
 - **Money:** `RiskManager` sizes/limits; `RuntimeOrderManager` owns final broker submission; `PositionManager` reconciles exposure; `BoundBracketManager` manages protective exits. Do not create alternate order paths.
-- **Operations:** `main.py` hosts HTTP health/status; Telegram and Streamlit provide operator surfaces but do not independently own strategy state.
-- **Deployment:** GitHub `main` is the code release source; the Lightsail updater must validate candidate code and verify the active process after deployment. See the runbook for hold/rollback behavior.
+- **Operations:** `main.py` hosts HTTP health/status; the existing AWS-hosted admin dashboard and Streamlit provide operator surfaces but do not independently own strategy state. Use direct AWS endpoints and private Supabase heartbeat/log archives for remote monitoring; see [production HTTP access](docs/ops/PRODUCTION_HTTP_ACCESS.md).
+- **Deployment:** GitHub `main` is the code release source; validated code may be merged **any time, including market hours**. The Lightsail updater independently validates candidate code and verifies the active process after deployment. Broker-safe activation can be deferred for open exposure or failed safety checks, never for a clock-based merge blackout. See the runbook for hold/rollback behavior.
 
 ## Development and checks
 

@@ -296,3 +296,47 @@ def test_prepare_rest_tick_omits_all_invalid_broker_fields_for_received_at_fallb
     assert prepared["received_at"] == 1784788200.0
     assert normalized is not None
     assert normalized["timestamp_source"] == "received_at"
+
+
+def test_wrong_contract_token_is_rejected_before_candle_processing() -> None:
+    mdm = _mdm()
+    mdm._symbol_by_token[2] = "NFO:Y"
+    mdm._token_to_symbol[2] = "NFO:Y"
+    mdm._symbol_to_token = {"NFO:X": 1, "NFO:Y": 2}
+    mdm._token_by_symbol = dict(mdm._symbol_to_token)
+    stamp = "2026-07-23T09:30:04+05:30"
+    assert mdm._normalize_ws_tick(_tick(symbol="NFO:Y", timestamp=stamp)) is None
+    assert (
+        mdm._normalize_ws_tick(_tick(instrument_token=0, token=1, timestamp=stamp))
+        is None
+    )
+    assert mdm._normalize_ws_tick(_tick(symbol="NFO:X", timestamp=stamp)) is not None
+
+
+def test_old_subscription_generation_cannot_enter_candle_processing() -> None:
+    mdm = _mdm()
+    mdm._subscription_generation = 4
+    mdm._symbol_subscription_generation = {"NFO:X": 4}
+    stamp = "2026-07-23T09:30:04+05:30"
+    assert (
+        mdm._normalize_ws_tick(_tick(timestamp=stamp, _mdm_subscription_generation=3))
+        is None
+    )
+    assert (
+        mdm._normalize_ws_tick(_tick(timestamp=stamp, _mdm_subscription_generation=4))
+        is not None
+    )
+
+
+def test_original_ingress_receipt_survives_canonical_normalization() -> None:
+    mdm = MarketDataManager(kite=None)
+    mdm.register_symbol("NFO:X", 1)
+    received = 1_784_788_201.0
+    raw = _tick(timestamp=1_784_788_200.0, _mdm_received_at=received)
+    normalized = mdm._normalize_ws_tick(raw)
+    assert normalized is not None
+    assert normalized["received_at"] == received
+    live = mdm.normalize_live_tick(normalized)
+    assert live is not None
+    assert live["received_at"] == received
+    assert mdm._normalize_ws_tick(_tick(_mdm_received_at=received)) is None
