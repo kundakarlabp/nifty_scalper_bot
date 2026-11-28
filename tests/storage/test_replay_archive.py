@@ -213,6 +213,7 @@ def test_replay_headroom_accepts_larger_tape_only_with_disk_reserve(
     assert fallback.stats()["capacity_guard"] == "insufficient_disk_headroom"
     fallback.close()
 
+
 def test_raw_wire_receipt_verifier_checks_each_symbol_epoch(tmp_path) -> None:
     """Wire evidence must match upstream per-epoch counts and event ordering."""
     from datetime import timedelta

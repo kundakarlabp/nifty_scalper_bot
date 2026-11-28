@@ -441,9 +441,7 @@ def verify_raw_ingress_session(path: Path) -> dict[str, Any]:
         bucket[identity] = bucket.get(identity, 0) + 1
 
     for run, by_identity in seen.items():
-        integrity = json.loads(
-            (path.parent / f"{run}.integrity.json").read_text()
-        )
+        integrity = json.loads((path.parent / f"{run}.integrity.json").read_text())
         starting = integrity.get("upstream_start")
         ending = integrity.get("upstream_latest")
         if not isinstance(starting, dict) or not isinstance(ending, dict):
